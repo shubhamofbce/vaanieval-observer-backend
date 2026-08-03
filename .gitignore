@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.DS_Store
+*.log
+
+# Local runtime data (SQLite DB + uploaded audio/event objects)
+data/

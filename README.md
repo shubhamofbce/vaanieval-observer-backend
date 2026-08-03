@@ -1,9 +1,12 @@
 # vaanieval-observer-backend
 
-FastAPI backend for the Vaani Observer voice-call observability platform. It ingests
+FastAPI dashboard service for the Vaani Observer voice-call observability platform. It ingests
 session metadata, audio tracks and event streams uploaded by the
 [`vaanieval-observer-nodejs-sdk`](https://github.com/shubhamofbce/vaanieval-observer-nodejs-sdk),
 persists them locally, and serves a small dashboard for inspecting recorded calls.
+
+It is normally checked out as `dashboard/` next to `nodejs-sdk/` in a `vaanieval-observer`
+working directory.
 
 ## Requirements
 

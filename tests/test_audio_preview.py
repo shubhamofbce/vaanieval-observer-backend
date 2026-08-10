@@ -9,6 +9,34 @@ from io import BytesIO
 from conftest import create, upload
 
 
+def test_serves_the_stereo_call_and_virtual_speaker_channels(client):
+    audio = {
+        "call": {
+            "file": "call.audio",
+            "encoding": "pcm_s16le",
+            "sample_rate_hz": 24000,
+            "channels": 2,
+            "channel_layout": {"left": "agent", "right": "caller"},
+        }
+    }
+    payload = struct.pack("<4h", 3000, 1000, 4000, 2000)
+    create(client, "call-1", audio=audio)
+    upload(client, "call-1", "call.audio", payload)
+
+    stereo = client.get("/v1/sessions/call-1/audio/call?preview=wav")
+    caller = client.get("/v1/sessions/call-1/audio/caller?preview=wav")
+    agent = client.get("/v1/sessions/call-1/audio/agent?preview=wav")
+
+    with wave.open(BytesIO(stereo.content)) as decoded:
+        assert decoded.getnchannels() == 2
+        assert decoded.getframerate() == 24000
+        assert decoded.readframes(2) == payload
+    with wave.open(BytesIO(caller.content)) as decoded:
+        assert struct.unpack("<2h", decoded.readframes(2)) == (1000, 2000)
+    with wave.open(BytesIO(agent.content)) as decoded:
+        assert struct.unpack("<2h", decoded.readframes(2)) == (3000, 4000)
+
+
 def test_wraps_pcm_track_in_a_playable_wav(client):
     audio = {"caller": {"file": "caller.audio", "encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": 1}}
     create(client, "call-1", audio=audio)
@@ -107,3 +135,49 @@ def test_renders_equal_length_timeline_tracks_and_a_combined_track(client):
         mixed_samples = struct.unpack("<10h", decoded_mixed.readframes(10))
     assert caller_samples[0] == mixed_samples[0] == 1000
     assert agent_samples[5] == mixed_samples[5] == 2000
+
+
+def test_mixed_track_averages_overlapping_speech_without_clipping(client):
+    audio = {
+        "caller": {"file": "caller.audio", "encoding": "pcm_s16le", "sample_rate_hz": 1000, "channels": 1},
+        "agent": {"file": "agent.audio", "encoding": "pcm_s16le", "sample_rate_hz": 1000, "channels": 1},
+    }
+    create(client, "call-1", audio=audio, duration_ms=10)
+    upload(client, "call-1", "caller.audio", struct.pack("<h", 30000))
+    upload(client, "call-1", "agent.audio", struct.pack("<h", 30000))
+    upload(
+        client,
+        "call-1",
+        "events.jsonl",
+        b'{"kind":"audio_chunk","track":"caller","occurred_at_ms":0,"byte_length":2}\n'
+        b'{"kind":"audio_chunk","track":"agent","occurred_at_ms":0,"byte_length":2}\n',
+    )
+
+    mixed = client.get("/v1/sessions/call-1/audio/mixed?preview=wav").content
+    with wave.open(BytesIO(mixed)) as decoded:
+        samples = struct.unpack("<10h", decoded.readframes(10))
+    assert samples[0] == 30000
+    assert max(samples) < 32767
+
+
+def test_cuts_a_preview_down_to_a_millisecond_window(client):
+    """Sharing evidence means sending the seconds that went wrong, not the call."""
+    audio = {"caller": {"file": "caller.audio", "encoding": "pcm_s16le", "sample_rate_hz": 1000, "channels": 1}}
+    create(client, "call-1", audio=audio)
+    upload(client, "call-1", "caller.audio", struct.pack("<4h", 10, 20, 30, 40))
+
+    response = client.get("/v1/sessions/call-1/audio/caller?preview=wav&from_ms=1&to_ms=3")
+
+    assert response.status_code == 200
+    assert 'filename="caller-1-3.wav"' in response.headers["content-disposition"]
+    with wave.open(BytesIO(response.content)) as clip:
+        assert clip.getnframes() == 2
+        assert struct.unpack("<2h", clip.readframes(2)) == (20, 30)
+
+
+def test_rejects_a_clip_with_nothing_in_it(client):
+    audio = {"caller": {"file": "caller.audio", "encoding": "pcm_s16le", "sample_rate_hz": 1000, "channels": 1}}
+    create(client, "call-1", audio=audio)
+    upload(client, "call-1", "caller.audio", struct.pack("<4h", 10, 20, 30, 40))
+
+    assert client.get("/v1/sessions/call-1/audio/caller?preview=wav&from_ms=9&to_ms=9").status_code == 422

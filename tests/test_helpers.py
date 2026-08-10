@@ -147,5 +147,150 @@ def test_session_summary_defaults_a_missing_duration_to_zero(api, data_dir):
 
 
 def test_object_allow_list_matches_the_sdk_package_layout(api):
-    assert api.ALLOWED_OBJECTS == {"events.jsonl", "caller.audio", "agent.audio"}
+    assert api.ALLOWED_OBJECTS == {"events.jsonl", "call.audio", "caller.audio", "agent.audio"}
     assert api.MAX_UPLOAD_BYTES == 128 * 1024 * 1024
+
+
+# ------------------------------------------------- LLM call de-duplication
+
+
+def _llm(event_id: str, started: int, ended: int, **extra) -> dict:
+    op = operation(event_id=event_id, type_="llm", started_at_ms=started, turn_id="turn-1", **extra)
+    op["ended_at_ms"] = ended
+    op["duration_ms"] = ended - started
+    return op
+
+
+def test_a_model_call_recorded_by_both_the_framework_and_the_transport_counts_once(api):
+    """The framework span and the HTTP request that served it are one call, not two."""
+    framework = _llm("fw", 39914, 46907, response={"total_tokens": 6587, "ttft_ms": 6954})
+    transport = _llm("http", 39916, 46691, response={"status": 200, "body": {"_truncated": True}})
+    turn = api.group_turns([framework, transport])[0]
+    assert turn["llm_calls"] == 1
+    assert turn["llm_ms"] == 6993
+    # The transport span still has to be reachable: it is the only place the
+    # request body was captured.
+    assert len(turn["operations"]) == 2
+
+
+def test_the_retries_a_framework_span_covers_do_not_inflate_the_call_count(api):
+    framework = _llm("fw", 51299, 72466, response={"total_tokens": 7159})
+    attempt = _llm("a1", 51302, 61990, status="error", response={})
+    retry = _llm("a2", 62103, 72051, response={"status": 200})
+    turn = api.group_turns([framework, attempt, retry])[0]
+    assert turn["llm_calls"] == 1
+    assert turn["llm_ms"] == 21167
+
+
+def test_an_attempt_no_framework_span_covers_is_still_its_own_call(api):
+    """A call that only ever failed emits no metrics, so the HTTP span is all there is."""
+    framework = _llm("fw", 92968, 101370, response={"total_tokens": 7079})
+    covered = _llm("a1", 92971, 101054, response={"status": 200})
+    orphan = _llm("a2", 101379, 112043, status="error", response={})
+    turn = api.group_turns([framework, covered, orphan])[0]
+    assert turn["llm_calls"] == 2
+
+
+def test_turns_without_framework_metrics_keep_every_transport_span(api):
+    only_http = [
+        _llm("a1", 100, 200, status="error", response={}),
+        _llm("a2", 300, 400, status="error", response={}),
+    ]
+    assert api.group_turns(only_http)[0]["llm_calls"] == 2
+
+
+def test_model_time_can_never_exceed_the_turn_it_happened_in(api):
+    """The bug this guards: summing both span classes reported more model time than the turn lasted."""
+    ops = [
+        _llm("fw", 0, 7000, response={"total_tokens": 10}),
+        _llm("http", 2, 6800, response={"status": 200}),
+    ]
+    turn = api.group_turns(ops)[0]
+    assert turn["llm_ms"] <= turn["duration_ms"]
+
+
+def _stt(ended: int, turn: str = "turn-1") -> dict:
+    op = operation(event_id=f"stt-{turn}", type_="stt", started_at_ms=0, turn_id=turn)
+    op["ended_at_ms"] = ended
+    return op
+
+
+def _tts(started: int, ended: int, turn: str = "turn-1", **extra) -> dict:
+    op = operation(event_id=f"tts-{turn}", type_="tts", started_at_ms=started, turn_id=turn, **extra)
+    op["ended_at_ms"] = ended
+    op["duration_ms"] = ended - started
+    return op
+
+
+def test_first_audio_falls_back_to_the_agent_track_when_the_span_lacks_the_milestone(api):
+    """The bug this guards: the headline response KPIs were blank on every real call.
+
+    The SDK stamped the `audio_chunk` milestone only when the TTS span already
+    existed, but the frames are synthesized before the metrics that open it, so
+    the milestone was never written and `time_to_first_audio_ms` was always None.
+    """
+    ops = [_stt(13941), _tts(21187, 23516)]
+    assert api.group_turns(ops)[0]["time_to_first_audio_ms"] is None
+    turn = api.group_turns(ops, [634.0, 21438.0, 21458.0, 50557.0])[0]
+    assert turn["time_to_first_audio_ms"] == 21438 - 13941
+
+
+def test_the_milestone_still_wins_over_the_agent_track(api):
+    ops = [
+        _stt(1000),
+        _tts(2000, 3000, milestones={"audio_chunk": {"occurred_at_ms": 2100}}),
+    ]
+    turn = api.group_turns(ops, [2500.0])[0]
+    assert turn["time_to_first_audio_ms"] == 1100
+
+
+def test_a_turn_whose_reply_never_came_does_not_claim_the_next_turns_audio(api):
+    """A turn with no TTS span produced no audio; borrowing the next reply's
+    first frame would report a wait the caller never experienced."""
+    ops = [_stt(60884, "turn-4"), _stt(63491, "turn-5"), _tts(70778, 74067, "turn-5")]
+    turns = {turn["turn_id"]: turn for turn in api.group_turns(ops, [71056.0])}
+    assert turns["turn-4"]["time_to_first_audio_ms"] is None
+    assert turns["turn-5"]["time_to_first_audio_ms"] == 71056 - 63491
+
+
+def test_audio_that_precedes_the_speech_mark_is_not_a_negative_wait(api):
+    """Agent audio still playing when the caller stopped is the previous reply,
+    not an instantaneous one; it must not report a negative response time."""
+    ops = [_stt(5000), _tts(1000, 8000)]
+    assert api.group_turns(ops, [1200.0])[0]["time_to_first_audio_ms"] is None
+
+
+def test_presentation_windows_prefer_real_speech_and_tts_pcm_playout(api):
+    stt = _stt(15000, "turn-3")
+    stt["response"] = {"words": [{"text": "hello", "start_ms": 20368, "end_ms": 20800}]}
+    stt["milestones"] = {"speech_started": {"occurred_at_ms": 11959}, "speech_ended": {"occurred_at_ms": 21100}}
+    tts = _tts(12000, 15444, "turn-2", response={"audio_ms": 7120})
+    tts["event_id"] = "tts-2"
+    api.attach_presentation_windows([stt, tts], [
+        {"kind": "audio_chunk", "track": "agent", "operation_id": "tts-2", "playout_at_ms": 12226, "duration_ms": 7120},
+    ])
+    assert stt["presentation_window"] == {
+        "from_ms": 20368, "to_ms": 20800, "track": "caller", "kind": "speech", "source": "word_timestamps", "confidence": "observed",
+        "provider_span": {"from_ms": 0, "to_ms": 15000},
+    }
+    assert tts["presentation_window"]["from_ms"] == 12226
+    assert tts["presentation_window"]["to_ms"] == 19346
+    assert tts["presentation_window"]["confidence"] == "exact"
+
+
+def test_tts_presentation_fallback_uses_pcm_duration_not_provider_completion(api):
+    tts = _tts(12000, 15444, response={"audio_ms": 7120}, milestones={"audio_chunk": {"occurred_at_ms": 12226, "last_at_ms": 15444}})
+    api.attach_presentation_windows([tts], [])
+    assert tts["presentation_window"]["to_ms"] == 19346
+    assert tts["presentation_window"]["source"] == "inferred_response_audio_duration"
+
+
+def test_attributed_tts_keeps_disjoint_playout_segments(api):
+    tts = _tts(100, 500, response={"audio_ms": 300})
+    api.attach_presentation_windows([tts], [
+        {"kind": "audio_chunk", "track": "agent", "operation_id": tts["event_id"], "playout_at_ms": 200, "duration_ms": 100},
+        {"kind": "audio_chunk", "track": "agent", "operation_id": tts["event_id"], "playout_at_ms": 600, "duration_ms": 200},
+    ])
+    window = tts["presentation_window"]
+    assert window["segments"] == [{"from_ms": 200, "to_ms": 300}, {"from_ms": 600, "to_ms": 800}]
+    assert (window["from_ms"], window["to_ms"]) == (200, 800)

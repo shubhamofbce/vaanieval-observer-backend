@@ -30,18 +30,23 @@
     </div>
   </header>
 
-  <div class="shell">
+  <div class="shell" id="shell">
     <nav class="rail" aria-label="Recorded calls">
       <div class="rail-head">
         <h2>Calls <span class="chip" id="session-count" aria-live="polite"></span></h2>
+        <button type="button" class="rail-toggle" id="rail-toggle" aria-expanded="true" aria-controls="rail-panel" title="Hide the call list  ·  b" aria-label="Hide the call list">
+          <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path fill="currentColor" d="M10.03 3.47a.75.75 0 0 1 0 1.06L6.56 8l3.47 3.47a.75.75 0 1 1-1.06 1.06L4.97 8.53a.75.75 0 0 1 0-1.06l4-4a.75.75 0 0 1 1.06 0Z"/></svg>
+        </button>
       </div>
-      <div class="rail-search">
-        <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path fill="currentColor" d="M7 2a5 5 0 1 1-3.2 8.85l-2.32 2.33a.75.75 0 0 1-1.06-1.06l2.33-2.33A5 5 0 0 1 7 2Zm0 1.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"/></svg>
-        <input type="search" id="session-search" placeholder="Filter by agent or id" aria-label="Filter calls by agent or session id" autocomplete="off">
+      <div class="rail-panel" id="rail-panel">
+        <div class="rail-search">
+          <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path fill="currentColor" d="M7 2a5 5 0 1 1-3.2 8.85l-2.32 2.33a.75.75 0 0 1-1.06-1.06l2.33-2.33A5 5 0 0 1 7 2Zm0 1.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"/></svg>
+          <input type="search" id="session-search" placeholder="Filter by agent or id" aria-label="Filter calls by agent or session id" autocomplete="off">
+        </div>
+        <div id="sessions" class="session-list" role="group" aria-label="Recorded calls"></div>
+        <p class="rail-note" id="rail-note" hidden></p>
+        <p class="rail-keys"><kbd>j</kbd><kbd>k</kbd> call · <kbd>/</kbd> filter · <kbd>b</kbd> hide list</p>
       </div>
-      <div id="sessions" class="session-list" role="group" aria-label="Recorded calls"></div>
-      <p class="rail-note" id="rail-note" hidden></p>
-      <p class="rail-keys"><kbd>j</kbd><kbd>k</kbd> switch call · <kbd>/</kbd> filter · <kbd>space</kbd> play · <kbd>esc</kbd> clear</p>
     </nav>
 
     <main id="call" class="call" tabindex="-1"></main>

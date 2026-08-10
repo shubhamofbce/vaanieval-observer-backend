@@ -7,7 +7,7 @@ import wave
 
 import pytest
 
-from conftest import create, jsonl, manifest, operation, upload
+from conftest import create, jsonl, manifest, object_info, operation, upload
 
 
 def test_health_reports_ok(client):
@@ -47,6 +47,7 @@ def test_summarizes_each_session_with_manifest_derived_fields(client):
         "started_at": "2026-02-01T10:00:00+00:00",
         "created_at": summary["created_at"],
         "turn_count": 0,
+        "error_count": 0,
     }
     assert summary["created_at"].startswith("20")
 
@@ -58,6 +59,21 @@ def test_falls_back_to_defaults_for_a_sparse_manifest(client):
     assert summary["duration_ms"] is None
     assert summary["outcome"] == "unknown"
     assert summary["started_at"] is None
+
+
+def test_counts_failed_operations_per_session_but_not_aborted_ones(client):
+    create(client, "call-1")
+    events = jsonl(
+        operation(event_id="op-1"),
+        operation(event_id="op-2", status="error", error={"name": "TypeError", "message": "boom"}),
+        operation(event_id="op-3", status="error", error={"name": "HTTPError", "message": "502"}),
+        # Barge-in stopped this one; the agent behaved correctly, so it is not a failure.
+        operation(event_id="op-4", status="error", error={"name": "AbortError", "message": "aborted"}),
+    )
+    upload(client, "call-1", "events.jsonl", events)
+    client.post("/v1/sessions/call-1/complete", json={"objects": {"events.jsonl": object_info(events)}})
+
+    assert client.get("/v1/sessions").json()[0]["error_count"] == 2
 
 
 def test_returns_404_for_an_unknown_session(client):
@@ -72,6 +88,89 @@ def test_returns_the_manifest_and_an_empty_timeline_before_completion(client):
     assert body["operations"] == []
     assert body["recordings"] == []
     assert body["status"] == "uploading"
+
+
+def test_returns_production_only_stt_evidence_without_inventing_a_challenger(client):
+    create(client, "call-1")
+    stt = operation(
+        event_id="stt-1",
+        type_="stt",
+        started_at_ms=100,
+        turn_id="4",
+        scope="turn",
+        endpoint_id="deepgram-stt",
+        provider="deepgram",
+        model="nova-3",
+        milestones={
+            "speech_started": {"occurred_at_ms": 100},
+            "first_partial": {"occurred_at_ms": 380},
+            "speech_ended": {"occurred_at_ms": 920},
+            "final_transcript": {"occurred_at_ms": 1240},
+        },
+        request={"endpointing_ms": 300, "utterance_end_ms": 1000},
+        response={"transcript": "Need help with a trip", "confidence": 0.94, "words": [{"text": "Need"}], "final_reason": "speech_final"},
+        samples={"partial": {"items": [{"transcript": "Need"}, {"transcript": "Need help"}]}},
+    )
+    upload(client, "call-1", "events.jsonl", jsonl(stt))
+    client.post("/v1/sessions/call-1/complete", json={"objects": {}})
+
+    body = client.get("/v1/sessions/call-1/stt-evaluation").json()
+
+    assert body["production"]["provider"] == "deepgram"
+    assert body["production"]["model"] == "nova-3"
+    assert body["production"]["model_recorded"] is True
+    assert body["production"]["request"]["endpointing_ms"] == 300
+    assert body["production"]["capabilities"]["confidence_scores"] is True
+    assert body["challenger"] is None
+    assert body["accuracy"]["available"] is False
+    assert body["accuracy"]["reason"] == "no_challenger"
+    assert body["accuracy"]["call_estimated_wer"] is None
+    assert body["risk"]["available"] is False
+    assert body["risk"]["reason"] == "no_challenger"
+    assert body["coverage"]["call_turns"] == 1
+    assert body["coverage"]["stt_turns"] == 1
+    assert body["coverage"]["transcript_turns"] == 1
+    assert body["latency"]["production"]["first_partial_ms"]["count"] == 1
+    assert body["latency"]["production"]["first_partial_ms"]["p50"] == 280
+    assert body["latency"]["production"]["endpoint_delay_ms"]["p50"] == 320
+    assert body["latency"]["challenger"]["available"] is False
+    assert body["turns"][0]["production"]["transcript"] == "Need help with a trip"
+    assert body["turns"][0]["production"]["partial_count"] == 2
+    assert body["turns"][0]["challenger"] is None
+
+
+def test_queues_one_scribe_challenger_evaluation_and_reports_its_status(client, api, monkeypatch):
+    from app import challenger
+
+    create(client, "call-1")
+    submitted = []
+    monkeypatch.setattr(api.CHALLENGER_EXECUTOR, "submit", lambda fn, *args: submitted.append((fn, args)))
+    monkeypatch.setattr(challenger, "load_api_key", lambda: None)
+
+    started = client.post("/v1/sessions/call-1/challenger-evaluation", json={"model": "elevenlabs_scribe_v2"})
+    assert started.status_code == 202
+    body = started.json()
+    assert body["status"] == "queued"
+    assert body["label"] == "ElevenLabs Scribe v2"
+    assert len(submitted) == 1
+
+    repeated = client.post("/v1/sessions/call-1/challenger-evaluation", json={"model": "elevenlabs_scribe_v2"})
+    assert repeated.status_code == 202
+    assert repeated.json()["job_id"] == body["job_id"]
+    assert len(submitted) == 1
+    assert client.get("/v1/sessions/call-1/challenger-evaluation").json()["status"] == "queued"
+
+    submitted[0][0](*submitted[0][1])
+    failed = client.get("/v1/sessions/call-1/challenger-evaluation").json()
+    assert failed["status"] == "failed"
+    assert "ELEVENLABS_API_KEY" in failed["error"]
+
+
+def test_rejects_an_unknown_challenger_model(client):
+    create(client, "call-1")
+    response = client.post("/v1/sessions/call-1/challenger-evaluation", json={"model": "not-a-model"})
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Unsupported challenger model"
 
 
 def test_orders_operations_by_start_time(client):
@@ -94,17 +193,21 @@ def test_orders_operations_by_start_time(client):
 
 def test_reports_recordings_from_the_manifest_audio_block(client):
     audio = {
-        "caller": {"file": "caller.audio", "encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": 1},
-        "agent": {"file": "agent.audio", "encoding": "pcm_s16le", "sample_rate_hz": 24000, "channels": 1},
+        "call": {
+            "file": "call.audio",
+            "encoding": "pcm_s16le",
+            "sample_rate_hz": 24000,
+            "channels": 2,
+            "channel_layout": {"left": "agent", "right": "caller"},
+        },
     }
     client.post("/v1/sessions", json=manifest("call-1", audio=audio))
-    upload(client, "call-1", "caller.audio", b"\x01\x02\x03")
+    upload(client, "call-1", "call.audio", b"\x01\x02\x03\x04")
     recordings = {item["track"]: item for item in client.get("/v1/sessions/call-1").json()["recordings"]}
-    assert recordings["caller"]["uploaded"] is True
-    assert recordings["caller"]["size_bytes"] == 3
-    assert recordings["caller"]["sample_rate_hz"] == 16000
-    assert recordings["agent"]["uploaded"] is False
-    assert recordings["agent"]["size_bytes"] == 0
+    assert recordings["call"]["uploaded"] is True
+    assert recordings["call"]["size_bytes"] == 4
+    assert recordings["call"]["sample_rate_hz"] == 24000
+    assert recordings["call"]["channel_layout"] == {"left": "agent", "right": "caller"}
 
 
 def test_defaults_the_recording_filename_when_the_manifest_omits_it(client):

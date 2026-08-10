@@ -15,7 +15,7 @@ def test_writes_the_object_to_the_session_directory(client, api):
     assert (api.OBJECTS / "call-1" / "caller.audio").read_bytes() == b"\x01\x02\x03"
 
 
-@pytest.mark.parametrize("name", ["events.jsonl", "caller.audio", "agent.audio"])
+@pytest.mark.parametrize("name", ["events.jsonl", "call.audio", "caller.audio", "agent.audio"])
 def test_accepts_every_allowed_object_name(client, name):
     create(client, "call-1")
     assert upload(client, "call-1", name, b"payload").status_code == 204

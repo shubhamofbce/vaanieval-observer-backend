@@ -17,7 +17,15 @@ function h(tag, props, ...children) {
     if (value == null || value === false) continue;
     if (key === 'class') node.className = value;
     else if (key === 'text') node.textContent = value;
-    else if (key === 'style') Object.assign(node.style, value);
+    // A custom property has to go through setProperty; assigning it onto the
+    // style object makes a plain JS expando that never reaches the stylesheet.
+    else if (key === 'style') {
+      for (const [name, item] of Object.entries(value)) {
+        if (item == null) continue;
+        if (name.startsWith('--')) node.style.setProperty(name, String(item));
+        else node.style[name] = item;
+      }
+    }
     else if (key === 'dataset') Object.assign(node.dataset, value);
     else if (key.startsWith('on') && typeof value === 'function') node.addEventListener(key.slice(2).toLowerCase(), value);
     else if (key in node && !key.includes('-')) node[key] = value;
@@ -105,10 +113,13 @@ function offset(value) {
   return `${minutes}:${String(Math.floor(rest / 10)).padStart(2, '0')}.${rest % 10}`;
 }
 
-function clock(seconds) {
-  if (!Number.isFinite(seconds)) return '0:00';
-  const total = Math.max(0, Math.round(seconds));
-  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+/** Packages number their turns either `4` or `turn-4`, and the whole interface
+ *  writes `#4`. Printed raw the second form reads "#turn-4", and inside a
+ *  sentence it becomes "before turn turn-4". */
+function turnName(value) {
+  const text = String(value ?? '');
+  const numbered = text.match(/^turn[-_ ]?(\d+)$/i);
+  return numbered ? numbered[1] : text;
 }
 
 function bytes(value) {
@@ -135,14 +146,32 @@ function relativeTime(value) {
   return format.format(-Math.round(seconds / size), unit);
 }
 
+/** A rail-width age. The full "28 minutes ago" gets clipped to "28 minutes" in
+ *  a dense row, which reads as a duration — and the column beside it really is
+ *  one. A compact form is unambiguous and leaves the agent name room to breathe. */
+function compactAge(value) {
+  const date = parseDate(value);
+  if (!date) return '—';
+  const seconds = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
+  if (seconds < 60) return 'now';
+  for (const [unit, size] of [['m', 60], ['h', 3600], ['d', 86400]]) {
+    if (seconds < size * (unit === 'm' ? 60 : unit === 'h' ? 24 : 7)) return `${Math.floor(seconds / size)}${unit}`;
+  }
+  return `${Math.floor(seconds / 604800)}w`;
+}
+
 function absoluteTime(value) {
   const date = parseDate(value);
   if (!date) return 'No timestamp recorded';
   return date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'medium' });
 }
 
-function percentile(values, fraction) {
-  if (!values.length) return null;
+function clockTime(value) {
+  const date = parseDate(value);
+  return date ? date.toLocaleTimeString(undefined, { hour12: false }) : '—';
+}
+
+function percentile(values, fraction) {  if (!values.length) return null;
   const sorted = [...values].sort((a, b) => a - b);
   return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(fraction * sorted.length) - 1))];
 }
@@ -169,6 +198,52 @@ function unwrapBody(body) {
   return { value: body, truncated: false, originalBytes: null };
 }
 
+/**
+ * Recovers whole JSON objects from the front of a truncated body.
+ *
+ * The SDK stores a head-only byte prefix, so a captured prompt is almost always
+ * cut mid-object and a strict parse of the whole thing always fails. Throwing
+ * the prefix away loses the messages that ARE complete inside it, which is why
+ * the conversation silently empties out on exactly the long calls a reviewer
+ * opened the tool to read. Scanning for balanced braces after `"messages":[`
+ * salvages every complete message and stops at the first partial one.
+ */
+function salvageMessages(text) {
+  const anchor = text.indexOf('"messages"');
+  if (anchor === -1) return [];
+  const open = text.indexOf('[', anchor);
+  if (open === -1) return [];
+
+  const messages = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  for (let index = open + 1; index < text.length; index += 1) {
+    const character = text[index];
+    if (escaped) { escaped = false; continue; }
+    if (character === '\\') { escaped = true; continue; }
+    if (character === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (character === '{') {
+      if (depth === 0) start = index;
+      depth += 1;
+    } else if (character === '}') {
+      depth -= 1;
+      if (depth === 0 && start !== -1) {
+        try {
+          const parsed = JSON.parse(text.slice(start, index + 1));
+          if (parsed && typeof parsed === 'object') messages.push(parsed);
+        } catch { /* a complete-looking object that still will not parse */ }
+        start = -1;
+      }
+    } else if (character === ']' && depth === 0) {
+      break;
+    }
+  }
+  return messages;
+}
+
 function parseRequestBody(op) {
   const { value, truncated, originalBytes } = unwrapBody(op?.request?.body);
   const empty = { request: {}, truncated, originalBytes };
@@ -178,7 +253,12 @@ function parseRequestBody(op) {
     const parsed = JSON.parse(value);
     return parsed && typeof parsed === 'object' ? { request: parsed, truncated, originalBytes } : empty;
   } catch {
-    return { request: {}, truncated: true, originalBytes, unparsed: value };
+    const messages = salvageMessages(value);
+    const model = /"model"\s*:\s*"([^"]+)"/.exec(value)?.[1];
+    const request = {};
+    if (model) request.model = model;
+    if (messages.length) request.messages = messages;
+    return { request, truncated: true, originalBytes, unparsed: value, salvaged: messages.length > 0 };
   }
 }
 
@@ -186,8 +266,24 @@ function parseRequestBody(op) {
  * Decodes one chat-completions response, streamed or not, into the parts a
  * reviewer cares about: what the agent said, which tools it asked for, and why
  * generation stopped.
+ *
+ * Memoized on the response object: rendering and sorting both ask the same
+ * question about the same operations many times per keystroke, and decoding a
+ * streamed body means re-parsing every SSE frame. Session payloads are replaced
+ * wholesale on reload, so identity is a sound cache key.
  */
+const completionCache = new WeakMap();
+
 function decodeCompletion(response) {
+  if (!response || typeof response !== 'object') return decodeCompletionUncached(response);
+  const cached = completionCache.get(response);
+  if (cached) return cached;
+  const decoded = decodeCompletionUncached(response);
+  completionCache.set(response, decoded);
+  return decoded;
+}
+
+function decodeCompletionUncached(response) {
   const result = { text: '', toolCalls: [], finishReason: null, model: null, usage: null, cost: null, truncated: false, originalBytes: null, alternatives: 0 };
   if (!response) return result;
   const unwrapped = unwrapBody(response.body ?? response);
@@ -230,6 +326,11 @@ function decodeCompletion(response) {
     if (!payload || typeof payload !== 'object') return;
     if (payload.model) result.model = payload.model;
     if (payload.usage) result.usage = payload.usage;
+    // Framework spans report token accounting flat rather than under `usage`.
+    // Without this the tokens the UI promises are on this span read as absent.
+    if (!result.usage && (payload.total_tokens != null || payload.prompt_tokens != null || payload.ttft_ms != null)) {
+      result.usage = payload;
+    }
     // Do not derive a price from tokens or a model name. Some providers include
     // an actual charge in their response; this accepts only those explicit
     // monetary fields, including the final usage chunk of an SSE response.
@@ -282,7 +383,13 @@ function decodeCompletion(response) {
     }
     return finish();
   }
-  try { absorbPayload(JSON.parse(body)); } catch { result.text = body; }
+  try { absorbPayload(JSON.parse(body)); } catch {
+    // A body that opens like JSON but will not parse is a truncated capture,
+    // not something the agent said. Rendering it as speech puts raw braces in
+    // the transcript and claims the agent uttered them.
+    if (unwrapped.truncated || /^\s*[{[]/.test(body)) result.truncated = true;
+    else result.text = body;
+  }
   return finish();
 }
 
@@ -464,6 +571,8 @@ const state = {
   opSort: { key: 'start', direction: 'asc' },
   turnSort: { key: 'turn', direction: 'asc' },
   inspectorTab: 'overview',
+  callView: 'trace',
+  expanded: new Set(),
   audio: null,
   audioListeners: null,
   audioTrack: null,
@@ -563,24 +672,33 @@ function renderRail() {
       : 'No calls recorded yet. Complete an SDK upload to see one here.';
   }
 
+  // One line per call. A reviewer scanning hundreds of recordings wants to see
+  // as many as the screen allows; the full id and timestamp stay on the title
+  // so nothing is lost, it is just no longer shouting.
+  //
+  // Repeating one agent name down every row of a single-agent deployment spends
+  // the widest column on the one field that cannot tell two calls apart. When
+  // there is nothing to disambiguate, show the clock time instead, which is what
+  // a reviewer correlates against their own logs.
+  const agents = new Set(state.sessions.map((item) => item.agent_id || 'Untitled agent'));
+  const manyAgents = agents.size > 1;
+
   for (const item of list) {
+    const started = item.started_at || item.created_at;
+    const errors = item.error_count || 0;
     host.append(h('button', {
       type: 'button',
       class: 'session',
       'aria-current': String(item.id === state.sessionId),
-      title: `${item.agent_id || 'Untitled agent'}\n${item.id}\n${absoluteTime(item.started_at || item.created_at)}`,
+      title: `${item.agent_id || 'Untitled agent'}\n${item.id}\n${absoluteTime(started)}\n${item.status}${item.outcome ? ` · ${item.outcome}` : ''}${errors ? `\n${errors} failed operation${errors === 1 ? '' : 's'}` : ''}`,
       onClick: () => selectSession(item.id),
     },
-      h('span', { class: 'session-top' },
-        h('span', { class: 'session-dot', dataset: { status: item.status } }),
-        h('span', { class: 'session-agent', text: item.agent_id || 'Untitled agent' }),
-      ),
-      h('span', { class: 'session-meta' },
-        h('span', { text: relativeTime(item.started_at || item.created_at) }),
-        h('span', { text: duration(item.duration_ms) || '—' }),
-        h('span', { text: `${item.turn_count ?? 0} turn${item.turn_count === 1 ? '' : 's'}` }),
-      ),
-      h('span', { class: 'session-id', text: item.id }),
+      h('span', { class: 'session-dot', dataset: { status: item.status } }),
+      h('span', { class: 'session-agent', text: manyAgents ? (item.agent_id || 'Untitled agent') : clockTime(started) }),
+      h('span', { class: 'session-errs', text: errors ? String(errors) : '' }),
+      h('span', { class: 'session-turns', text: `${item.turn_count ?? 0}t` }),
+      h('span', { class: 'session-dur num', text: duration(item.duration_ms) || '—' }),
+      h('span', { class: 'session-when', text: compactAge(started) }),
     ));
   }
 }
@@ -637,9 +755,14 @@ function readLocation() {
     kind: match[2] || null,
     selectionId: safeDecode(match[3]),
     tab: query.get('tab'),
+    view: query.get('view'),
     opType: query.get('type'),
     opErrors: query.get('errors') === '1',
     opQuery: query.get('q'),
+    // A reviewer pasting a link into a ticket means "listen to this bit", so
+    // the moment travels in the URL alongside the span they had selected.
+    at: Number.parseFloat(query.get('t')),
+    range: query.get('range'),
   };
 }
 
@@ -651,6 +774,7 @@ function writeLocation() {
   const path = selection ? `/${selection.kind}/${encodeURIComponent(selection.id)}` : '';
   const query = new URLSearchParams();
   if (selection) query.set('tab', state.inspectorTab);
+  if (state.callView !== 'trace') query.set('view', state.callView);
   if (state.opFilter.type !== 'all') query.set('type', state.opFilter.type);
   if (state.opFilter.errorsOnly) query.set('errors', '1');
   if (state.opFilter.query.trim()) query.set('q', state.opFilter.query.trim());
@@ -679,11 +803,22 @@ function applyViewState(requested = {}, { render = false } = {}) {
     query: requested.opQuery || '',
   };
   state.inspectorTab = requested.tab && TABS.some((tab) => tab.key === requested.tab) ? requested.tab : 'overview';
+  state.callView = requested.view && CALL_VIEWS.some((view) => view.key === requested.view) ? requested.view : 'trace';
+  // Handed to the player when it builds, and consumed once: a shared link
+  // should place the playhead, not pin it against every later seek.
+  const cutFrom = Number.parseFloat((requested.range || '').split('-')[0]);
+  const cutTo = Number.parseFloat((requested.range || '').split('-')[1]);
+  state.audioCue = Number.isFinite(requested.at) || Number.isFinite(cutFrom)
+    ? { at: Number.isFinite(requested.at) ? requested.at : cutFrom, range: Number.isFinite(cutFrom) && cutTo > cutFrom ? { from: cutFrom, to: cutTo } : null }
+    : null;
   if (!render) return;
 
-  if (ui.opSearch) ui.opSearch.value = state.opFilter.query;
-  renderOperationRows();
+  if (state.session) renderWorkbench(state.session);
   syncOpFilterControls();
+
+  // A link opened while the same call is already on screen never rebuilds the
+  // player, so the cue has to be pushed at it rather than waited for.
+  ui.applyAudioCue?.();
 
   const id = requested.selectionId;
   if (id && requested.kind === 'op' && state.opsById.has(id)) setSelection('op', id, { scroll: true });
@@ -765,6 +900,9 @@ async function selectSession(id, restore = {}) {
 
 /** Stops anything the previous call left running before its DOM is replaced. */
 function teardownCall() {
+  releaseSegments();
+  ui.deckMetrics?.();
+  ui.deckMetrics = null;
   if (state.audio) {
     state.audioListeners?.abort();
     state.audio.pause();
@@ -779,9 +917,18 @@ function teardownCall() {
   state.opsById = new Map();
   state.turnsById = new Map();
   state.selection = null;
-  ui.playhead = null;
   ui.turnGuides = null;
+  ui.transcriptScroller = null;
+  ui.transcriptFollowButton = null;
+  ui.transcriptList = null;
+  ui.liveTurnId = null;
   ui.togglePlay = null;
+  ui.chooseAudioTrack = null;
+  ui.setAudioSelection = null;
+  ui.markAudioSpan = null;
+  ui.playerKeys = null;
+  ui.applyAudioCue = null;
+  ui.clearAudioSelection = null;
   ui.playheadAligned = false;
   hideTooltip();
 }
@@ -791,6 +938,7 @@ function captureWarnings(session) {
   const warnings = [];
   if (session.status === 'partial') warnings.push('No classified operations were imported, so the timeline and transcript are empty. Check that events.jsonl reached the observer.');
   if (capture.events_complete === false) warnings.push('The SDK reported an incomplete event stream.');
+  if (capture.audio_complete === false) warnings.push('Stereo call audio capture was incomplete.');
   if (capture.caller_audio_complete === false) warnings.push('Caller audio capture was incomplete.');
   if (capture.agent_audio_complete === false) warnings.push('Agent audio capture was incomplete.');
   if (capture.dropped_event_count) warnings.push(`${capture.dropped_event_count} event(s) were dropped under backpressure.`);
@@ -808,7 +956,8 @@ function renderCall(session) {
   const started = manifest.started_at || session.created_at;
 
   const responses = turns.map((turn) => turn.time_to_first_audio_ms).filter((value) => value != null);
-  const errors = operations.filter((op) => op.status === 'error');
+  const errors = operations.filter((op) => effectiveStatus(op) === 'error');
+  const interrupted = operations.filter((op) => isAborted(op));
   const tools = operations.filter((op) => op.type === 'tool');
   const slowest = turns.filter((turn) => turn.time_to_first_audio_ms != null)
     .sort((a, b) => b.time_to_first_audio_ms - a.time_to_first_audio_ms)[0];
@@ -881,11 +1030,12 @@ function renderCall(session) {
 
   const jumpToOps = (patch) => {
     Object.assign(state.opFilter, patch);
-    if (ui.opSearch) ui.opSearch.value = state.opFilter.query;
-    renderOperationRows();
+    // The trace filters too, so a KPI drill-down no longer has to throw the
+    // reviewer into a different table to answer "which ones failed".
+    if (state.callView !== 'trace' && state.callView !== 'spans') state.callView = 'trace';
+    renderWorkbench(session);
     writeLocation();
-    if (ui.opsCard) ui.opsCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    syncOpFilterControls();
+    ui.workbenchBody?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
   const kpis = h('div', { class: 'kpis' },
@@ -900,18 +1050,14 @@ function renderCall(session) {
     kpi('Slowest turn', slowest ? duration(slowest.time_to_first_audio_ms) : '—', null,
       slowest ? `turn #${slowest.turn_id} — inspect` : 'no timed turns',
       slowest ? { tone: latencyTone(slowest.time_to_first_audio_ms), title: `Inspect turn #${slowest.turn_id}`, onClick: () => setSelection('turn', slowest.turn_id, { scroll: true }) } : {}),
-    kpi('Failures', String(errors.length), null, errors.length ? 'filter operations' : 'all operations ok',
+    kpi('Failures', String(errors.length), null,
+      errors.length ? 'filter operations' : interrupted.length ? `all ok · ${interrupted.length} interrupted` : 'all operations ok',
       { tone: errors.length ? 'danger' : null, onClick: errors.length ? () => jumpToOps({ errorsOnly: true, type: 'all' }) : null }),
     kpi('Tool calls', String(tools.length), null, tools.length ? 'filter operations' : 'none in this call',
       { onClick: tools.length ? () => jumpToOps({ type: 'tool', errorsOnly: false }) : null }),
   );
 
-  const legend = h('p', { class: 'kpi-legend' },
-    'Response time is the gap between the caller stopping and the first agent audio frame. ',
-    h('span', { class: 'tone-key', dataset: { tone: 'ok' } }, `under ${duration(WARN_MS)} good`),
-    h('span', { class: 'tone-key', dataset: { tone: 'warn' } }, `${duration(WARN_MS)} to under ${duration(SLOW_MS)} borderline`),
-    h('span', { class: 'tone-key', dataset: { tone: 'danger' } }, `${duration(SLOW_MS)} or more is audible lag`),
-  );
+  const legend = h('p', { class: 'kpi-legend' }, `Response: caller stops → first audio · thresholds ${duration(WARN_MS)} / ${duration(SLOW_MS)}`);
 
   const warnings = captureWarnings(session);
   const banner = warnings.length ? h('div', { class: 'banner', dataset: { tone: session.status === 'partial' ? 'danger' : 'warn' } },
@@ -922,33 +1068,158 @@ function renderCall(session) {
   ) : null;
 
   const columns = h('div', { class: 'columns' },
-    h('div', { class: 'col' }, buildTimelineCard(session), buildTranscriptCard(session), buildTurnsCard(session), buildOperationsCard()),
-    h('div', { class: 'col col-side' }, buildAudioCard(session), buildInspectorCard()),
+    h('div', { class: 'col' }, buildWorkbenchCard(session)),
+    h('div', { class: 'col col-side' }, buildInspectorCard()),
   );
 
-  clear($('#call')).append(...[head, providerRow, banner, kpis, legend, columns].filter(Boolean));
-  renderTurnRows();
-  renderOperationRows();
+  const player = buildAudioCard(session);
+  player.classList.add('call-player');
+  const transcript = buildTranscriptSection(session);
+  // Player and transcript are one surface, not two stacked cards. Stacked, the
+  // sticky player pins itself over the transcript the moment the reviewer
+  // scrolls, so the words can never be read while the audio stays in reach.
+  // The slot lets the transcript fill the player's height without its own
+  // content setting the height of the row.
+  const deck = h('div', { class: 'review-deck' }, player, h('div', { class: 'transcript-slot' }, transcript));
+  clear($('#call')).append(...[head, deck, providerRow, banner, kpis, legend, columns].filter(Boolean));
+  trackDeckHeight(deck);
+  renderWorkbench(session);
   renderInspector();
   drawTurnGuides(null);
 }
 
+/** The sticky inspector has to start below the sticky deck, and the deck's
+ *  height changes with the player (a live turn chip, a drift note, wrapped
+ *  provider chips). CSS cannot read one element's height into another's offset,
+ *  so the measurement is published as a variable on the scrollport. It is 0
+ *  below 1240px, where the deck stops sticking and nothing needs the offset. */
+function trackDeckHeight(deck) {
+  const host = $('#call');
+  const wide = window.matchMedia('(min-width: 1240px)');
+  const publish = () => host.style.setProperty('--deck-h', wide.matches ? `${Math.round(deck.getBoundingClientRect().height)}px` : '0px');
+  const observer = new ResizeObserver(publish);
+  observer.observe(deck);
+  wide.addEventListener('change', publish);
+  ui.deckMetrics = () => { observer.disconnect(); wide.removeEventListener('change', publish); host.style.removeProperty('--deck-h'); };
+  publish();
+}
+
+/* ------------------------------------------------------------- workbench */
+
+/** The call used to arrive as five stacked cards — timeline, STT quality,
+ *  conversation, turns and operations — all open at once. Everything is still
+ *  here, but one view at a time, so the page opens on the one that answers the
+ *  first question a reviewer has.
+ *
+ *  Conversation and Timeline have since left this switcher entirely. Both are
+ *  read against the recording rather than on their own, so they now live with
+ *  the player: the spans as a lane under the waveform on the same axis, the
+ *  transcript as a panel directly beneath it that follows playback. Tabbing
+ *  away from the audio to read what was said was the wrong shape for the job. */
+const CALL_VIEWS = [
+  { key: 'trace', label: 'Trace' },
+  { key: 'spans', label: 'All spans' },
+  { key: 'stt', label: 'STT review · Beta' },
+];
+
+function buildWorkbenchCard(session) {
+  const tabs = h('div', { class: 'view-tabs', role: 'tablist', 'aria-label': 'Call views' });
+  for (const view of CALL_VIEWS) {
+    tabs.append(h('button', {
+      type: 'button',
+      role: 'tab',
+      dataset: { view: view.key },
+      'aria-selected': String(state.callView === view.key),
+      text: view.label,
+      onClick: () => {
+        if (state.callView === view.key) return;
+        state.callView = view.key;
+        renderWorkbench(session);
+        writeLocation();
+      },
+    }));
+  }
+  ui.workbenchTabs = tabs;
+  ui.workbenchBody = h('div', { class: 'workbench-body' });
+  return h('section', { class: 'workbench' }, tabs, ui.workbenchBody);
+}
+
+function renderWorkbench(session) {
+  const host = ui.workbenchBody;
+  if (!host) return;
+  // Anything the previous view owned is now detached; clearing the handles
+  // keeps a later render from writing into a node nobody can see.
+  ui.opRows = ui.opHead = ui.opSeg = ui.opSearch = ui.opErrors = ui.opCount = null;
+  ui.traceRows = ui.traceCount = null;
+  clear(host);
+  for (const button of ui.workbenchTabs?.querySelectorAll('button') || []) {
+    button.setAttribute('aria-selected', String(button.dataset.view === state.callView));
+  }
+  switch (state.callView) {
+    case 'spans': host.append(buildOperationsCard()); renderOperationRows(); break;
+    case 'stt': host.append(buildSttQualityCard(session)); break;
+    default: host.append(buildTraceCard(session)); renderTraceRows(); break;
+  }
+  syncSelection();
+}
+
 /* -------------------------------------------------------------- timeline */
 
-function buildTimelineCard(session) {
-  // Draw from the flat operation list only. `session.turns[].operations` are
-  // separate objects after JSON parsing, and rendering both would let the
-  // timeline and the operations table disagree about the same span.
+/** Splits a call's operations into the rows a span rail draws, in a fixed order
+ *  so the same call always stacks the same way. Sockets are kept apart: they
+ *  all span the whole call, so stacking them on one row would bury every socket
+ *  but the topmost under an identical, unclickable bar. */
+function spanRows(session) {
   const all = session.operations || [];
   const sockets = all.filter(isSocket);
-  const turnOps = all.filter((op) => op.turn_id != null && !isSocket(op));
-  const loose = all.filter((op) => op.turn_id == null && !isSocket(op));
-  const spans = [...turnOps, ...loose, ...sockets];
-  const total = Math.max(session.manifest?.duration_ms || 0, ...spans.map((op) => op.ended_at_ms || op.started_at_ms || 0), 1);
+  const timed = all.filter((op) => !isSocket(op));
+  const rows = TYPES.map((type) => ({
+    key: type,
+    label: TYPE_LABEL[type] || type,
+    short: type.toUpperCase(),
+    color: COLOR[type],
+    ops: timed.filter((op) => op.type === type),
+  }));
+  for (const socket of sockets) {
+    rows.push({
+      key: `ws:${socket.event_id}`,
+      label: `${(socket.type || 'ws').toUpperCase()} socket`,
+      short: `${(socket.type || 'ws').toUpperCase()} ws`,
+      color: COLOR.conn,
+      hint: socket.endpoint_id || socket.provider || 'provider socket',
+      ops: [socket],
+    });
+  }
+  const total = Math.max(
+    session.manifest?.duration_ms || 0,
+    ...all.map((op) => op.presentation_window?.to_ms || op.ended_at_ms || op.started_at_ms || 0),
+    1,
+  );
+  return { rows, total, count: all.length, sockets };
+}
 
-  ui.timelineTotal = total;
+/** Arrow-key navigation for a row of bars. A 37-span rail must not be 37 tab
+ *  stops; the track is one stop and the arrows walk the spans inside it. */
+function wireBarKeys(track) {
+  const bars = [...track.querySelectorAll('.timeline-bar')];
+  bars.forEach((bar, position) => { bar.tabIndex = position === 0 ? 0 : -1; });
+  track.addEventListener('keydown', (event) => {
+    const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
+    let next = null;
+    if (step) next = bars[bars.indexOf(event.target) + step];
+    else if (event.key === 'Home') next = bars[0];
+    else if (event.key === 'End') next = bars[bars.length - 1];
+    if (!next) return;
+    event.preventDefault();
+    for (const bar of bars) bar.tabIndex = -1;
+    next.tabIndex = 0;
+    next.focus();
+  });
+}
 
-  const legend = h('div', { class: 'timeline-legend' },
+function spanLegend(session) {
+  const { sockets } = spanRows(session);
+  return h('div', { class: 'timeline-legend' },
     ...TYPES.map((type) => h('span', { class: 'legend-item' },
       h('span', { class: 'legend-swatch', style: { background: COLOR[type] } }),
       TYPE_LABEL[type],
@@ -956,52 +1227,39 @@ function buildTimelineCard(session) {
     sockets.length ? h('span', { class: 'legend-item' },
       h('span', { class: 'legend-swatch', style: { background: COLOR.conn } }), 'Provider socket') : null,
   );
+}
+
+/** The full-width span rail on its own call clock. The player draws its spans
+ *  inside the waveform instead, so this is only reached when the two clocks
+ *  cannot be trusted to agree — a call with no audio, or a track whose timings
+ *  do not line up with the recording. */
+function buildTimelineSurface(session) {
+  // Draw from the flat operation list only. `session.turns[].operations` are
+  // separate objects after JSON parsing, and rendering both would let the
+  // timeline and the operations table disagree about the same span.
+  const { rows, total, count } = spanRows(session);
+  if (!count) {
+    return h('div', { class: 'empty-block' },
+      h('b', { text: 'No spans to plot' }),
+      h('p', { text: 'This package contained no classified stt, llm, tts or tool operations.' }),
+    );
+  }
+
+  ui.timelineTotal = total;
 
   const timeline = h('div', { class: 'timeline' });
-  const rowFor = (ops, label, color, hint) => {
+  for (const row of rows) {
     const track = h('div', { class: 'timeline-track' });
-    if (!ops.length) { track.classList.add('is-empty'); track.dataset.empty = 'none captured'; }
-    for (const op of ops) track.append(timelineBar(op, total, color));
-    track.addEventListener('click', (event) => {
-      // Bars handle their own click; anywhere else on the row seeks.
-      if (event.target.closest('.timeline-bar')) return;
-      const box = track.getBoundingClientRect();
-      seekMs(((event.clientX - box.left) / box.width) * total);
-    });
-    const bars = [...track.querySelectorAll('.timeline-bar')];
-    // A 37-span timeline must not be 37 tab stops; the track is one stop and
-    // the arrow keys walk the spans inside it.
-    bars.forEach((bar, position) => { bar.tabIndex = position === 0 ? 0 : -1; });
-    track.addEventListener('keydown', (event) => {
-      const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
-      let next = null;
-      if (step) next = bars[bars.indexOf(event.target) + step];
-      else if (event.key === 'Home') next = bars[0];
-      else if (event.key === 'End') next = bars[bars.length - 1];
-      if (!next) return;
-      event.preventDefault();
-      for (const bar of bars) bar.tabIndex = -1;
-      next.tabIndex = 0;
-      next.focus();
-    });
-    return h('div', { class: 'timeline-row' },
-      h('b', { class: 'timeline-label', title: hint || null },
-        h('span', { class: 'legend-swatch', style: { background: color } }),
-        label,
+    if (!row.ops.length) { track.classList.add('is-empty'); track.dataset.empty = 'none captured'; }
+    for (const op of row.ops) track.append(timelineBar(op, total, row.color));
+    wireBarKeys(track);
+    timeline.append(h('div', { class: 'timeline-row' },
+      h('b', { class: 'timeline-label', title: row.hint || null },
+        h('span', { class: 'legend-swatch', style: { background: row.color } }),
+        row.short,
       ),
       track,
-    );
-  };
-
-  const timed = [...turnOps, ...loose].filter((op) => !isSocket(op));
-  for (const type of TYPES) {
-    timeline.append(rowFor(timed.filter((op) => op.type === type), type.toUpperCase(), COLOR[type]));
-  }
-  // Sockets all span the full call, so stacking them on one row would bury every
-  // socket but the topmost under an identical, unclickable bar.
-  for (const socket of sockets) {
-    const stream = (socket.type || 'ws').toUpperCase();
-    timeline.append(rowFor([socket], `${stream} ws`, COLOR.conn, socket.endpoint_id || socket.provider || 'provider socket'));
+    ));
   }
 
   const axis = h('div', { class: 'timeline-axis' });
@@ -1016,28 +1274,16 @@ function buildTimelineCard(session) {
     }));
   }
 
-  ui.playhead = h('div', { class: 'timeline-playhead' });
   ui.turnGuides = h('div', { class: 'turn-guides' });
 
-  const surface = h('div', { class: 'timeline-surface' }, ui.turnGuides, timeline, axis, ui.playhead);
-
-  return h('section', { class: 'card' },
-    h('div', { class: 'card-head' },
-      h('h3', {}, 'Call timeline', h('span', { class: 'hint', text: 'click a span to inspect it · click empty track to seek audio' })),
-      legend,
-    ),
-    h('div', { class: 'card-body' },
-      spans.length ? surface : h('div', { class: 'empty-block' },
-        h('b', { text: 'No spans to plot' }),
-        h('p', { text: 'This package contained no classified stt, llm, tts or tool operations.' }),
-      ),
-    ),
-  );
+  // No playhead: this surface only renders when the call has no audio to track.
+  return h('div', { class: 'timeline-surface' }, ui.turnGuides, timeline, axis);
 }
 
 function timelineBar(op, total, color) {
-  const rawStart = Math.max(0, op.started_at_ms || 0);
-  const rawEnd = op.ended_at_ms ?? rawStart;
+  const canonical = op.presentation_window;
+  const rawStart = Math.max(0, canonical?.from_ms ?? op.started_at_ms ?? 0);
+  const rawEnd = canonical?.to_ms ?? op.ended_at_ms ?? rawStart;
   const start = Math.min(rawStart, total);
   // Guard against reversed or open-ended spans so a bar can never run past the
   // track it is drawn in.
@@ -1046,28 +1292,42 @@ function timelineBar(op, total, color) {
   const width = Math.min(100 - left, Math.max(0.35, ((end - start) / total) * 100));
   const socket = isSocket(op);
   const label = `${TYPE_LABEL[displayType(op)] || op.type} · ${op.endpoint_id || op.request?.name || op.transport || 'operation'}`;
-  const span = duration(op.duration_ms ?? (rawEnd - rawStart)) || 'unknown';
+  const span = duration(rawEnd - rawStart) || 'unknown';
   const lasted = socket ? `held open ${span}` : `lasts ${span}`;
   const node = h('button', {
     type: 'button',
     class: 'timeline-bar',
     dataset: { opId: op.event_id },
     style: { left: `${left}%`, width: `${width}%`, background: color },
-    'aria-pressed': 'false',
-    'aria-label': `${label}, ${lasted}, starting at ${offset(rawStart)}`,
-    onClick: () => setSelection('op', op.event_id, { scroll: true }),
+    // A bar's selected ring comes only from `aria-pressed` — `syncSelection`
+    // deliberately leaves `is-selected` off bars. Reading the live selection
+    // here keeps the ring through every repaint: the lane is rebuilt on zoom,
+    // on resize and by the spans toggle, and a hard-coded `false` dropped it
+    // while the inspector still showed that same op.
+    'aria-pressed': String(state.selection?.kind === 'op' && state.selection.id === op.event_id),
+    'aria-label': `${label}, ${canonical?.kind || 'provider work'}, ${canonical?.confidence || 'recorded'}, ${offset(rawStart)} to ${offset(rawEnd)}${canonical ? `; provider work ${offset(op.started_at_ms)} to ${offset(op.ended_at_ms)}` : ''}`,
+    onClick: () => {
+      setSelection('op', op.event_id, { scroll: true });
+      if (audioWindow(op)) playSegment(op);
+    },
   });
-  if (op.status === 'cancelled') node.classList.add('is-cancelled');
-  if (op.status === 'error') node.classList.add('is-error');
+  if (effectiveStatus(op) === 'cancelled') node.classList.add('is-cancelled');
+  if (effectiveStatus(op) === 'error') node.classList.add('is-error');
 
   node.addEventListener('mouseenter', () => showTooltip(node, label, [
     op.turn_id != null ? `turn #${op.turn_id}` : socket ? 'connection scope' : 'ungrouped',
     `starts ${offset(rawStart)}`,
     lasted,
-    `status ${op.status || 'unknown'}`,
-  ]));
+    canonical ? `provider work ${offset(op.started_at_ms)} → ${offset(op.ended_at_ms)}` : null,
+    canonical?.confidence === 'inferred' ? 'audible timing inferred from rendered duration' : null,
+    `status ${effectiveStatus(op) || 'unknown'}`,
+  ].filter(Boolean)));
   node.addEventListener('mouseleave', hideTooltip);
-  node.addEventListener('focus', () => showTooltip(node, label, [`starts ${offset(rawStart)}`, lasted]));
+  node.addEventListener('focus', () => showTooltip(node, label, [
+    `starts ${offset(rawStart)}`, lasted,
+    canonical ? `provider work ${offset(op.started_at_ms)} → ${offset(op.ended_at_ms)}` : null,
+    canonical?.confidence === 'inferred' ? 'audible timing inferred from rendered duration' : null,
+  ].filter(Boolean)));
   node.addEventListener('blur', hideTooltip);
   return node;
 }
@@ -1101,9 +1361,12 @@ function drawTurnGuides(turn) {
 
 /* ------------------------------------------------------------ transcript */
 
-function buildTranscriptCard(session) {
+/** The conversation, as a panel under the player rather than a tab beside it.
+ *  Reading what was said and hearing it said are the same act of review, so the
+ *  transcript stays on screen with the waveform and follows the playhead. */
+function buildTranscriptSection(session) {
   const { entries, systemPrompt, modelCallCount, bodiesCaptured } = state.transcript || { entries: [], modelCallCount: 0 };
-  const body = h('div', { class: 'card-body scroll-cap' });
+  const body = h('div', { class: 'card-body transcript-body' });
 
   if (!entries.length) {
     body.append(h('div', { class: 'empty-block' },
@@ -1116,7 +1379,7 @@ function buildTranscriptCard(session) {
             : `${modelCallCount} model call(s) were recorded without their request or response bodies, so their words were never stored. Enable body capture in the SDK to read the conversation here.`,
       }),
     ));
-    return transcriptCard(body, 0);
+    return transcriptSection(body, 0, null, session);
   }
 
   if (systemPrompt) {
@@ -1129,7 +1392,7 @@ function buildTranscriptCard(session) {
   const firstTurn = (session.turns || [])[0];
   if (firstTurn && !(firstTurn.operations || []).some((op) => op.type === 'llm')) {
     body.append(h('p', { class: 'notice', style: { marginBottom: '8px' } },
-      `Turn #${firstTurn.turn_id} played ${duration(firstTurn.tts_ms) || 'audio'} of speech with no model call — a scripted opening line, so its words are not in the capture.`));
+      `Turn #${turnName(firstTurn.turn_id)} played ${duration(firstTurn.tts_ms) || 'audio'} of speech with no model call — a scripted opening line, so its words are not in the capture.`));
   }
 
   const transcript = h('div', { class: 'transcript' });
@@ -1146,23 +1409,110 @@ function buildTranscriptCard(session) {
   }
 
   body.append(transcript);
-  return transcriptCard(body, entries.length);
+  return transcriptSection(body, entries.length, transcript, session);
 }
 
-function transcriptCard(body, count) {
-  return h('section', { class: 'card' },
+function transcriptSection(body, count, transcript, session) {
+  // Both the follow toggle and the "click to hear it" promise are about audio.
+  // On a package whose recording never arrived they offer something that cannot
+  // happen, which is worse than not offering it.
+  // `recordings` lists what the manifest *declared*; the player only plays what
+  // actually arrived (`uploaded`). Trusting the former promises playback on a
+  // package whose objects never landed — the exact case this guards.
+  const playable = audioTracks(session).length > 0;
+  // Auto-scroll is the whole point of a transcript beside a player, and it is
+  // also the thing that makes one unusable: the moment a reviewer scrolls back
+  // to re-read a line, a following panel drags them away from it. Following is
+  // therefore a mode the reviewer holds, dropped the instant they take the
+  // scroller themselves and picked back up on request.
+  const follow = h('button', {
+    type: 'button',
+    class: 'btn tiny follow-toggle',
+    'aria-pressed': 'true',
+    title: 'Keep the playing turn in view',
+    text: 'Follow playback',
+    onClick: () => setFollow(!ui.transcriptFollow, { recentre: true }),
+  });
+
+  ui.transcriptFollow = playable;
+  ui.transcriptScroller = body;
+  ui.transcriptFollowButton = follow;
+  ui.transcriptList = transcript;
+
+  if (transcript && playable) {
+    // Wheel and drag are unambiguous statements of intent, unlike `scroll`,
+    // which the panel also fires at itself while following. A press on a line
+    // or on a payload disclosure is not: both are interactions the panel
+    // invites, and either would silently cost the reviewer follow mode.
+    for (const event of ['wheel', 'touchmove']) {
+      body.addEventListener(event, () => setFollow(false), { passive: true });
+    }
+    body.addEventListener('pointerdown', (event) => {
+      if (!event.target.closest('.msg, .msg-payload')) setFollow(false);
+    }, { passive: true });
+    body.addEventListener('keydown', (event) => {
+      if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'].includes(event.key)) setFollow(false);
+    });
+  }
+
+  return h('section', { class: 'card transcript-card' },
     h('div', { class: 'card-head' },
-      h('h3', {}, 'Conversation', h('span', { class: 'hint', text: 'reconstructed from model requests and responses' })),
-      h('span', { class: 'chip', text: `${count} message${count === 1 ? '' : 's'}` }),
+      h('h3', {}, 'Transcript', h('span', { class: 'hint',
+        text: `reconstructed from model requests and responses${playable ? ' · click a line to hear it' : ''}` })),
+      h('div', { class: 'card-tools' },
+        transcript && playable ? follow : null,
+        h('span', { class: 'chip', text: `${count} message${count === 1 ? '' : 's'}` }),
+      ),
     ),
     body,
+  );
+}
+
+function setFollow(on, { recentre = false } = {}) {
+  if (ui.transcriptFollow === on && !recentre) return;
+  ui.transcriptFollow = on;
+  ui.transcriptFollowButton?.setAttribute('aria-pressed', String(on));
+  if (on && recentre) scrollTranscriptTo(ui.liveTurnId, { force: true });
+}
+
+/** Brings the turn now playing to the top of the transcript panel, moving only
+ *  that panel — a document-level `scrollIntoView` would yank the page away from
+ *  whatever else the reviewer was reading. */
+function scrollTranscriptTo(turnId, { force = false } = {}) {
+  const scroller = ui.transcriptScroller;
+  if (!scroller || !scroller.isConnected || turnId == null) return;
+  if (!ui.transcriptFollow && !force) return;
+  const group = scroller.querySelector(`.transcript-turn[data-turn-id="${CSS.escape(String(turnId))}"]`);
+  if (!group) return;
+  const top = group.offsetTop - scroller.offsetTop - 8;
+  if (Math.abs(scroller.scrollTop - top) < 2) return;
+  scroller.scrollTo({ top, behavior: wantsCalm() ? 'auto' : 'smooth' });
+}
+
+/** A tool payload is evidence, not conversation. Rendered open it buries the
+ *  spoken lines either side of it — one 800px JSON blob inside a 290px panel
+ *  costs the reviewer the thread of the call. Collapsed to a single row with a
+ *  preview, the transcript stays readable and the payload is one click away. */
+function toolPayload(label, value) {
+  const text = pretty(value);
+  const lines = text.split('\n').length;
+  const preview = text.replace(/\s+/g, ' ').trim().slice(0, 72);
+  return h('details', { class: 'msg-payload' },
+    // Inside a `.msg` button, a click on the summary would also re-seek the
+    // line; opening a payload is its own intent.
+    h('summary', { onClick: (event) => event.stopPropagation() },
+      h('span', { class: 'payload-name', text: label }),
+      h('span', { class: 'payload-peek', text: preview || 'empty' }),
+      h('span', { class: 'payload-size', text: `${lines} line${lines === 1 ? '' : 's'}` }),
+    ),
+    h('pre', { class: 'msg-tool', text }),
   );
 }
 
 function transcriptMessage(entry) {
   const who = entry.role === 'user' ? 'Caller' : entry.role === 'assistant' ? 'Agent' : entry.role === 'tool' ? 'Tool' : entry.role;
   const tags = [];
-  if (entry.turnId != null) tags.push(h('span', { class: 'tag', text: `turn #${entry.turnId}` }));
+  if (entry.turnId != null) tags.push(h('span', { class: 'tag', text: `turn #${turnName(entry.turnId)}` }));
   if (entry.latency != null && entry.source === 'completion') {
     tags.push(h('span', { class: 'tag', dataset: latencyTone(entry.latency) ? { tone: latencyTone(entry.latency) } : {}, text: `${duration(entry.latency)} model` }));
   }
@@ -1172,15 +1522,20 @@ function transcriptMessage(entry) {
   }
   // Only the reply this call produced failed; the caller line merely sat in
   // its prompt, so tagging that as failed would blame the wrong utterance.
-  if (entry.source === 'completion' && entry.op?.status === 'error') {
-    tags.push(h('span', { class: 'tag', dataset: { tone: 'danger' }, text: 'failed' }));
+  if (entry.source === 'completion' && entry.op) {
+    if (isAborted(entry.op)) {
+      tags.push(h('span', { class: 'tag', dataset: { tone: 'warn' }, text: 'interrupted' }));
+    } else if (entry.op.status === 'error') {
+      tags.push(h('span', { class: 'tag', dataset: { tone: 'danger' }, text: 'failed' }));
+    }
   }
   if (entry.completion?.truncated && !entry.repaired) tags.push(h('span', { class: 'tag', dataset: { tone: 'warn' }, text: 'capture truncated' }));
 
   const toolCalls = entry.toolCalls || [];
   const bodyNodes = [];
+  const payloads = [];
   if (entry.role === 'tool') {
-    bodyNodes.push(h('pre', { class: 'msg-tool', text: pretty(entry.text) }));
+    payloads.push(toolPayload('Tool result', entry.text));
   } else if (entry.text) {
     bodyNodes.push(h('div', { class: 'msg-body', text: entry.text }));
   } else if (toolCalls.length) {
@@ -1194,7 +1549,7 @@ function transcriptMessage(entry) {
       : 'No text in this response.' }));
   }
   for (const call of toolCalls) {
-    if (call.arguments) bodyNodes.push(h('pre', { class: 'msg-tool', text: pretty(call.arguments) }));
+    if (call.arguments) payloads.push(toolPayload(call.name ? `${call.name} arguments` : 'Arguments', call.arguments));
   }
 
   // Only the agent's reply was actually produced by the model call it came
@@ -1204,15 +1559,22 @@ function transcriptMessage(entry) {
   const target = spoken && entry.op
     ? { kind: 'op', id: entry.op.event_id, hint: 'Inspect the model call that produced this reply' }
     : entry.turnId != null
-      ? { kind: 'turn', id: String(entry.turnId), hint: `Inspect turn #${entry.turnId}` }
+      ? { kind: 'turn', id: String(entry.turnId), hint: `Inspect turn #${turnName(entry.turnId)}` }
       : null;
+  const playbackOp = entry.turnId != null
+    ? (state.session?.operations || []).find((op) => String(op.turn_id) === String(entry.turnId)
+      && op.type === (entry.role === 'user' ? 'stt' : 'tts') && audioWindow(op))
+    : null;
 
-  return h('button', {
+  const line = h('button', {
     type: 'button',
     class: 'msg',
     dataset: { role: entry.role, opId: spoken ? entry.op?.event_id || '' : '', turnId: entry.turnId != null ? String(entry.turnId) : '' },
     title: target?.hint || 'Nothing to inspect for this line',
-    onClick: () => target && setSelection(target.kind, target.id, { scroll: true }),
+    onClick: () => {
+      if (target) setSelection(target.kind, target.id, { scroll: true });
+      if (playbackOp) playSegment(playbackOp);
+    },
   },
     h('span', { class: 'msg-role' },
       h('span', { class: 'msg-who', text: who }),
@@ -1220,26 +1582,14 @@ function transcriptMessage(entry) {
     ),
     h('span', {}, ...bodyNodes, tags.length ? h('span', { class: 'msg-tags' }, ...tags) : null),
   );
+
+  // A `<details>` nested inside a `<button>` is invalid HTML and its summary
+  // stops toggling, so payloads are siblings of the line rather than children.
+  if (!payloads.length) return line;
+  return h('div', { class: 'msg-shell', dataset: { role: entry.role } }, line, ...payloads);
 }
 
-/* ----------------------------------------------------------------- turns */
-
-const TURN_COLUMNS = [
-  { key: 'turn', label: 'Turn', sortable: true },
-  { key: 'speech', label: 'Caller speech', sortable: true },
-  { key: 'llm', label: 'Model', sortable: true },
-  { key: 'tts', label: 'Speech out', sortable: true },
-  { key: 'response', label: 'First audio', sortable: true },
-  { key: 'status', label: 'Status', sortable: false },
-];
-
-const TURN_VALUE = {
-  turn: (turn) => Number(turn.turn_id) || 0,
-  speech: (turn) => turn.user_speech_ms,
-  llm: (turn) => turn.llm_ms,
-  tts: (turn) => turn.tts_ms,
-  response: (turn) => turn.time_to_first_audio_ms,
-};
+/* ----------------------------------------------------------------- trace */
 
 /** Sorts rows on a value that can be absent. An unmeasured row is not a fast
  *  row, so it always sinks to the bottom whichever way the column points. */
@@ -1251,114 +1601,884 @@ function compareSortable(left, right, direction) {
   return compare * (direction === 'asc' ? 1 : -1);
 }
 
-function buildTurnsCard(session) {
-  const head = h('div', { class: 'row-head turns-grid' });
-  for (const column of TURN_COLUMNS) {
-    head.append(column.sortable
-      ? h('button', {
-        type: 'button',
-        'aria-label': `Sort by ${column.label}`,
-        dataset: { sortKey: column.key },
-        onClick: () => {
-          const sort = state.turnSort;
-          sort.direction = sort.key === column.key && sort.direction === 'asc' ? 'desc' : 'asc';
-          sort.key = column.key;
-          renderTurnRows();
-        },
-      }, column.label, h('span', { class: 'sort-caret' }))
-      : h('span', { text: column.label }));
+// Framework and transport spans are timed either side of an await, so a retry
+// can appear to start a few ms before the call that owns it.
+const NEST_SLACK_MS = 500;
+
+/**
+ * A model call is recorded twice. The agent framework emits one span per
+ * logical call — it carries the tokens and the time to first token, and it
+ * covers every retry underneath it. The HTTP instrumentation emits one span per
+ * physical attempt — it carries the request body and the status code. Listed
+ * side by side these look like unexplained duplicate calls, which is exactly
+ * the confusion this view exists to remove: the attempts are nested under the
+ * call they served, so "three LLM calls" is visibly one call that retried
+ * twice.
+ */
+function nestTransportAttempts(operations) {
+  const llm = operations.filter((op) => op.type === 'llm' && !isSocket(op));
+  const frameworks = llm.filter((op) => !isTransportSpan(op));
+  const attempts = llm.filter((op) => isTransportSpan(op));
+  const children = new Map();
+  const parentOf = new Map();
+
+  for (const attempt of attempts) {
+    const start = attempt.started_at_ms ?? 0;
+    const end = attempt.ended_at_ms ?? start;
+    let host = null;
+    for (const framework of frameworks) {
+      if (String(framework.turn_id) !== String(attempt.turn_id)) continue;
+      const from = framework.started_at_ms ?? 0;
+      const to = framework.ended_at_ms ?? from;
+      if (start < from - NEST_SLACK_MS || end > to + NEST_SLACK_MS) continue;
+      // Prefer the tightest enclosing call when a turn made several.
+      if (!host || from > (host.started_at_ms ?? 0)) host = framework;
+    }
+    if (!host) continue;
+    if (!children.has(host.event_id)) children.set(host.event_id, []);
+    children.get(host.event_id).push(attempt);
+    parentOf.set(attempt.event_id, host.event_id);
   }
+  for (const list of children.values()) list.sort((a, b) => (a.started_at_ms ?? 0) - (b.started_at_ms ?? 0));
+  return { children, parentOf };
+}
 
-  ui.turnHead = head;
-  ui.turnRows = h('div', { class: 'rows' });
+/** The call as a reviewer thinks about it: turns, each holding the spans that
+ *  served it, with whole-call provider sockets kept out of the way at the end
+ *  so they cannot be mistaken for a two-minute transcription. */
+function buildTrace(session) {
+  const operations = session.operations || [];
+  const turns = session.turns || [];
+  const { children, parentOf } = nestTransportAttempts(operations);
+  const known = new Set(turns.map((turn) => String(turn.turn_id)));
+  const top = operations.filter((op) => !parentOf.has(op.event_id));
 
-  return h('section', { class: 'card' },
-    h('div', { class: 'card-head' },
-      h('h3', {}, 'Turns', h('span', { class: 'hint', text: 'one row per caller/agent exchange' })),
-      h('span', { class: 'chip', text: `${(session.turns || []).length} turn${(session.turns || []).length === 1 ? '' : 's'}` }),
+  const groups = turns.map((turn) => ({
+    kind: 'turn',
+    id: `turn:${turn.turn_id}`,
+    turn,
+    spans: top.filter((op) => !isSocket(op) && String(op.turn_id) === String(turn.turn_id)),
+  }));
+
+  const loose = top.filter((op) => !isSocket(op) && !known.has(String(op.turn_id)));
+  if (loose.length) {
+    groups.push({ kind: 'loose', id: 'group:ungrouped', label: 'Outside any turn', spans: loose });
+  }
+  const sockets = top.filter(isSocket);
+  if (sockets.length) {
+    groups.push({ kind: 'sockets', id: 'group:sockets', label: 'Provider connections', spans: sockets });
+  }
+  for (const group of groups) group.spans.sort((a, b) => (a.started_at_ms ?? 0) - (b.started_at_ms ?? 0));
+  return { groups, children };
+}
+
+/** Shared by the trace and the flat span table so a filter can never mean two
+ *  different things depending on which view is open. */
+function matchesOpFilter(op) {
+  const query = state.opFilter.query.trim().toLowerCase();
+  if (state.opFilter.type !== 'all' && displayType(op) !== state.opFilter.type) return false;
+  if (state.opFilter.errorsOnly && effectiveStatus(op) !== 'error') return false;
+  if (query && !`${operationLabel(op)} ${op.type} ${op.transport || ''} ${op.event_id}`.toLowerCase().includes(query)) return false;
+  return true;
+}
+
+/** A span the agent deliberately abandoned is not a failure, but the SDK has no
+ *  way to say so: aborting an in-flight request surfaces as a thrown error, so
+ *  it lands in the package with status "error" and the runtime's abort name.
+ *
+ *  That distinction is not cosmetic. In the recorded corpus 82 of 95 "errors"
+ *  are aborts and only 13 are real (provider read timeouts). Reporting all 95
+ *  as failures buries the 13 that matter under a 7:1 noise floor, which is
+ *  exactly the "everything looks broken" problem this view exists to remove.
+ *
+ *  Node throws `AbortError`, Python raises `CancelledError`; both mean the same
+ *  thing, and in the recorded corpus every deliberate abort carries one of those
+ *  names. Nothing is matched on the message: downgrading a span here removes it
+ *  from the failure count, so a false positive HIDES a real outage, which is far
+ *  worse than the false negative of leaving one unexplained error on screen.
+ *  Message text is not safe for this — a provider failing with `{"error":"the
+ *  run was cancelled by policy"}` is a real failure, and undici reports a
+ *  server closing a stream mid-response as a bare `Error: aborted`, which is
+ *  also a real failure. Only an explicit abort name is trustworthy. */
+const ABORT_NAMES = new Set(['AbortError', 'CancelledError', 'CancelledException']);
+
+function isAborted(op) {
+  if (op?.status !== 'error') return false;
+  return ABORT_NAMES.has(op.error?.name);
+}
+
+/** The status this span should be judged by, as opposed to the one the runtime
+ *  happened to record. Everything that counts, filters, colours or rolls up a
+ *  status goes through here so the trace, the table and the KPIs can never
+ *  disagree about what "failed" means. */
+function effectiveStatus(op) {
+  return isAborted(op) ? 'cancelled' : op?.status;
+}
+
+/** A cancelled span is the single most alarming thing in this view and the one
+ *  the data explains least: the SDK records that the work stopped early but
+ *  never why, so the row reads like an unhandled fault. It almost never is.
+ *
+ *  Across the recorded corpus 19 of 20 cancelled TTS spans overlap a caller
+ *  utterance — the agent was talking, the caller talked over it, and the agent
+ *  correctly stopped. That is barge-in working, not a failure. The remaining
+ *  case had no caller speech and sat at the end of the call: the call closed
+ *  mid-sentence.
+ *
+ *  Note the overlap has to be a true interval intersection. Testing only for a
+ *  caller utterance *starting inside* the span misses the common case where the
+ *  caller was already mid-sentence when the span began, which accounted for 12
+ *  of the 19. */
+function cancelReason(op) {
+  if (!op || isSocket(op)) return null;
+  const aborted = isAborted(op);
+  if (op.status !== 'cancelled' && !aborted) return null;
+  if (!aborted && op.type !== 'tts') return null;
+  const playout = op.presentation_window;
+  const from = playout?.from_ms ?? op.started_at_ms;
+  const to = playout?.to_ms ?? op.ended_at_ms ?? from;
+  if (from == null) return null;
+
+  const interrupter = (state.session?.operations || []).find((other) => {
+    if (other.type !== 'stt' || isSocket(other) || other === op) return false;
+    if (other.turn_id != null && String(other.turn_id) === String(op.turn_id)) return false;
+    const marks = other.milestones || {};
+    const speechFrom = other.presentation_window?.from_ms ?? marks.speech_started?.occurred_at_ms ?? other.started_at_ms;
+    const speechTo = other.presentation_window?.to_ms ?? marks.speech_ended?.occurred_at_ms ?? other.ended_at_ms;
+    if (speechFrom == null || speechTo == null) return false;
+    return presentationWindowsOverlap({ ...playout, from_ms: from, to_ms: to }, { from_ms: speechFrom, to_ms: speechTo });
+  });
+
+  const spoken = op.response?.audio_ms;
+  const played = op.type === 'tts'
+    ? (spoken ? `${duration(spoken)} of it had already played` : 'playback had barely started')
+    : `it had been running ${duration(to - from)}`;
+  const what = op.type === 'tts' ? 'synthesis' : op.type === 'llm' ? 'the model call' : 'the operation';
+
+  if (interrupter) {
+    const text = sttText(interrupter);
+    return {
+      kind: 'barge-in',
+      short: 'cut off by the caller',
+      text: `Barge-in: the caller started speaking over the agent, so ${what} was abandoned — ${played}.${text ? ` They said “${text}”.` : ''} This is the interruption handling working, not a fault.`,
+    };
+  }
+  return {
+    kind: 'stopped',
+    short: 'stopped early',
+    text: `${what[0].toUpperCase()}${what.slice(1)} was stopped before it finished and no caller speech overlaps it, so this is not barge-in — ${played}. The usual cause is the turn being superseded or the call ending.`,
+  };
+}
+
+/** Exact chunk attribution may contain genuine silence. Compare the recorded
+ * ranges, not their enclosing hull, so silence cannot manufacture a barge-in. */
+function presentationWindowsOverlap(left, right) {
+  const ranges = (window) => window?.segments?.length
+    ? window.segments.map((segment) => [segment.from_ms, segment.to_ms])
+    : [[window?.from_ms, window?.to_ms]];
+  return ranges(left).some(([from, to]) => ranges(right).some(([otherFrom, otherTo]) =>
+    Number.isFinite(from) && Number.isFinite(to) && Number.isFinite(otherFrom) && Number.isFinite(otherTo)
+    && from < otherTo && to > otherFrom));
+}
+
+/** One line of plain language saying what this span actually did, because a row
+ *  reading "azure-openai · 1.4s · ok" tells a reviewer nothing they came for. */
+function spanHeadline(op) {
+  if (op.type === 'stt') {
+    const text = sttText(op);
+    return text ? `“${text}”` : isSocket(op) ? 'streaming transcription socket' : 'no transcript recorded';
+  }
+  if (op.type === 'tool') {
+    const input = op.request?.input;
+    const summary = typeof input === 'string' ? input : input ? pretty(input) : '';
+    return summary ? summary.replace(/\s+/g, ' ').slice(0, 120) : 'no arguments recorded';
+  }
+  if (op.type === 'tts') {
+    if (isSocket(op)) return 'speech synthesis socket';
+    const chars = op.milestones?.speak?.char_count;
+    const audio = op.response?.audio_ms;
+    const parts = [];
+    if (chars) parts.push(`${chars} chars`);
+    if (audio) parts.push(`${duration(audio)} of audio`);
+    const headline = parts.join(' → ') || 'no audio recorded';
+    const reason = cancelReason(op);
+    return reason ? `${headline} — ${reason.short}` : headline;
+  }
+  if (op.type === 'llm') {
+    if (isTransportSpan(op)) {
+      const status = op.response?.status;
+      const model = parseRequestBody(op).request?.model;
+      return [model, status ? `HTTP ${status}` : 'HTTP attempt'].filter(Boolean).join(' · ');
+    }
+    const completion = decodeCompletion(op.response);
+    const tokens = op.response?.total_tokens ?? completion.usage?.total_tokens;
+    const model = op.model || completion.model;
+    const parts = [];
+    if (model) parts.push(model);
+    if (tokens) parts.push(`${tokens} tokens`);
+    const ttft = op.milestones?.first_token?.occurred_at_ms;
+    if (ttft != null && op.started_at_ms != null) parts.push(`first token ${duration(ttft - op.started_at_ms)}`);
+    return parts.join(' · ') || 'model call';
+  }
+  return operationLabel(op);
+}
+
+// The order a phase actually happens in, so the strip reads left to right like
+// the call did. Anything a provider adds that is not listed is appended after.
+const PHASE_ORDER = {
+  stt: ['connected', 'speech_started', 'first_partial', 'speech_ended', 'speech_final', 'final_transcript', 'end_of_utterance', 'turn_report'],
+  tts: ['connected', 'speak', 'first_byte', 'audio_chunk', 'flush', 'turn_report'],
+  llm: ['request_body_captured', 'first_token'],
+};
+
+const PHASE_LABEL = {
+  connected: 'socket open',
+  speech_started: 'caller starts speaking',
+  first_partial: 'first partial transcript',
+  speech_ended: 'caller stops speaking',
+  speech_final: 'provider marks speech final',
+  final_transcript: 'final transcript',
+  end_of_utterance: 'end of utterance',
+  turn_report: 'reported to the turn',
+  request_body_captured: 'request sent',
+  first_token: 'first token',
+  speak: 'text handed to the voice',
+  first_byte: 'first audio byte',
+  audio_chunk: 'audio streaming',
+  flush: 'flush requested',
+  sent_frame: 'frames sent',
+  received_frame: 'frames received',
+};
+
+/**
+ * When does the caller actually start and stop talking? A duration alone cannot
+ * say, so every recorded phase is laid out against the span's own window with
+ * the wall-clock offset spelled out underneath. This is the answer to "STT
+ * starts when and ends when".
+ */
+function phaseStrip(op) {
+  const milestones = op.milestones && typeof op.milestones === 'object' ? op.milestones : {};
+  const order = PHASE_ORDER[op.type] || [];
+  const names = [
+    ...order.filter((name) => milestones[name]),
+    ...Object.keys(milestones).filter((name) => !order.includes(name)),
+  ];
+  const win = audioWindow(op);
+  if (!names.length && !win) return null;
+
+  const start = op.started_at_ms ?? 0;
+  const end = op.ended_at_ms ?? start;
+  const span = Math.max(1, end - start);
+
+  const track = h('div', { class: 'phase-track' });
+  const legend = h('div', { class: 'phase-legend' });
+  for (const name of names) {
+    const point = milestones[name];
+    const at = typeof point?.occurred_at_ms === 'number' ? point.occurred_at_ms : null;
+    if (at == null) continue;
+    const last = typeof point?.last_at_ms === 'number' ? point.last_at_ms : at;
+    const left = clampPercent(((at - start) / span) * 100);
+    const width = clampPercent(((Math.max(last, at) - at) / span) * 100, 100 - left);
+    // A mark that covers a range is a band and a mark that happened once is a
+    // tick. Drawn at the same weight the wide one hides every point mark that
+    // falls inside it — on a TTS span the streaming band buried both the speak
+    // and the flush.
+    track.append(h('span', {
+      class: 'phase-mark',
+      dataset: { type: op.type, range: width > 0.5 ? 'true' : 'false' },
+      style: { left: `${left}%`, width: width > 0.5 ? `${width}%` : null },
+      title: `${PHASE_LABEL[name] || name} at ${offset(at)}${point.count > 1 ? ` · ${point.count} events, last ${offset(last)}` : ''}`,
+    }));
+    legend.append(h('span', { class: 'phase-item' },
+      h('b', { text: PHASE_LABEL[name] || name.replace(/_/g, ' ') }),
+      h('span', { class: 'num', text: offset(at) }),
+      point.count > 1 ? h('small', { text: `×${point.count} → ${offset(last)}` }) : null,
+    ));
+  }
+  if (!legend.childElementCount && !win) return null;
+
+  const rail = h('div', { class: 'phase-rail' },
+    h('span', { class: 'phase-edge num', text: offset(start) }),
+    track,
+    h('span', { class: 'phase-edge num', text: offset(end) }),
+  );
+
+  const strip = h('div', { class: 'phase' }, rail, legend);
+  if (!win) return strip;
+
+  // The window the audio covers is usually narrower than the span — a socket is
+  // open before anyone speaks — so it is shaded rather than implied.
+  const left = clampPercent(((win.from - start) / span) * 100);
+  const width = clampPercent(((win.to - win.from) / span) * 100, 100 - left);
+  track.prepend(h('span', {
+    class: 'phase-window',
+    dataset: { type: op.type },
+    style: { left: `${left}%`, width: `${Math.max(width, 0.6)}%` },
+    title: `${win.label} · ${offset(win.from)} → ${offset(win.to)}`,
+  }));
+  track.append(h('span', { class: 'phase-playhead', dataset: { op: op.event_id }, hidden: true }));
+
+  rail.classList.add('has-audio');
+  const playing = segment.playing && segment.opId === op.event_id;
+  rail.prepend(h('button', {
+    type: 'button',
+    class: 'phase-play',
+    dataset: { op: op.event_id, playing: String(playing) },
+    'aria-pressed': String(playing),
+    'aria-label': playing ? 'Stop this span' : 'Play this span',
+    title: `Play the ${win.label} for this span (${duration(win.to - win.from)})`,
+    text: playing ? '■' : '▶',
+    onClick: (event) => { event.stopPropagation(); playSegment(op); },
+  }));
+
+  legend.append(h('span', { class: 'phase-item is-audio' },
+    h('b', { text: win.isolated ? `plays ${win.label}` : 'plays both speakers' }),
+    h('span', { class: 'num', text: duration(win.to - win.from) }),
+    win.isolated ? null : h('small', { text: 'no isolated channel in this package' }),
+  ));
+
+  return strip;
+}
+
+function traceCell(text, className = '') {
+  return h('span', { class: className, title: text, text });
+}
+
+/** One row of the trace, at any depth. Turns, spans and retries share a grid so
+ *  the eye can compare a retry against the call that spawned it. */
+function traceRowNode({ depth, expandable, expanded, badge, badgeType, title, headline, startMs, durationMs, durationHint, tone, status, bar, dataset, onActivate }) {
+  const twisty = h('span', { class: 'trace-twisty', text: expandable ? (expanded ? '▾' : '▸') : '' });
+  return h('button', {
+    type: 'button',
+    class: 'trace-row',
+    dataset: { ...dataset, depth: String(depth) },
+    'aria-expanded': expandable ? String(expanded) : null,
+    'aria-pressed': 'false',
+    style: { '--depth': String(depth) },
+    onClick: onActivate,
+  },
+    h('span', { class: 'trace-lead' }, twisty, h('span', { class: 'type-tag', dataset: { type: badgeType }, text: badge })),
+    h('span', { class: 'trace-title' },
+      title ? h('b', { text: title }) : null,
+      headline ? traceCell(headline, 'trace-headline') : null,
     ),
-    h('div', { class: 'card-body flush scroll-cap' }, head, ui.turnRows),
+    h('span', { class: 'num trace-start', text: startMs == null ? '—' : offset(startMs) }),
+    h('span', { class: 'trace-dur' },
+      durationMs == null
+        ? h('span', { class: 'cell-missing', text: durationHint || 'not timed' })
+        : h('span', { class: 'num', title: durationHint || null, text: duration(durationMs) }),
+      bar ? h('span', { class: 'bar-track' }, h('span', { class: 'bar-fill', dataset: tone ? { tone } : {}, style: { width: `${bar.width}%`, background: bar.color || null } })) : null,
+    ),
+    h('span', { class: 'state-dot', dataset: { status }, text: status || '—' }),
   );
 }
 
-function renderTurnRows() {
-  const host = ui.turnRows;
-  if (!host) return;
+/** Both the trace and the flat table read `state.opFilter`, so the controls are
+ *  built once and either view can host them. */
+function buildOpFilterControls(onChange) {
+  const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Filter operations by type' });
+  // "conn" is a scope rather than a type, but from the reviewer's point of view
+  // it is just another lane of the call they want to isolate.
+  for (const type of ['all', ...TYPES, 'conn']) {
+    seg.append(h('button', {
+      type: 'button',
+      dataset: { opType: type },
+      'aria-pressed': String(state.opFilter.type === type),
+      text: type === 'all' ? 'All' : type.toUpperCase(),
+      title: type === 'conn' ? 'Provider socket connections' : null,
+      onClick: () => { state.opFilter.type = type; onChange(); },
+    }));
+  }
+
+  const errorsToggle = h('button', {
+    type: 'button',
+    class: 'btn tiny',
+    dataset: { role: 'errors-only' },
+    'aria-pressed': String(state.opFilter.errorsOnly),
+    text: 'Failures only',
+    onClick: () => { state.opFilter.errorsOnly = !state.opFilter.errorsOnly; onChange(); },
+  });
+
+  const search = h('input', {
+    type: 'search',
+    class: 'filter-input',
+    placeholder: 'Search endpoint or tool',
+    'aria-label': 'Search operations',
+    onInput: (event) => { state.opFilter.query = event.target.value; onChange(); },
+  });
+
+  ui.opSeg = seg;
+  ui.opErrors = errorsToggle;
+  ui.opSearch = search;
+  return { seg, errorsToggle, search };
+}
+
+/** Re-renders whichever filtered view happens to be mounted. */
+function refreshFilteredViews() {
+  renderTraceRows();
+  renderOperationRows();
+  syncOpFilterControls();
+  writeLocation();
+}
+
+function hasPhases(op) {
+  const milestones = op?.milestones;
+  if (milestones && typeof milestones === 'object' && Object.keys(milestones).length) return true;
+  // A span with no provider marks can still be played back, and that is reason
+  // enough to let the reviewer open it.
+  if (audioWindow(op)) return true;
+  // A cancelled span carries an explanation worth reading even when it recorded
+  // nothing else at all.
+  return Boolean(cancelReason(op));
+}
+
+function turnUtterance(group) {
+  const stt = group.spans.find((op) => op.type === 'stt' && !isSocket(op));
+  return stt ? sttText(stt) : null;
+}
+
+function buildTraceCard(session) {
+  state.trace = buildTrace(session);
+  const { seg, errorsToggle, search } = buildOpFilterControls(refreshFilteredViews);
+  search.value = state.opFilter.query;
+
+  ui.traceCount = h('span', { class: 'chip' });
+  ui.traceRows = h('div', { class: 'rows trace' });
+
+  const allIds = () => [
+    ...state.trace.groups.map((group) => group.id),
+    ...state.trace.groups.flatMap((group) => group.spans.filter((op) => hasPhases(op) || state.trace.children.has(op.event_id)).map((op) => op.event_id)),
+  ];
+
+  const toggleAll = h('button', {
+    type: 'button', class: 'btn tiny',
+    text: 'Expand all',
+    onClick: (event) => {
+      const opening = event.currentTarget.textContent === 'Expand all';
+      state.expanded = opening ? new Set(allIds()) : new Set();
+      event.currentTarget.textContent = opening ? 'Collapse all' : 'Expand all';
+      renderTraceRows();
+    },
+  });
+
+  const head = h('div', { class: 'row-head trace-grid' },
+    h('span', { text: '' }),
+    h('span', { text: 'Step' }),
+    h('span', { text: 'Start' }),
+    h('span', { text: 'Elapsed' }),
+    h('span', { text: 'Status' }),
+  );
+
+  return h('section', { class: 'card' },
+    h('div', { class: 'card-head' },
+      h('h3', {}, 'Trace', ui.traceCount),
+      h('div', { class: 'card-tools' }, seg, errorsToggle, toggleAll, search),
+    ),
+    h('p', { class: 'view-note' }, 'One row per turn. Open a turn to see the spans that served it; open a span to see exactly when each phase happened, and press ▶ to play that time range in the single call recording. Retried HTTP attempts sit underneath the model call that made them.'),
+    h('div', { class: 'card-body flush scroll-cap' }, head, ui.traceRows),
+  );
+}
+
+/** The trace already shows the type as a coloured tag, so a label that merely
+ *  repeats it ("LLM · llm") spends the widest column saying nothing. Drop it and
+ *  let the headline have the room. */
+function countFailed(ops) {
+  return ops.filter((op) => effectiveStatus(op) === 'error').length;
+}
+
+function traceTitle(op) {  const label = operationLabel(op);
+  return label.toLowerCase() === (displayType(op) || '').toLowerCase() ? '' : label;
+}
+
+function renderTraceRows() {
+  const host = ui.traceRows;
+  if (!host || !state.trace) return;
   clear(host);
 
-  const turns = [...(state.session?.turns || [])];
-  const { key, direction } = state.turnSort;
-  const value = TURN_VALUE[key] || TURN_VALUE.turn;
-  turns.sort((a, b) => compareSortable(value(a), value(b), direction));
+  const { groups, children } = state.trace;
+  const filtering = state.opFilter.type !== 'all' || state.opFilter.errorsOnly || Boolean(state.opFilter.query.trim());
+  // A filter that hid the retry but kept its parent would misreport the call,
+  // so a span survives if it matches or if any attempt beneath it does.
+  const keep = (op) => matchesOpFilter(op) || (children.get(op.event_id) || []).some(matchesOpFilter);
 
-  for (const button of ui.turnHead?.querySelectorAll('button') || []) {
-    const active = button.dataset.sortKey === key;
-    const label = TURN_COLUMNS.find((column) => column.key === button.dataset.sortKey)?.label || 'column';
-    button.setAttribute('aria-label', active
-      ? `Sort by ${label}, currently ${direction === 'asc' ? 'ascending' : 'descending'}`
-      : `Sort by ${label}`);
-    button.dataset.active = String(active);
-    $('.sort-caret', button).textContent = active ? (direction === 'asc' ? '↑' : '↓') : '';
+  // Provider sockets are open for the whole call; scaling against them would
+  // flatten every per-turn span this view exists to compare.
+  const scale = [];
+  for (const group of groups) {
+    for (const op of group.spans) {
+      if (!isSocket(op) && op.duration_ms != null) scale.push(op.duration_ms);
+      for (const kid of children.get(op.event_id) || []) if (kid.duration_ms != null) scale.push(kid.duration_ms);
+    }
+  }
+  const longest = Math.max(...scale, 1);
+
+  const total = groups.reduce((sum, group) => sum + group.spans.length + group.spans.reduce((n, op) => n + (children.get(op.event_id)?.length || 0), 0), 0);
+  let shown = 0;
+
+  // The count has to describe the spans the filter selected, not the rows that
+  // happen to be painted; a parent kept only because a retry beneath it matched
+  // is not itself a match and must not inflate the total.
+  const countMatches = (op) => {
+    const self = !filtering || matchesOpFilter(op) ? 1 : 0;
+    return (children.get(op.event_id) || []).reduce((sum, kid) => sum + countMatches(kid), self);
+  };
+
+  const appendSpan = (op, depth) => {
+    const allKids = children.get(op.event_id) || [];
+    // A filter that kept the parent but hid the matching retry would answer the
+    // reviewer's question with the one row that cannot answer it: "failures
+    // only" has to actually show the failed attempt.
+    const kids = filtering ? allKids.filter(matchesOpFilter) : allKids;
+    const expandable = allKids.length > 0 || hasPhases(op);
+    const open = state.expanded.has(op.event_id) || (filtering && kids.length > 0);
+    const socket = isSocket(op);
+    host.append(traceRowNode({
+      depth,
+      expandable,
+      expanded: open,
+      badge: (displayType(op) || '').toUpperCase(),
+      badgeType: displayType(op),
+      title: traceTitle(op),
+      headline: spanHeadline(op),
+      startMs: op.started_at_ms,
+      durationMs: op.duration_ms,
+      durationHint: socket ? 'open for the whole call, not a per-request latency' : null,
+      status: effectiveStatus(op),
+      bar: op.duration_ms == null ? null : {
+        width: socket ? 100 : Math.min(100, Math.max(2, (op.duration_ms / longest) * 100)),
+        color: COLOR[displayType(op)] || 'var(--accent)',
+      },
+      dataset: { opId: op.event_id },
+      onActivate: () => {
+        if (expandable) {
+          if (open) state.expanded.delete(op.event_id);
+          else state.expanded.add(op.event_id);
+        }
+        setSelection('op', op.event_id);
+        renderTraceRows();
+      },
+    }));
+    if (!open) return;
+    const why = cancelReason(op);
+    if (why) {
+      host.append(h('div', { class: 'trace-detail', style: { '--depth': String(depth + 1) } },
+        h('p', { class: 'trace-explain', dataset: { tone: why.kind === 'barge-in' ? 'info' : 'warn' }, text: why.text }),
+      ));
+    }
+    const strip = phaseStrip(op);
+    if (strip) host.append(h('div', { class: 'trace-detail', style: { '--depth': String(depth + 1) } }, strip));
+    if (allKids.length) {
+      host.append(h('div', { class: 'trace-detail', style: { '--depth': String(depth + 1) } },
+        h('p', { class: 'trace-explain', text: allKids.length === 1
+          ? 'One HTTP request served this model call. The framework span above reports the tokens; the request body is on the attempt below.'
+          : `${allKids.length} HTTP attempts served this one model call${countFailed(allKids) ? `, ${countFailed(allKids)} of which failed and ${countFailed(allKids) === 1 ? 'was' : 'were'} retried` : ''}. The framework span above times the whole sequence, which is why its duration covers every attempt.` }),
+      ));
+    }
+    for (const kid of kids) appendSpan(kid, depth + 1);
+  };
+
+  for (const group of groups) {
+    const spans = group.spans.filter((op) => !filtering || keep(op));
+    if (filtering && !spans.length) continue;
+    shown += spans.reduce((sum, op) => sum + countMatches(op), 0);
+
+    const expanded = filtering || state.expanded.has(group.id);
+    const turn = group.turn;
+    const starts = group.spans.map((op) => op.started_at_ms).filter((value) => value != null);
+    const ends = group.spans.map((op) => op.ended_at_ms ?? op.started_at_ms).filter((value) => value != null);
+    const from = starts.length ? Math.min(...starts) : null;
+    const to = ends.length ? Math.max(...ends) : null;
+    // A span's own status is not the whole story: the framework span for a model
+    // call can be abandoned by barge-in while the HTTP attempt nested under it
+    // failed for real. Those attempts are not in `group.spans` (they hang off
+    // `children`), so a rollup that ignored them could quietly downgrade a turn
+    // that genuinely failed.
+    const branchStatus = (op) => {
+      const kids = children.get(op.event_id) || [];
+      if (effectiveStatus(op) === 'error' || kids.some((kid) => branchStatus(kid) === 'error')) return 'error';
+      if (effectiveStatus(op) === 'cancelled' || kids.some((kid) => branchStatus(kid) === 'cancelled')) return 'cancelled';
+      return 'ok';
+    };
+    const worstStatus = group.spans.some((op) => branchStatus(op) === 'error') ? 'error'
+      : group.spans.some((op) => branchStatus(op) === 'cancelled') ? 'cancelled' : 'ok';
+    // The server stamps the turn "error" from the same raw span statuses, so a
+    // turn whose only fault was an aborted call inherits a failure the spans
+    // underneath it no longer claim. Trust the spans: a parent row must never
+    // accuse a turn of failing when nothing inside it did.
+    const groupStatus = turn
+      ? (turn.status === 'error' && worstStatus !== 'error' ? worstStatus : turn.status || worstStatus)
+      : worstStatus;
+
+    const parts = [];
+    if (turn) {
+      if (turn.user_speech_ms != null) parts.push(`${duration(turn.user_speech_ms)} listening`);
+      if (turn.llm_ms != null) parts.push(`${duration(turn.llm_ms)} thinking${turn.llm_calls > 1 ? ` over ${turn.llm_calls} calls` : ''}`);
+      if (turn.tts_ms != null) parts.push(`${duration(turn.tts_ms)} speaking`);
+    }
+    if (!parts.length) parts.push(`${group.spans.length} span${group.spans.length === 1 ? '' : 's'}`);
+
+    const response = turn?.time_to_first_audio_ms;
+    host.append(traceRowNode({
+      depth: 0,
+      expandable: true,
+      expanded,
+      badge: turn ? `#${turn.turn_id}` : '',
+      badgeType: turn ? 'turn' : 'conn',
+      title: turn ? (turnUtterance(group) ? `“${turnUtterance(group)}”` : `Turn ${turn.turn_id}`) : group.label,
+      headline: parts.join(' · '),
+      startMs: from,
+      durationMs: from != null && to != null ? to - from : null,
+      durationHint: group.kind === 'sockets' ? 'sockets stay open for the whole call' : null,
+      tone: response == null ? null : latencyTone(response),
+      status: groupStatus,
+      bar: response == null ? null : { width: Math.min(100, Math.max(2, (response / Math.max(SLOW_MS * 2, response)) * 100)) },
+      dataset: turn ? { turnId: turn.turn_id, groupId: group.id } : { groupId: group.id },
+      onActivate: () => {
+        if (expanded) state.expanded.delete(group.id);
+        else state.expanded.add(group.id);
+        if (turn) setSelection('turn', turn.turn_id);
+        renderTraceRows();
+      },
+    }));
+
+    if (turn && response != null) {
+      host.append(h('div', { class: 'trace-response', style: { '--depth': '0' }, dataset: { tone: latencyTone(response) || 'ok' } },
+        h('span', { text: 'first audio back' }),
+        h('b', { class: 'num', text: duration(response) }),
+      ));
+    }
+
+    if (!expanded) continue;
+    for (const op of spans) appendSpan(op, 1);
   }
 
-  if (!turns.length) {
+  if (ui.traceCount) ui.traceCount.textContent = shown === total ? `${total} spans` : `${shown} of ${total} spans`;
+
+  // Collapsing or filtering away the span that is playing would leave audio
+  // running with no control on screen and no way to tell what it belongs to.
+  if (segment.playing && !host.querySelector(`.phase-play[data-op="${CSS.escape(segment.opId)}"]`)) stopSegment();
+
+  if (!host.childElementCount) {
     host.append(h('div', { class: 'empty-block' },
-      h('b', { text: 'No turn spans in this package' }),
-      h('p', { text: 'Operations were captured without a turn_id, so they could not be grouped into exchanges. They are still listed under Operations below.' }),
-    ));
-    return;
-  }
-
-  const worst = Math.max(...turns.map((turn) => turn.time_to_first_audio_ms || 0), 1);
-
-  for (const turn of turns) {
-    const response = turn.time_to_first_audio_ms;
-    const tone = latencyTone(response);
-    // A grid of bare numbers is unreadable to a screen reader, and
-    // `aria-selected` is invalid outside a grid or listbox, so the row states
-    // its own metrics and reports selection as a pressed toggle.
-    const announced = [
-      `Turn ${turn.turn_id}`,
-      `caller speech ${duration(turn.user_speech_ms) || 'not measured'}`,
-      `model ${duration(turn.llm_ms) || 'not measured'}${turn.llm_calls > 1 ? ` over ${turn.llm_calls} calls` : ''}`,
-      `speech out ${duration(turn.tts_ms) || 'not measured'}`,
-      `first audio ${duration(response) || 'not measured'}`,
-      `status ${turn.status}`,
-    ].join(', ');
-    host.append(h('button', {
-      type: 'button',
-      class: 'row turns-grid',
-      dataset: { turnId: turn.turn_id },
-      'aria-label': announced,
-      'aria-pressed': 'false',
-      onClick: () => setSelection('turn', turn.turn_id),
-    },
-      h('span', { class: 'cell-mono', text: `#${turn.turn_id}` }),
-      metricCell(turn.user_speech_ms, 'no stt span'),
-      metricCell(turn.llm_ms, 'no model call', turn.llm_calls > 1 ? `${turn.llm_calls} calls` : null),
-      metricCell(turn.tts_ms, 'no tts span'),
-      h('span', { class: 'bar-cell' },
-        response == null
-          ? h('span', { class: 'cell-missing', text: 'no first-audio mark' })
-          : h('span', { class: 'num', text: duration(response) }),
-        response == null ? null : h('span', { class: 'bar-track' }, h('span', {
-          class: 'bar-fill',
-          dataset: tone ? { tone } : {},
-          style: { width: `${Math.max(2, (response / worst) * 100)}%` },
-        })),
-      ),
-      h('span', { class: 'state-dot', dataset: { status: turn.status }, text: turn.status }),
+      h('b', { text: total ? 'No spans match these filters' : 'No operations captured' }),
+      total
+        ? h('button', { type: 'button', class: 'btn tiny', text: 'Clear filters', onClick: () => { state.opFilter = { type: 'all', errorsOnly: false, query: '' }; refreshFilteredViews(); } })
+        : h('p', { text: 'The uploaded package contained no stt, llm, tts or tool events.' }),
     ));
   }
   syncSelection();
 }
 
-function metricCell(value, missingHint, note) {
-  // A bare em dash reads as zero; say why the number is absent, visibly.
-  if (value == null) return h('span', { class: 'cell-missing', text: missingHint });
-  return h('span', { class: 'bar-cell' },
-    h('span', { class: 'num', text: duration(value) }),
-    note ? h('span', { class: 'cell-dim', style: { fontSize: '10.5px' }, text: note }) : null,
+/* ---------------------------------------------------------- STT quality */
+
+/**
+ * STT is intentionally its own review surface.  A connection-scoped STT
+ * websocket is transport health, not an utterance, so only the turn span is
+ * considered here.  The same pattern can later power LLM and TTS quality
+ * panels without changing the all-up call timeline above.
+ */
+function sttOperation(turn) {
+  return (turn?.operations || []).find((op) => op.type === 'stt' && !isSocket(op)) || null;
+}
+
+function sttMilestone(op, name) {
+  const point = op?.milestones?.[name];
+  return typeof point?.occurred_at_ms === 'number' ? point.occurred_at_ms : null;
+}
+
+function sttResult(op) {
+  const response = op?.response;
+  return response && typeof response === 'object' ? response : {};
+}
+
+function sttText(op) {
+  const value = sttResult(op).transcript;
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function sttPartialCount(op) {
+  return op?.samples?.partial?.items?.length ?? 0;
+}
+
+function confidence(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? `${Math.round(value * 100)}%` : '—';
+}
+
+const CHALLENGER_STT_OPTIONS = [
+  { value: 'elevenlabs_scribe_v2', label: 'ElevenLabs Scribe v2' },
+];
+
+function buildChallengerControl(session, comparisonUrl) {
+  const trigger = h('button', { type: 'button', class: 'btn primary', text: 'Run beta comparison', 'aria-expanded': 'false' });
+  const chooser = h('select', { class: 'challenger-select', 'aria-label': 'Choose a challenger STT model', hidden: true },
+    h('option', { value: '', text: 'Select challenger STT…' }),
+    ...CHALLENGER_STT_OPTIONS.map((option) => h('option', { value: option.value, text: option.label })),
+  );
+  const stateText = h('span', { class: 'challenger-state', role: 'status', 'aria-live': 'polite' });
+  const control = h('div', { class: 'challenger-control' }, trigger, chooser, stateText);
+  let pollTimer = null;
+
+  const openChooser = () => {
+    chooser.hidden = false;
+    trigger.setAttribute('aria-expanded', 'true');
+    chooser.focus();
+  };
+  const stopPolling = () => {
+    if (pollTimer) window.clearTimeout(pollTimer);
+    pollTimer = null;
+  };
+  const showStatus = (job) => {
+    const active = job.status === 'queued' || job.status === 'in_progress';
+    const label = job.label || 'Challenger';
+    if (active) {
+      chooser.hidden = true;
+      trigger.disabled = true;
+      trigger.textContent = 'Comparing recorded audio…';
+      stateText.textContent = job.status === 'queued' ? 'Queued' : 'Running';
+      pollTimer = window.setTimeout(loadStatus, 1500);
+      return;
+    }
+    stopPolling();
+    trigger.disabled = false;
+    if (job.status === 'completed' || job.status === 'partial') {
+      chooser.hidden = true;
+      trigger.textContent = 'View comparison';
+      trigger.onclick = () => { window.location.href = comparisonUrl; };
+      stateText.textContent = job.status === 'completed' ? `${label} complete` : `${label} ready with limited results`;
+    } else if (job.status === 'failed') {
+      trigger.textContent = 'Retry comparison';
+      trigger.onclick = openChooser;
+      stateText.textContent = job.error ? `Could not run ${label}: ${job.error}` : 'Challenger evaluation failed';
+    } else {
+      trigger.textContent = 'Run beta comparison';
+      trigger.onclick = openChooser;
+      stateText.textContent = 'Replays recorded caller audio with ElevenLabs Scribe v2.';
+    }
+  };
+  const loadStatus = async () => {
+    if (!control.isConnected || state.sessionId !== session.id) return;
+    try {
+      const response = await fetch(`/v1/sessions/${encodeURIComponent(session.id)}/challenger-evaluation`);
+      if (!response.ok) throw new Error('Could not load challenger status');
+      showStatus(await response.json());
+    } catch (error) {
+      trigger.disabled = false;
+      stateText.textContent = error.message;
+    }
+  };
+  trigger.onclick = openChooser;
+  chooser.addEventListener('change', async () => {
+    if (!chooser.value) return;
+    const model = chooser.value;
+    trigger.disabled = true;
+    chooser.disabled = true;
+    stateText.textContent = 'Starting challenger evaluation…';
+    try {
+      const response = await fetch(`/v1/sessions/${encodeURIComponent(session.id)}/challenger-evaluation`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.detail || 'Could not start challenger evaluation');
+      }
+      chooser.disabled = false;
+      showStatus(await response.json());
+    } catch (error) {
+      chooser.disabled = false;
+      trigger.disabled = false;
+      stateText.textContent = error.message;
+    }
+  });
+  // The card has not been appended when this helper returns, so starting the
+  // request synchronously would see a detached node and stop immediately.
+  queueMicrotask(() => { void loadStatus(); });
+  return control;
+}
+
+function buildSttQualityCard(session) {
+  const turns = session.turns || [];
+  const rows = turns.map((turn) => ({ turn, op: sttOperation(turn) })).filter(({ op }) => op);
+  const partials = rows.map(({ op }) => {
+    const start = sttMilestone(op, 'speech_started');
+    const first = sttMilestone(op, 'first_partial');
+    return start != null && first != null && first >= start ? first - start : null;
+  }).filter((value) => value != null);
+  const finals = rows.map(({ op }) => {
+    const end = sttMilestone(op, 'speech_ended');
+    const final = sttMilestone(op, 'final_transcript');
+    return end != null && final != null && final >= end ? final - end : null;
+  }).filter((value) => value != null);
+  const configured = [...new Set(rows.map(({ op }) => op.request?.endpointing_ms).filter((value) => Number.isFinite(value)))];
+  const endpointing = configured.length === 1 ? duration(configured[0]) : configured.length > 1 ? 'varies' : '—';
+  const captured = rows.filter(({ op }) => sttText(op)).length;
+  const callerTrack = session.recordings?.some((item) => ['call', 'caller'].includes(item.track) && item.uploaded);
+  const productionModel = rows.map(({ op }) => op.model || op.request?.model).find(Boolean) || 'deepgram-nova-3';
+  const comparisonUrl = `/stt-evaluation?session=${encodeURIComponent(session.id)}&production=${encodeURIComponent(productionModel)}`;
+
+  const metric = (label, value, note, tone = null) => h('div', { class: 'stt-metric', dataset: tone ? { tone } : {} },
+    h('span', { text: label }),
+    h('b', { class: 'num', text: value }),
+    h('small', { text: note }),
+  );
+
+  const summary = h('div', { class: 'stt-summary' },
+    metric('Coverage', `${rows.length}/${turns.length || 0}`, 'recorded turns'),
+    metric('Transcripts', `${captured}/${rows.length || 0}`, captured === rows.length ? 'available' : 'partial capture'),
+    metric('First partial p50', partials.length ? duration(percentile(partials, 0.5)) : '—', partials.length ? 'speech → text' : 'unavailable'),
+    metric('Finalization p50', finals.length ? duration(percentile(finals, 0.5)) : '—', finals.length ? 'speech end → final' : 'unavailable', finals.length && percentile(finals, 0.5) > 700 ? 'warn' : null),
+    metric('Endpointing', endpointing, configured.length ? 'configured' : 'unavailable'),
+  );
+
+  const notice = h('div', { class: 'stt-notice' },
+    h('b', { text: 'Live STT telemetry · Beta' }),
+    h('span', { text: 'Streaming timing and transcripts. Accuracy appears after a challenger comparison.' }),
+  );
+
+  const table = h('div', { class: 'stt-turns' });
+  if (!rows.length) {
+    table.append(h('div', { class: 'empty-block' }, h('b', { text: 'No recorded STT turns' }), h('p', { text: 'Only spoken turns with STT telemetry appear here.' })));
+  } else {
+    table.append(h('div', { class: 'stt-turn stt-turn-head' },
+      h('span', { text: 'Turn' }), h('span', { text: 'Production transcript' }), h('span', { text: 'Stream' }), h('span', { text: 'Finalization' }), h('span', { text: 'Review' }),
+    ));
+    for (const { turn, op } of rows) {
+      const text = sttText(op);
+      const start = sttMilestone(op, 'speech_started');
+      const first = sttMilestone(op, 'first_partial');
+      const end = sttMilestone(op, 'speech_ended');
+      const final = sttMilestone(op, 'final_transcript');
+      const firstMs = start != null && first != null && first >= start ? first - start : null;
+      const finalMs = end != null && final != null && final >= end ? final - end : null;
+      const result = sttResult(op);
+      table.append(h('div', { class: 'stt-turn', dataset: { turnId: turn.turn_id } },
+        h('button', { type: 'button', class: 'stt-turn-id', text: `#${turn.turn_id}`, title: 'Open this turn in the inspector', onClick: () => setSelection('turn', turn.turn_id, { scroll: true }) }),
+        h('div', { class: 'stt-copy' },
+          h('span', { text: text || 'Transcript content was not captured' }),
+          text ? h('small', { text: `${confidence(result.confidence)} confidence · ${(result.words || []).length || 'no'} timed words` }) : null,
+        ),
+        h('div', { class: 'stt-stream' },
+          h('span', { class: 'num', text: firstMs != null ? duration(firstMs) : '—' }),
+          h('small', { text: `${sttPartialCount(op)} changed partial${sttPartialCount(op) === 1 ? '' : 's'}` }),
+        ),
+        h('div', { class: 'stt-stream' },
+          h('span', { class: 'num', text: finalMs != null ? duration(finalMs) : '—' }),
+          h('small', { text: result.final_reason ? `via ${result.final_reason.replace(/_/g, ' ')}` : 'not measured' }),
+        ),
+        callerTrack && start != null ? h('button', { type: 'button', class: 'btn tiny', text: 'Listen', onClick: () => seekMs(start) }) : h('span', { class: 'cell-missing', text: callerTrack ? 'no speech window' : 'no caller audio' }),
+      ));
+    }
+  }
+
+  return h('section', { class: 'card stt-card', id: 'stt-quality' },
+    h('div', { class: 'card-head' },
+      h('h3', {}, 'STT review', h('span', { class: 'chip', dataset: { tone: 'warn' }, text: 'Beta' })),
+      h('div', { class: 'card-tools' },
+        h('span', { class: 'chip', text: rows.length ? `${rows.length} captured STT turn${rows.length === 1 ? '' : 's'}` : 'not captured' }),
+        buildChallengerControl(session, comparisonUrl),
+        h('a', { class: 'btn', href: comparisonUrl, text: 'Open comparison' }),
+      ),
+    ),
+    h('div', { class: 'card-body flush' }, notice, summary, table),
   );
 }
 
@@ -1380,11 +2500,19 @@ const OP_VALUE = {
   start: (op) => op.started_at_ms ?? 0,
   duration: (op) => op.duration_ms,
   cost: (op) => decodeCompletion(op.response).cost?.amount ?? null,
-  status: (op) => op.status || '',
+  status: (op) => effectiveStatus(op) || '',
 };
 
+const reportedCostCache = new WeakMap();
+
 function hasReportedModelCosts() {
-  return (state.session?.operations || []).some((op) => op.type === 'llm' && decodeCompletion(op.response).cost);
+  const operations = state.session?.operations;
+  if (!operations) return false;
+  const cached = reportedCostCache.get(operations);
+  if (cached !== undefined) return cached;
+  const answer = operations.some((op) => op.type === 'llm' && decodeCompletion(op.response).cost);
+  reportedCostCache.set(operations, answer);
+  return answer;
 }
 
 function visibleOperationColumns() {
@@ -1392,40 +2520,9 @@ function visibleOperationColumns() {
 }
 
 function buildOperationsCard() {
-  const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Filter operations by type' });
-  // "conn" is a scope rather than a type, but from the reviewer's point of view
-  // it is just another lane of the call they want to isolate.
-  for (const type of ['all', ...TYPES, 'conn']) {
-    seg.append(h('button', {
-      type: 'button',
-      dataset: { opType: type },
-      'aria-pressed': String(state.opFilter.type === type),
-      text: type === 'all' ? 'All' : type.toUpperCase(),
-      title: type === 'conn' ? 'Provider socket connections' : null,
-      onClick: () => { state.opFilter.type = type; renderOperationRows(); syncOpFilterControls(); writeLocation(); },
-    }));
-  }
+  const { seg, errorsToggle, search } = buildOpFilterControls(refreshFilteredViews);
+  search.value = state.opFilter.query;
 
-  const errorsToggle = h('button', {
-    type: 'button',
-    class: 'btn tiny',
-    dataset: { role: 'errors-only' },
-    'aria-pressed': String(state.opFilter.errorsOnly),
-    text: 'Failures only',
-    onClick: () => { state.opFilter.errorsOnly = !state.opFilter.errorsOnly; renderOperationRows(); syncOpFilterControls(); writeLocation(); },
-  });
-
-  const search = h('input', {
-    type: 'search',
-    class: 'filter-input',
-    placeholder: 'Search endpoint or tool',
-    'aria-label': 'Search operations',
-    onInput: (event) => { state.opFilter.query = event.target.value; renderOperationRows(); writeLocation(); },
-  });
-
-  ui.opSeg = seg;
-  ui.opErrors = errorsToggle;
-  ui.opSearch = search;
   ui.opCount = h('span', { class: 'chip' });
   ui.opRows = h('div', { class: 'rows' });
 
@@ -1475,13 +2572,7 @@ function renderOperationRows() {
   clear(host);
 
   const all = state.session?.operations || [];
-  const query = state.opFilter.query.trim().toLowerCase();
-  const rows = all.filter((op) => {
-    if (state.opFilter.type !== 'all' && displayType(op) !== state.opFilter.type) return false;
-    if (state.opFilter.errorsOnly && op.status !== 'error') return false;
-    if (query && !`${operationLabel(op)} ${op.type} ${op.transport || ''} ${op.event_id}`.toLowerCase().includes(query)) return false;
-    return true;
-  });
+  const rows = all.filter(matchesOpFilter);
 
   const { key: sortKey, direction } = state.opSort;
   const value = OP_VALUE[sortKey] || OP_VALUE.start;
@@ -1511,7 +2602,7 @@ function renderOperationRows() {
     host.append(h('div', { class: 'empty-block' },
       h('b', { text: all.length ? 'No operations match these filters' : 'No operations captured' }),
       all.length
-        ? h('button', { type: 'button', class: 'btn tiny', text: 'Clear filters', onClick: () => { state.opFilter = { type: 'all', errorsOnly: false, query: '' }; if (ui.opSearch) ui.opSearch.value = ''; renderOperationRows(); syncOpFilterControls(); writeLocation(); } })
+        ? h('button', { type: 'button', class: 'btn tiny', text: 'Clear filters', onClick: () => { state.opFilter = { type: 'all', errorsOnly: false, query: '' }; refreshFilteredViews(); } })
         : h('p', { text: 'The uploaded package contained no stt, llm, tts or tool events.' }),
     ));
     return;
@@ -1531,7 +2622,7 @@ function renderOperationRows() {
       `starts ${offset(op.started_at_ms)}`,
       timing,
       op.turn_id != null ? `turn ${op.turn_id}` : isSocket(op) ? 'whole call' : 'ungrouped',
-      `status ${op.status || 'unknown'}`,
+      `status ${effectiveStatus(op) || 'unknown'}`,
     ].join(', ');
     host.append(h('button', {
       type: 'button',
@@ -1562,7 +2653,7 @@ function renderOperationRows() {
         })
         : null,
       h('span', { class: 'cell-dim', text: op.turn_id != null ? `turn #${op.turn_id}` : isSocket(op) ? 'whole call' : 'ungrouped' }),
-      h('span', { class: 'state-dot', dataset: { status: op.status }, text: op.status || '—' }),
+      h('span', { class: 'state-dot', dataset: { status: effectiveStatus(op) }, text: effectiveStatus(op) || '—' }),
     ));
   }
   syncSelection();
@@ -1678,6 +2769,66 @@ function truncationNotice(originalBytes, which) {
   );
 }
 
+/**
+ * Whether an LLM span came from the HTTP instrumentation rather than the agent
+ * framework. Only the transport span carries a status code and a body; only the
+ * framework span carries tokens and TTFT.
+ */
+function isTransportSpan(op) {
+  return Boolean(op?.request?.body) || op?.response?.status != null;
+}
+
+/**
+ * The other half of the same model call.
+ *
+ * A voice agent records one LLM call twice — the framework reports tokens and
+ * TTFT, the HTTP instrumentation reports the request body — and neither span
+ * can answer the other's questions. Without this link an inspector lands on the
+ * framework span, finds empty request and response tabs, and has no way to know
+ * the body is sitting on a sibling span a few milliseconds away.
+ */
+function llmCounterpart(op) {
+  if (!op || op.type !== 'llm' || op.turn_id == null || !state.opsById) return null;
+  const wanted = !isTransportSpan(op);
+  const start = op.started_at_ms ?? 0;
+  const end = op.ended_at_ms ?? start;
+  let best = null;
+  let bestGap = Infinity;
+  for (const other of state.opsById.values()) {
+    if (other === op || other.type !== 'llm') continue;
+    if (String(other.turn_id) !== String(op.turn_id)) continue;
+    if (isTransportSpan(other) !== wanted) continue;
+    const otherStart = other.started_at_ms ?? 0;
+    const otherEnd = other.ended_at_ms ?? otherStart;
+    if (otherStart > end || otherEnd < start) continue;
+    const gap = Math.abs(otherStart - start);
+    if (gap < bestGap) { best = other; bestGap = gap; }
+  }
+  return best;
+}
+
+function counterpartNotice(panel, op, what) {
+  const other = llmCounterpart(op);
+  if (!other) return false;
+  const toTransport = isTransportSpan(other);
+  panel.append(h('div', { class: 'banner', dataset: { tone: 'info' }, style: { marginBottom: '10px' } },
+    h('div', {},
+      h('b', { text: `The ${what} is on the other half of this call` }),
+      h('span', {
+        text: toTransport
+          ? 'This span came from the agent framework, which reports tokens and timing but never the payload. The HTTP request that served it was recorded separately.'
+          : 'This span came from the HTTP instrumentation, which never sees token counts. The framework recorded those separately.',
+      }),
+    ),
+    h('button', {
+      type: 'button', class: 'btn tiny',
+      text: toTransport ? 'Open the HTTP span with the payload' : 'Open the framework span with the tokens',
+      onClick: () => setSelection('op', other.event_id, { scroll: true }),
+    }),
+  ));
+  return true;
+}
+
 function codeBlock(panel, title, value, { copyLabel } = {}) {
   const text = typeof value === 'string' ? value : pretty(value);
   panel.append(h('div', { class: 'code-head' },
@@ -1713,7 +2864,7 @@ function renderOperationTab(panel, op, tab) {
       ['Model', op.model],
       ['Provider', op.provider],
       ['Scope', op.turn_id != null ? `turn #${op.turn_id}` : isSocket(op) ? 'whole call' : 'ungrouped'],
-      ['Status', op.status],
+      ['Status', effectiveStatus(op)],
       ['Starts at', offset(op.started_at_ms)],
       ['Ends at', op.ended_at_ms == null ? 'still open' : offset(op.ended_at_ms)],
       [isSocket(op) ? 'Open for' : 'Duration', duration(op.duration_ms) || '—'],
@@ -1735,9 +2886,15 @@ function renderOperationTab(panel, op, tab) {
       codeBlock(panel, 'Tool result', op.response?.result);
     }
     if (op.turn_id != null) {
+      const other = llmCounterpart(op);
       panel.append(h('div', { class: 'code-head' },
         h('h4', { text: 'Related' }),
         h('button', { type: 'button', class: 'btn tiny', text: `Open turn #${op.turn_id}`, onClick: () => setSelection('turn', String(op.turn_id), { scroll: true }) }),
+        other ? h('button', {
+          type: 'button', class: 'btn tiny',
+          text: isTransportSpan(other) ? 'Open the HTTP span (payload)' : 'Open the framework span (tokens)',
+          onClick: () => setSelection('op', other.event_id, { scroll: true }),
+        }) : null,
       ));
     }
     return;
@@ -1746,6 +2903,7 @@ function renderOperationTab(panel, op, tab) {
   if (tab === 'request') {
     if (op.type === 'llm') {
       const { request, truncated, originalBytes, unparsed } = parseRequestBody(op);
+      if (!op.request?.body) counterpartNotice(panel, op, 'request body');
       if (truncated) panel.append(truncationNotice(originalBytes, 'request'));
       if (unparsed) { codeBlock(panel, 'Captured prefix', unparsed); return; }
       const { messages, ...params } = request;
@@ -1768,6 +2926,16 @@ function renderOperationTab(panel, op, tab) {
   if (tab === 'response') {
     if (op.type === 'llm') {
       const completion = decodeCompletion(op.response);
+      const skipped = op.response?.body?._capture_skipped;
+      if (!completion.text && !completion.toolCalls.length) counterpartNotice(panel, op, 'response body');
+      if (skipped) {
+        panel.append(h('div', { class: 'banner', dataset: { tone: 'warn' }, style: { marginBottom: '10px' } },
+          h('div', {},
+            h('b', { text: 'Response body not captured' }),
+            h('span', { text: `${skipped} Draining a streamed reply to record it would delay the caller's first token, which is the latency this SDK exists to measure. Use the conversation view for what the agent actually said.` }),
+          ),
+        ));
+      }
       if (completion.truncated) panel.append(truncationNotice(completion.originalBytes, 'response'));
       panel.append(definitions([
         ['Model', completion.model],
@@ -1837,7 +3005,8 @@ function renderTurnTab(panel, turn, tab) {
       ['Turn length', duration(turn.duration_ms) || '—'],
       ['Caller speech', duration(turn.user_speech_ms) || 'no stt span'],
       ['Model time', turn.llm_ms == null ? 'no model call' : `${duration(turn.llm_ms)} over ${turn.llm_calls} call(s)`],
-      ['Speech out', duration(turn.tts_ms) || 'no tts span'],
+      ['Audible speech out', duration(turn.audible_tts_ms) || 'not captured'],
+      ['TTS provider work', duration(turn.tts_ms) || 'no tts span'],
       ['Time to first audio', duration(turn.time_to_first_audio_ms) || 'not measurable'],
     ]));
 
@@ -1860,7 +3029,12 @@ function renderTurnTab(panel, turn, tab) {
         title: `${label} at ${offset(at)}`,
       }, h('span', { class: 'waterfall-mark-label', text: label })));
       if (speechEnd != null) marker(speechEnd, 'caller stops', 'neutral');
-      if (firstAudio != null) marker(firstAudio, `first audio +${duration(turn.time_to_first_audio_ms)}`, latencyTone(turn.time_to_first_audio_ms));
+      if (firstAudio != null) {
+        // Turns with no STT span have no measured start, so the delta is not a
+        // number. Label the instant rather than claiming "+null".
+        const reply = duration(turn.time_to_first_audio_ms);
+        marker(firstAudio, reply ? `first audio +${reply}` : 'first audio', latencyTone(turn.time_to_first_audio_ms));
+      }
       for (const op of ops) {
         waterfall.append(h('button', {
           type: 'button',
@@ -1891,201 +3065,1560 @@ function renderTurnTab(panel, turn, tab) {
 
 /* ----------------------------------------------------------------- audio */
 
+/**
+ * The call player.
+ *
+ * Reviewing a voice agent is an listening exercise before it is a reading one:
+ * every latency number on this page is a claim about something that either did
+ * or did not happen in the recording. So the player draws the real amplitude
+ * envelope of the call — the agent channel above the caller channel — and lets
+ * the reviewer scrub, zoom, loop and hear a single turn against the same clock
+ * the timeline and trace are drawn on.
+ */
+
+const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+const ZOOMS = [1, 2, 4, 8, 16];
+/** A reviewer who has asked the operating system for less motion should not get
+ *  a sweeping playhead or a viewport that glides under their cursor. Read live
+ *  rather than cached — the preference can be flipped mid-session. */
+const calmMotion = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+const wantsCalm = () => !!calmMotion?.matches;
+// Bar pitch in CSS pixels: 2px of ink and 1px of air reads as a waveform rather
+// than a solid block, and keeps the bucket count a screen actually needs small.
+const WAVE_PITCH = 3;
+const WAVE_LANE_GAP = 8;
+const CHANNEL_TONE = {
+  agent: { ink: '#4fd6a5', dim: 'rgb(79 214 165 / 26%)', label: 'Agent' },
+  caller: { ink: '#62b4ff', dim: 'rgb(98 180 255 / 26%)', label: 'Caller' },
+  mixed: { ink: '#9bb8e8', dim: 'rgb(155 184 232 / 26%)', label: 'Mixed' },
+  call: { ink: '#9bb8e8', dim: 'rgb(155 184 232 / 26%)', label: 'Call' },
+};
+const toneFor = (name) => CHANNEL_TONE[name] || CHANNEL_TONE.call;
+
+const PATH = {
+  play: 'M5.2 3.3a.8.8 0 0 1 1.2-.68l6 4.7a.8.8 0 0 1 0 1.36l-6 4.7A.8.8 0 0 1 5.2 12.7Z',
+  pause: 'M5 3h2.2v10H5Zm3.8 0H11v10H8.8Z',
+  speaker: 'M8.2 2.3a.7.7 0 0 1 .4.63v10.14a.7.7 0 0 1-1.14.55L4.6 11.2H2.7a.7.7 0 0 1-.7-.7V5.5a.7.7 0 0 1 .7-.7h1.9l2.86-2.42a.7.7 0 0 1 .74-.08Zm2.5 2.1a.7.7 0 0 1 .98.13 5.7 5.7 0 0 1 0 6.94.7.7 0 1 1-1.11-.85 4.3 4.3 0 0 0 0-5.24.7.7 0 0 1 .13-.98Z',
+  muted: 'M8.2 2.3a.7.7 0 0 1 .4.63v10.14a.7.7 0 0 1-1.14.55L4.6 11.2H2.7a.7.7 0 0 1-.7-.7V5.5a.7.7 0 0 1 .7-.7h1.9l2.86-2.42a.7.7 0 0 1 .74-.08Zm2.36 3.03a.7.7 0 0 1 .99 0L12.6 6.4l1.05-1.06a.7.7 0 1 1 .99.99L13.59 7.4l1.05 1.05a.7.7 0 1 1-.99.99L12.6 8.38l-1.05 1.06a.7.7 0 1 1-.99-.99l1.05-1.05-1.05-1.06a.7.7 0 0 1 0-.99Z',
+  back: 'M7.7 2.2a.7.7 0 0 1 0 1.18l-.86.6A4.6 4.6 0 1 1 3.4 8.3a.7.7 0 1 1 1.4-.1 3.2 3.2 0 1 0 2.5-3.26l.83.58a.7.7 0 1 1-.8 1.15L5.1 5.24a.7.7 0 0 1 0-1.15l2.2-1.53a.7.7 0 0 1 .4-.36Z',
+  forward: 'M8.3 2.2a.7.7 0 0 0 0 1.18l.86.6A4.6 4.6 0 1 0 12.6 8.3a.7.7 0 1 0-1.4-.1 3.2 3.2 0 1 1-2.5-3.26l-.83.58a.7.7 0 1 0 .8 1.15l2.23-1.43a.7.7 0 0 0 0-1.15L8.7 2.56a.7.7 0 0 0-.4-.36Z',
+  loop: 'M4.8 3.2h5.1a2.9 2.9 0 0 1 2.9 2.9v.6a.7.7 0 1 1-1.4 0v-.6c0-.83-.67-1.5-1.5-1.5H4.8v1.05a.5.5 0 0 1-.8.4L1.7 4.3a.5.5 0 0 1 0-.8l2.3-1.75a.5.5 0 0 1 .8.4Zm6.4 9.6H6.1a2.9 2.9 0 0 1-2.9-2.9v-.6a.7.7 0 1 1 1.4 0v.6c0 .83.67 1.5 1.5 1.5h5.1v-1.05a.5.5 0 0 1 .8-.4l2.3 1.75a.5.5 0 0 1 0 .8l-2.3 1.75a.5.5 0 0 1-.8-.4Z',
+  link: 'M6.5 9.5a2.6 2.6 0 0 1 0-3.68l2.3-2.3a2.6 2.6 0 0 1 3.68 3.68l-.9.9a.7.7 0 1 1-.99-.99l.9-.9a1.2 1.2 0 0 0-1.7-1.7l-2.3 2.3a1.2 1.2 0 0 0 0 1.7.7.7 0 0 1-.99.99Zm3 -3a2.6 2.6 0 0 1 0 3.68l-2.3 2.3a2.6 2.6 0 0 1-3.68-3.68l.9-.9a.7.7 0 1 1 .99.99l-.9.9a1.2 1.2 0 0 0 1.7 1.7l2.3-2.3a1.2 1.2 0 0 0 0-1.7.7.7 0 0 1 .99-.99Z',
+  download: 'M8 1.6a.7.7 0 0 1 .7.7v6.1l1.9-1.9a.7.7 0 1 1 1 1L8.5 10.6a.7.7 0 0 1-1 0L4.4 7.5a.7.7 0 1 1 1-1l1.9 1.9V2.3a.7.7 0 0 1 .7-.7ZM2.6 10.4a.7.7 0 0 1 .7.7v1.4h9.4v-1.4a.7.7 0 1 1 1.4 0v1.7a1.1 1.1 0 0 1-1.1 1.1H2.9a1.1 1.1 0 0 1-1.1-1.1v-1.7a.7.7 0 0 1 .7-.7Z',
+  zoomIn: 'M7 1.8a5.2 5.2 0 0 1 4.1 8.42l3 3a.75.75 0 0 1-1.06 1.06l-3-3A5.2 5.2 0 1 1 7 1.8Zm0 1.5a3.7 3.7 0 1 0 0 7.4 3.7 3.7 0 0 0 0-7.4Zm0 1.2a.6.6 0 0 1 .6.6v1.3h1.3a.6.6 0 1 1 0 1.2H7.6v1.3a.6.6 0 1 1-1.2 0V7.6H5.1a.6.6 0 0 1 0-1.2h1.3V5.1a.6.6 0 0 1 .6-.6Z',
+  zoomOut: 'M7 1.8a5.2 5.2 0 0 1 4.1 8.42l3 3a.75.75 0 0 1-1.06 1.06l-3-3A5.2 5.2 0 1 1 7 1.8Zm0 1.5a3.7 3.7 0 1 0 0 7.4 3.7 3.7 0 0 0 0-7.4ZM5.1 6.4h3.8a.6.6 0 1 1 0 1.2H5.1a.6.6 0 0 1 0-1.2Z',
+  lanes: 'M2.2 3.1h7.3a.75.75 0 0 1 0 1.5H2.2a.75.75 0 0 1 0-1.5Zm4 4.15h7.6a.75.75 0 0 1 0 1.5H6.2a.75.75 0 0 1 0-1.5Zm-4 4.15h5.6a.75.75 0 0 1 0 1.5H2.2a.75.75 0 0 1 0-1.5Z',
+};
+
+function glyph(path, size = 14) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 16 16');
+  svg.setAttribute('width', String(size));
+  svg.setAttribute('height', String(size));
+  svg.setAttribute('aria-hidden', 'true');
+  const node = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  node.setAttribute('fill', 'currentColor');
+  node.setAttribute('d', path);
+  svg.append(node);
+  return svg;
+}
+
+/** Playback preferences a reviewer sets once and expects to keep across calls. */
+const PREF_KEY = 'vaani.player';
+function readPrefs() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PREF_KEY) || '{}');
+    return {
+      volume: Number.isFinite(saved.volume) ? Math.min(1, Math.max(0, saved.volume)) : 1,
+      muted: saved.muted === true,
+      rate: SPEEDS.includes(saved.rate) ? saved.rate : 1,
+      coached: saved.coached === true,
+      lanes: saved.lanes !== false,
+    };
+  } catch { return { volume: 1, muted: false, rate: 1, coached: false, lanes: true }; }
+}
+function writePrefs(prefs) {
+  try { localStorage.setItem(PREF_KEY, JSON.stringify(prefs)); } catch { /* private mode */ }
+}
+
+/** One review source per call. Speaker windows remain annotated in the trace. */
+function audioTracks(session) {
+  const uploaded = (session.recordings || []).filter((track) => track.uploaded);
+  if (!uploaded.length) return [];
+  const stereo = uploaded.find((track) => track.track === 'call');
+  if (stereo) {
+    return [{ id: 'call', label: 'Call recording', note: `${bytes(stereo.size_bytes)} · ${stereo.sample_rate_hz} Hz · stereo call` }];
+  }
+  if (uploaded.length > 1) {
+    return [{ id: 'mixed', label: 'Mixed call', note: 'caller and agent, mixed' }];
+  }
+  const only = uploaded[0];
+  return [{ id: only.track, label: only.track === 'agent' ? 'Agent' : only.track === 'caller' ? 'Caller' : 'Call recording', note: `${bytes(only.size_bytes)} · ${only.sample_rate_hz} Hz · ${only.encoding}` }];
+}
+
 function buildAudioCard(session) {
   const recordings = session.recordings || [];
-  const uploaded = recordings.filter((track) => track.uploaded);
+  const tracks = audioTracks(session);
   const body = h('div', { class: 'card-body' });
+  const tools = h('div', { class: 'card-tools' });
 
-  const card = h('section', { class: 'card' },
+  const card = h('section', { class: 'card player-card' },
     h('div', { class: 'card-head' },
-      h('h3', {}, 'Audio', h('span', { class: 'hint', text: 'aligned to the call clock' })),
+      h('h3', {}, 'Call audio', h('span', { class: 'hint', text: 'drawn on the call clock' })),
+      tools,
     ),
     body,
   );
 
-  if (!uploaded.length) {
+  if (!tracks.length) {
     body.append(h('div', { class: 'empty-block' },
       h('b', { text: 'No audio uploaded' }),
       h('p', { text: recordings.length ? 'The manifest declares tracks, but their objects never reached the observer.' : 'This package declared no audio tracks.' }),
     ));
+    // The spans used to have a tab of their own. With nothing to draw them
+    // against, they still have to be drawn somewhere, or a call that failed
+    // before it recorded anything would show no evidence at all.
+    body.append(h('div', { class: 'player-timeline' },
+      h('div', { class: 'player-timeline-head' },
+        h('b', { text: 'Call timeline' }),
+        h('span', { class: 'hint', text: 'on the call clock — there is no recording to line it up with' }),
+        spanLegend(session),
+      ),
+      buildTimelineSurface(session),
+    ));
     return card;
   }
 
-  const tracks = [];
-  if (uploaded.length > 1) tracks.push({ id: 'mixed', label: 'Both', note: 'caller and agent mixed on the call clock' });
-  for (const track of uploaded) {
-    tracks.push({ id: track.track, label: track.track === 'caller' ? 'Caller' : track.track === 'agent' ? 'Agent' : track.track, note: `${bytes(track.size_bytes)} · ${track.sample_rate_hz} Hz · ${track.encoding}` });
-  }
-
+  const prefs = readPrefs();
   const audio = new Audio();
   // Media events queued for a call that has been closed would otherwise keep
   // its DOM alive and write into the next call's controls.
   const listeners = new AbortController();
-  const bind = (type, handler) => audio.addEventListener(type, handler, { signal: listeners.signal });
+  const bind = (type, handler, target = audio) => target.addEventListener(type, handler, { signal: listeners.signal });
   state.audioListeners = listeners;
-  audio.preload = 'metadata';
   state.audio = audio;
+  audio.preload = 'metadata';
+  audio.volume = prefs.volume;
+  audio.muted = prefs.muted;
+  audio.playbackRate = prefs.rate;
 
-  const switcher = h('div', { class: 'seg', role: 'group', 'aria-label': 'Choose an audio track' });
-  const note = h('p', { class: 'track-note' });
-  const drift = h('p', { class: 'track-note', hidden: true });
-  const error = h('p', { class: 'audio-error', hidden: true });
+  /* ------------------------------------------------------------- surface */
 
-  const icon = (path, size = 13) => {
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.setAttribute('viewBox', '0 0 16 16');
-    svg.setAttribute('width', String(size));
-    svg.setAttribute('height', String(size));
-    svg.setAttribute('aria-hidden', 'true');
-    const node = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    node.setAttribute('fill', 'currentColor');
-    node.setAttribute('d', path);
-    svg.append(node);
-    return svg;
-  };
-  const PLAY = 'M5.2 3.3a.8.8 0 0 1 1.2-.68l6 4.7a.8.8 0 0 1 0 1.36l-6 4.7A.8.8 0 0 1 5.2 12.7Z';
-  const PAUSE = 'M5 3h2.2v10H5Zm3.8 0H11v10H8.8Z';
-  const SPEAKER = 'M8.2 2.3a.7.7 0 0 1 .4.63v10.14a.7.7 0 0 1-1.14.55L4.6 11.2H2.7a.7.7 0 0 1-.7-.7V5.5a.7.7 0 0 1 .7-.7h1.9l2.86-2.42a.7.7 0 0 1 .74-.08Zm2.5 2.1a.7.7 0 0 1 .98.13 5.7 5.7 0 0 1 0 6.94.7.7 0 1 1-1.11-.85 4.3 4.3 0 0 0 0-5.24.7.7 0 0 1 .13-.98Z';
+  const canvas = h('canvas', { class: 'wave-canvas' });
+  const strip = h('div', { class: 'wave-strip' }, canvas);
+  // A canvas is opaque to assistive technology, so everything the drawing says
+  // — how long the call is, how many turns it has, which one was worst — has to
+  // be said again in text. `aria-description` is still patchy across screen
+  // readers; a described-by target works everywhere.
+  const summaryId = `wave-summary-${String(session.id).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 12) || 'call'}`;
+  const waveSummary = h('span', { class: 'sr-only', id: summaryId, text: 'Waveform of the call.' });
+  // Playing a call is a stream of events a sighted reviewer reads off the
+  // canvas. Announcing each turn as the playhead enters it is the same
+  // information, delivered politely enough not to interrupt.
+  const waveLive = h('span', { class: 'sr-only', role: 'status', 'aria-live': 'polite' });
+  const viewport = h('div', { class: 'wave-viewport', tabindex: '0', role: 'slider',
+    'aria-label': 'Seek within the call', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': '0',
+    'aria-valuetext': 'Nothing loaded yet', 'aria-describedby': summaryId }, strip);
+  const regions = h('div', { class: 'wave-regions' });
+  const gaps = h('div', { class: 'wave-gaps' });
+  const loopFrom = h('span', { class: 'loop-grip', dataset: { edge: 'from' } });
+  const loopTo = h('span', { class: 'loop-grip', dataset: { edge: 'to' } });
+  const loopTag = h('span', { class: 'loop-tag' });
+  const loopBand = h('div', { class: 'wave-loop', hidden: true }, loopFrom, loopTo, loopTag);
+  const spanBand = h('div', { class: 'wave-span', hidden: true });
+  const tailBand = h('div', { class: 'wave-tail', hidden: true }, h('span', { class: 'wave-tail-label', text: 'after the call ended' }));
+  const playhead = h('div', { class: 'wave-head', hidden: true });
+  const hoverLine = h('div', { class: 'wave-hover', hidden: true });
+  const ruler = h('div', { class: 'wave-ruler' });
+  const marks = h('div', { class: 'wave-marks' });
+  // The spans sit between the envelope and the turn marks, on the waveform's
+  // own axis, so they zoom and scroll with it. Reading "the model was still
+  // working here" off the same pixels as the silence you can hear is the whole
+  // reason the timeline moved into the player.
+  const lanes = h('div', { class: 'wave-lanes' });
+  strip.append(regions, tailBand, gaps, spanBand, loopBand, lanes, marks, hoverLine, playhead, ruler);
 
-  const playIcon = icon(PLAY, 14);
-  const playButton = h('button', { type: 'button', class: 'play-btn', 'aria-label': 'Play', title: 'Play or pause (space)', onClick: togglePlay }, playIcon);
+  const bubble = h('div', { class: 'wave-bubble', hidden: true });
+  const skeleton = h('div', { class: 'wave-skeleton' }, h('span', { class: 'wave-skeleton-label', text: 'Reading the waveform…' }));
+  // Shift-drag and double-click-to-loop are the two gestures that make this
+  // player worth using, and both are invisible. The hint below the card is
+  // easily below the fold, so the first call a reviewer ever opens says it out
+  // loud, once, over the waveform itself.
+  function dismissCoach() {
+    coach.hidden = true;
+    clearTimeout(coachTimer);
+    if (prefs.coached) return;
+    prefs.coached = true;
+    savePrefs();
+  }
+  const coach = h('div', { class: 'wave-coach', hidden: prefs.coached },
+    h('span', { class: 'coach-line' }, h('kbd', { text: 'shift' }), ' + drag to loop a range'),
+    h('span', { class: 'coach-line' }, h('kbd', { text: 'double-click' }), ' a turn to replay it'),
+    h('button', { type: 'button', class: 'coach-x', 'aria-label': 'Dismiss this hint', text: '✕', onClick: dismissCoach }),
+  );
+  // Leaving the call inside the nine seconds must not leave a timer writing to
+  // a card that no longer exists.
+  const coachTimer = prefs.coached ? null : setTimeout(dismissCoach, 9000);
+  listeners.signal.addEventListener('abort', () => clearTimeout(coachTimer));
+  // A zoomed view can be panned minutes away from the playhead, and then the
+  // clock and the picture describe different parts of the call. These say which
+  // way the playhead went and take the reviewer back to it.
+  const backLeft = h('button', {
+    type: 'button', class: 'wave-return at-left', hidden: true,
+    'aria-label': 'Playhead is to the left — scroll back to it',
+    onClick: () => centreOn(audio.currentTime),
+  }, '◂ playhead');
+  const backRight = h('button', {
+    type: 'button', class: 'wave-return at-right', hidden: true,
+    'aria-label': 'Playhead is to the right — scroll forward to it',
+    onClick: () => centreOn(audio.currentTime),
+  }, 'playhead ▸');
+  const shell = h('div', { class: 'wave-shell' }, viewport, skeleton, coach, bubble, waveSummary, waveLive, backLeft, backRight);
 
-  const fill = h('span', { class: 'scrub-fill' });
-  const head = h('span', { class: 'scrub-head' });
-  const scrub = h('div', {
-    class: 'scrub',
-    role: 'slider',
-    tabindex: '0',
-    'aria-label': 'Seek within the call',
-    'aria-valuemin': '0',
-    'aria-valuemax': '100',
-    'aria-valuenow': '0',
-    onClick: (event) => {
-      if (!Number.isFinite(audio.duration)) return;
-      const fraction = (event.clientX - scrub.getBoundingClientRect().left) / scrub.clientWidth;
-      audio.currentTime = Math.max(0, Math.min(audio.duration, fraction * audio.duration));
+  // A zoomed view answers "what happened here" but loses "where am I"; the
+  // overview keeps the whole call on screen with the visible window drawn on it.
+  const mini = h('canvas', { class: 'mini-canvas' });
+  const miniWindow = h('div', { class: 'mini-window' });
+  const miniStrip = h('div', { class: 'mini-strip', title: 'Drag to move the zoomed view' }, mini, miniWindow);
+  const miniWrap = h('div', { class: 'wave-mini', hidden: true }, miniStrip);
+
+  /* ------------------------------------------------------------ controls */
+
+  const playIcon = glyph(PATH.play, 16);
+  const playButton = h('button', {
+    type: 'button', class: 'play-btn', 'aria-label': 'Play', title: 'Play or pause  ·  space',
+    onClick: () => togglePlay(),
+  }, playIcon);
+
+  // Spelled out rather than hidden inside the arrow: a reviewer should never
+  // have to hover a transport button to find out how far it jumps.
+  const nudge = (seconds, path, hint) => h('button', {
+    type: 'button', class: 'nudge', title: hint, 'aria-label': hint,
+    onClick: () => seekTo(audio.currentTime + seconds),
+  }, glyph(path, 15), h('span', { class: 'nudge-n', text: `${Math.abs(seconds)}s` }));
+
+  const current = h('span', { class: 'time-now', text: '0:00.000' });
+  const total = h('span', { class: 'time-total', text: '--:--.---' });
+
+  const volumeSlider = h('input', {
+    type: 'range', min: '0', max: '1', step: '0.05', value: String(prefs.volume),
+    class: 'vol-range', 'aria-label': 'Volume',
+    onInput: (event) => {
+      audio.volume = Number(event.target.value);
+      audio.muted = audio.volume === 0;
+      savePrefs();
+      paintVolume();
     },
-    onKeydown: (event) => {
-      const step = event.shiftKey ? 10 : 5;
-      if (event.key === 'ArrowRight') { audio.currentTime = Math.min(audio.duration || 0, audio.currentTime + step); event.preventDefault(); }
-      if (event.key === 'ArrowLeft') { audio.currentTime = Math.max(0, audio.currentTime - step); event.preventDefault(); }
-      if (event.key === 'ArrowUp') { audio.currentTime = Math.min(audio.duration || 0, audio.currentTime + step); event.preventDefault(); }
-      if (event.key === 'ArrowDown') { audio.currentTime = Math.max(0, audio.currentTime - step); event.preventDefault(); }
-      if (event.key === 'PageUp') { audio.currentTime = Math.min(audio.duration || 0, audio.currentTime + step * 6); event.preventDefault(); }
-      if (event.key === 'PageDown') { audio.currentTime = Math.max(0, audio.currentTime - step * 6); event.preventDefault(); }
-      if (event.key === 'Home') { audio.currentTime = 0; event.preventDefault(); }
-      if (event.key === 'End' && Number.isFinite(audio.duration)) { audio.currentTime = audio.duration; event.preventDefault(); }
-      if (event.key === 'Enter' || event.key === ' ') { togglePlay(); event.preventDefault(); }
-    },
-  }, fill, head);
+  });
+  const volumeIcon = glyph(prefs.muted || prefs.volume === 0 ? PATH.muted : PATH.speaker, 14);
+  const muteButton = h('button', {
+    type: 'button', class: 'icon-btn', title: 'Mute  ·  m', 'aria-label': 'Mute',
+    onClick: () => { audio.muted = !audio.muted; savePrefs(); paintVolume(); },
+  }, volumeIcon);
 
-  const current = h('span', { text: '0:00' });
-  const total = h('span', { text: '--:--' });
+  const speed = h('select', { class: 'player-select', 'aria-label': 'Playback speed', title: 'Playback speed  ·  [ and ]',
+    onChange: (event) => { audio.playbackRate = Number(event.target.value); savePrefs(); } },
+    ...SPEEDS.map((value) => h('option', { value: String(value), selected: value === prefs.rate ? 'selected' : null, text: `${value.toFixed(2).replace(/0$/, '').replace(/\.$/, '')}×` })),
+  );
 
-  const volume = h('input', {
-    type: 'range', min: '0', max: '1', step: '0.05', value: '1',
-    'aria-label': 'Volume',
-    onInput: (event) => { audio.volume = Number(event.target.value); },
+  const loopButton = h('button', {
+    type: 'button', class: 'chip-btn', 'aria-pressed': 'false', title: 'Loop the selection, or the whole call  ·  l',
+    onClick: () => { view.loop = !view.loop; applyLoop(); },
+  }, glyph(PATH.loop, 14), h('span', { text: 'Loop' }));
+
+  // The lane costs vertical space in a card that is pinned to the top of the
+  // page, so a reviewer who only wants to listen can put it away and have it
+  // stay away.
+  const lanesButton = h('button', {
+    type: 'button', class: 'chip-btn', 'aria-pressed': String(prefs.lanes),
+    title: 'Show provider spans under the waveform  ·  s',
+    onClick: () => setLanes(!prefs.lanes),
+  }, glyph(PATH.lanes, 14), h('span', { text: 'Spans' }));
+
+  // The control bar's dead centre is the best place for the one thing a
+  // reviewer always wants while listening: which turn they are inside, and how
+  // long that turn made the caller wait.
+  const nowChip = h('button', {
+    type: 'button', class: 'now-chip', hidden: true,
+    onClick: () => { if (view.liveTurn) setSelection('turn', view.liveTurn.turn_id, { scroll: true }); },
   });
 
-  const download = h('a', { class: 'btn tiny', download: '', text: 'Download WAV' });
+  const selectionChip = h('button', {
+    type: 'button', class: 'chip-btn selection-chip', hidden: true, title: 'Clear the loop selection  ·  esc',
+    onClick: () => setSelectionRange(null),
+  });
+
+  const zoomOut = h('button', { type: 'button', class: 'icon-btn', title: 'Zoom out  ·  −', 'aria-label': 'Zoom out', onClick: () => setZoom(-1) }, glyph(PATH.zoomOut, 15));
+  const zoomIn = h('button', { type: 'button', class: 'icon-btn', title: 'Zoom in  ·  +', 'aria-label': 'Zoom in', onClick: () => setZoom(1) }, glyph(PATH.zoomIn, 15));
+  const zoomLabel = h('button', { type: 'button', class: 'zoom-level num', title: 'Fit the whole call  ·  0', text: 'fit', onClick: () => setZoom(0, { absolute: 1 }) });
+
+  const download = h('a', { class: 'icon-btn', download: '', title: 'Download this track as WAV', 'aria-label': 'Download WAV' }, glyph(PATH.download, 15));
+
+  // Evidence is only useful if it can leave the tab it was found in.
+  const share = h('button', {
+    type: 'button', class: 'icon-btn', title: 'Copy a link to this moment', 'aria-label': 'Copy a link to this moment',
+    onClick: async () => {
+      const query = new URLSearchParams();
+      query.set('t', playedSeconds().toFixed(1));
+      if (view.selection) query.set('range', `${view.selection.from.toFixed(1)}-${view.selection.to.toFixed(1)}`);
+      const link = `${location.origin}${location.pathname}#/call/${encodeURIComponent(session.id)}?${query}`;
+      try {
+        await navigator.clipboard.writeText(link);
+        share.classList.add('is-done');
+        setTimeout(() => share.classList.remove('is-done'), 1400);
+      } catch {
+        // Clipboard access is denied outside a secure context; showing the link
+        // is more use than a silent failure.
+        window.prompt('Copy this link', link);
+      }
+    },
+  }, glyph(PATH.link, 15));
+
+  const trackChips = h('div', { class: 'seg', role: 'group', 'aria-label': 'Audio source' });
+  if (tracks.length > 1) {
+    for (const track of tracks) {
+      trackChips.append(h('button', {
+        type: 'button', class: 'seg-btn', dataset: { track: track.id }, text: track.label,
+        'aria-pressed': 'false', title: track.note,
+        onClick: () => chooseTrack(track.id),
+      }));
+    }
+    tools.append(trackChips);
+  }
+
+  // Only the lines that carry a problem stay under the bar. The track's size,
+  // sample rate and colour key were four permanent rows of chrome above the
+  // fold for facts a reviewer needs once, so they live in the track tooltips
+  // and the lane labels instead.
+  const drift = h('p', { class: 'track-note is-warn', hidden: true });
+  const error = h('p', { class: 'audio-error', hidden: true });
+  const peaksNote = h('p', { class: 'track-note is-warn peaks-note', hidden: true });
 
   body.append(h('div', { class: 'player' },
-    switcher,
-    note,
-    h('div', { class: 'player-scrub' }, scrub, h('div', { class: 'scrub-time' }, current, total)),
-    h('div', { class: 'player-controls' },
-      playButton,
-      h('label', { class: 'player-vol' }, icon(SPEAKER, 13), volume),
-      download,
+    shell,
+    miniWrap,
+    h('div', { class: 'player-bar' },
+      h('div', { class: 'transport' },
+        nudge(-10, PATH.back, 'Back 10 seconds  ·  shift + ←'),
+        playButton,
+        nudge(10, PATH.forward, 'Forward 10 seconds  ·  shift + →'),
+      ),
+      h('div', { class: 'player-time num' }, current, h('span', { class: 'time-sep', text: '/' }), total),
+      h('div', { class: 'player-spacer' }, nowChip, selectionChip),
+      h('div', { class: 'player-tools' },
+        lanesButton,
+        loopButton,
+        h('div', { class: 'vol' }, muteButton, volumeSlider),
+        speed,
+        h('div', { class: 'zoom' }, zoomOut, zoomLabel, zoomIn),
+        share,
+        download,
+      ),
     ),
     drift,
     error,
+    peaksNote,
   ));
 
+  /* --------------------------------------------------------------- state */
+
+  const view = {
+    zoom: 1,
+    peaks: null,
+    peaksKey: null,
+    loading: false,
+    selection: null,   // { from, to } in seconds
+    loop: false,
+    span: null,        // the trace span being auditioned, in ms
+    aligned: false,
+    overview: null,
+    liveTurn: null,
+  };
+  const peakCache = new Map();
+  const peaksInFlight = new Set();
+  let peaksTicket = 0;
+
+  // The prefs object carries more than the media element does — the coach flag
+  // is not readable from `audio` — so a save has to start from it rather than
+  // rebuild it, or dismissing the hint is undone by the next volume nudge.
+  const savePrefs = () => writePrefs({ ...prefs, volume: audio.volume, muted: audio.muted, rate: audio.playbackRate });
+  const durationMs = () => (Number.isFinite(audio.duration) ? audio.duration * 1000 : 0);
+  /** The clock the waveform is drawn on.
+   *
+   * A six-minute stereo preview is tens of megabytes, and the media element
+   * publishes no duration until it has read enough of it. The envelope and the
+   * manifest both already know how long the call is, so the ruler, the turn
+   * marks and the scrubber are usable from the first paint instead of sitting
+   * at `--:--` while the recording downloads. */
+  const clockLength = () => {
+    if (Number.isFinite(audio.duration) && audio.duration > 0) return audio.duration;
+    const known = view.peaks?.duration_ms || session.manifest?.duration_ms || 0;
+    return known / 1000;
+  };
+  /** Where the playhead belongs, including a scrub the media element has not
+   *  been able to accept yet. */
+  const playedSeconds = () => (Number.isFinite(audio.duration) && audio.duration > 0 ? audio.currentTime : (pendingSeek ?? 0));
+
+  function paintVolume() {
+    const off = audio.muted || audio.volume === 0;
+    volumeIcon.firstChild.setAttribute('d', off ? PATH.muted : PATH.speaker);
+    muteButton.setAttribute('aria-label', off ? 'Unmute' : 'Mute');
+    muteButton.dataset.off = String(off);
+    volumeSlider.value = String(audio.muted ? 0 : audio.volume);
+  }
+  paintVolume();
+
+  function seekTo(seconds) {
+    const length = clockLength();
+    if (!length) return;
+    const at = Math.max(0, Math.min(length, seconds));
+    if (Number.isFinite(audio.duration) && audio.duration > 0) {
+      audio.currentTime = at;
+    } else {
+      // Scrubbing before the media element knows its own length is normal on a
+      // long call; the position is remembered and applied the moment it does.
+      pendingSeek = at;
+    }
+    paintPlayer();
+  }
+
   function togglePlay() {
-    if (audio.paused) audio.play().catch((reason) => { error.hidden = false; error.textContent = `Playback failed: ${reason.message}`; });
-    else audio.pause();
+    if (audio.paused) {
+      audio.play().catch((reason) => { error.hidden = false; error.textContent = `Playback failed: ${reason.message}`; });
+    } else audio.pause();
   }
   ui.togglePlay = togglePlay;
 
-  let loadToken = 0;
-  let expectedSrc = '';
-  let resume = null;
-  function chooseTrack(id) {
-    const token = ++loadToken;
-    state.audioTrack = id;
-    const wasPlaying = !audio.paused;
-    const at = audio.currentTime;
-    audio.src = `/v1/sessions/${encodeURIComponent(session.id)}/audio/${encodeURIComponent(id)}?preview=wav`;
-    expectedSrc = audio.src;
-    download.href = audio.src;
-    download.setAttribute('download', `${session.id}-${id}.wav`);
-    error.hidden = true;
-    note.textContent = tracks.find((track) => track.id === id)?.note || '';
-    for (const button of switcher.querySelectorAll('button')) button.setAttribute('aria-pressed', String(button.dataset.track === id));
-    // Switching tracks fires a fresh `loadedmetadata`; only the newest request
-    // is allowed to restore the previous position and resume playback.
-    resume = { token, at, wasPlaying };
+  /* ------------------------------------------------------------ waveform */
+
+  function stripWidth() { return Math.max(1, strip.clientWidth); }
+  function viewportWidth() { return Math.max(1, viewport.clientWidth); }
+
+  function timeAt(clientX) {
+    const box = strip.getBoundingClientRect();
+    const fraction = (clientX - box.left) / Math.max(1, box.width);
+    return Math.max(0, Math.min(1, fraction)) * clockLength();
   }
 
-  for (const track of tracks) {
-    switcher.append(h('button', {
-      type: 'button', dataset: { track: track.id }, 'aria-pressed': 'false', text: track.label,
-      onClick: () => chooseTrack(track.id),
-    }));
-  }
-
-  bind('timeupdate', () => {
-    if (state.audio !== audio) return;
-    const fraction = audio.duration ? audio.currentTime / audio.duration : 0;
-    fill.style.width = `${fraction * 100}%`;
-    head.style.left = `${fraction * 100}%`;
-    scrub.setAttribute('aria-valuenow', String(Math.round(fraction * 100)));
-    scrub.setAttribute('aria-valuetext', `${clock(audio.currentTime)} of ${clock(audio.duration)}`);
-    current.textContent = clock(audio.currentTime);
-    if (ui.playhead && ui.playheadAligned && ui.timelineTotal) {
-      const position = Math.max(0, Math.min(1, (audio.currentTime * 1000) / ui.timelineTotal));
-      ui.playhead.classList.add('is-on');
-      ui.playhead.style.left = `calc((100% - var(--track-inset)) * ${position})`;
+  async function loadPeaks() {
+    // The card is built detached, so the first call measures a 1px viewport and
+    // would ask the server to render the whole recording at a useless 64
+    // buckets. The ResizeObserver fires again the moment it is laid out.
+    if (!viewport.clientWidth) return;
+    const wanted = Math.max(64, Math.min(4000, Math.round((viewportWidth() * view.zoom) / WAVE_PITCH)));
+    const key = `${state.audioTrack}:${wanted}`;
+    // Both early returns end the swap too: switching back to a track already in
+    // the cache is instant, and leaving the ghost dimmed would strand the
+    // waveform at a quarter opacity with nothing left to load.
+    // Zooming back to a level that did load has to retract the "you are looking
+    // at a stale envelope" note as well as the skeleton, or the warning outlives
+    // the condition it describes.
+    if (view.peaksKey === key) {
+      skeleton.hidden = true;
+      shell.classList.remove('is-swapping');
+      if (view.peaksError) { view.peaksError = null; refreshPeaksError(); }
+      return;
     }
+    if (peakCache.has(key)) {
+      view.peaksKey = key;
+      view.peaks = peakCache.get(key);
+      view.peaksError = null;
+      skeleton.hidden = true;
+      shell.classList.remove('is-swapping');
+      refreshPeaksError();
+      paintWave();
+      return;
+    }
+    // Restoring a hidden tab fires `visibilitychange` and then, on the very
+    // next rendering step, the ResizeObserver — two identical requests, each a
+    // full re-render of the recording server-side. The ticket makes the result
+    // correct; this makes it cheap.
+    if (peaksInFlight.has(key)) return;
+    peaksInFlight.add(key);
+    view.loading = !view.peaks;
+    skeleton.hidden = !view.loading;
+    const requested = state.audioTrack;
+    // Zooming twice quickly leaves two renders in flight; without a ticket the
+    // coarser one can land last and pin the waveform below the zoom's detail.
+    const ticket = (peaksTicket += 1);
+    try {
+      const summary = await api(`/v1/sessions/${encodeURIComponent(session.id)}/audio/${encodeURIComponent(requested)}/peaks?buckets=${wanted}`);
+      // Peaks arriving for a track or a call the reviewer has already left must
+      // never be drawn over what they are looking at now.
+      if (state.audio !== audio || state.audioTrack !== requested) return;
+      for (const channel of summary.channels || []) {
+        // A caller on a phone line is routinely 10 dB quieter than a synthesised
+        // agent voice. Drawn at true scale their channel is a flat line, which
+        // hides exactly the barge-ins and half-words a reviewer is looking for,
+        // so each lane is drawn against its own loudest moment. Levels are
+        // therefore comparable within a lane and never between two.
+        const loudest = Math.max(0, ...(channel.peaks || [0]));
+        channel.gain = loudest > 0 ? Math.min(6, (summary.scale || 1000) / loudest) : 1;
+      }
+      peakCache.set(key, summary);
+      if (ticket !== peaksTicket) return;
+      view.peaks = summary;
+      view.peaksKey = key;
+      view.peaksError = null;
+    } catch (reason) {
+      // A missing envelope only costs the drawing; playback still works, so the
+      // player falls back to a plain progress bar rather than an error. Silence
+      // is the wrong call though: without a note the reviewer cannot tell a
+      // quiet call from a failed request, nor — when an older envelope survives
+      // — that the detail they just zoomed for never arrived.
+      if (state.audio !== audio) return;
+      view.peaksError = { detail: reason?.message || 'the request failed', stale: !!view.peaks };
+      view.peaks = view.peaks || null;
+    } finally {
+      peaksInFlight.delete(key);
+      if (state.audio === audio) {
+        view.loading = false;
+        skeleton.hidden = true;
+        shell.classList.remove('is-swapping');
+        refreshPeaksError();
+        refreshClock();
+        paintWave();
+      }
+    }
+  }
+
+  /** The waveform is a reading aid, not the playback itself, so a failed render
+   *  is a note rather than a blocking error — but it is still a note, with the
+   *  one action that might fix it. */
+  function refreshPeaksError() {
+    clear(peaksNote);
+    peaksNote.hidden = !view.peaksError;
+    if (!view.peaksError) return;
+    const { detail, stale } = view.peaksError;
+    peaksNote.append(
+      h('span', {
+        text: stale
+          ? `The waveform could not be redrawn at this zoom — ${detail}. You are looking at the last envelope that loaded.`
+          : `The waveform could not be drawn — ${detail}. Playback and the timings below are unaffected.`,
+      }),
+      h('button', {
+        type: 'button', class: 'btn ghost', text: 'Try again',
+        onClick: () => { view.peaksError = null; view.peaksKey = null; refreshPeaksError(); loadPeaks(); },
+      }),
+    );
+  }
+
+  function paintWave() {
+    const width = viewportWidth();
+    const height = Math.max(40, canvas.clientHeight || 96);
+    const ratio = Math.min(2, window.devicePixelRatio || 1);
+    canvas.style.width = `${width}px`;
+    if (canvas.width !== Math.round(width * ratio) || canvas.height !== Math.round(height * ratio)) {
+      canvas.width = Math.round(width * ratio);
+      canvas.height = Math.round(height * ratio);
+    }
+    const context = canvas.getContext('2d');
+    if (!context) return;
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    context.clearRect(0, 0, width, height);
+
+    const channels = view.peaks?.channels?.length ? view.peaks.channels : null;
+    const total = stripWidth();
+    const offsetX = viewport.scrollLeft;
+    const length = clockLength();
+    const playedX = length ? (playedSeconds() / length) * total - offsetX : -1;
+
+    if (!channels) {
+      // No envelope yet: a flat rail still shows position and keeps the control
+      // usable while the summary is being computed.
+      context.fillStyle = 'rgb(255 255 255 / 6%)';
+      context.fillRect(0, height / 2 - 3, width, 6);
+      context.fillStyle = 'rgb(76 154 255 / 55%)';
+      context.fillRect(0, height / 2 - 3, Math.max(0, playedX), 6);
+      return;
+    }
+
+    const lanes = channels.length;
+    const laneHeight = (height - WAVE_LANE_GAP * (lanes - 1)) / lanes;
+    const buckets = view.peaks.buckets || 1;
+    const scale = view.peaks.scale || 1000;
+
+    for (let lane = 0; lane < lanes; lane += 1) {
+      const tone = toneFor(channels[lane].name);
+      const peaks = channels[lane].peaks || [];
+      const gain = channels[lane].gain || 1;
+      const top = lane * (laneHeight + WAVE_LANE_GAP);
+      const centre = top + laneHeight / 2;
+      const reach = laneHeight / 2 - 1;
+
+      context.fillStyle = 'rgb(255 255 255 / 7%)';
+      context.fillRect(0, centre - 0.5, width, 1);
+
+      for (let x = 0; x < width; x += WAVE_PITCH) {
+        const from = Math.floor(((offsetX + x) / total) * buckets);
+        const to = Math.max(from + 1, Math.ceil(((offsetX + x + WAVE_PITCH) / total) * buckets));
+        let loudest = 0;
+        for (let index = Math.max(0, from); index < Math.min(buckets, to); index += 1) {
+          if (peaks[index] > loudest) loudest = peaks[index];
+        }
+        const amplitude = Math.max(1, Math.min(reach, (loudest * gain / scale) * reach));
+        context.fillStyle = x + WAVE_PITCH <= playedX ? tone.ink : tone.dim;
+        context.fillRect(x, centre - amplitude, WAVE_PITCH - 1, amplitude * 2);
+      }
+    }
+
+    // Naming the lanes on the lanes themselves, rather than in a legend under
+    // the card, keeps "who is this" answerable without moving your eyes.
+    context.font = '600 9px ui-monospace, SFMono-Regular, Menlo, monospace';
+    context.textBaseline = 'top';
+    for (let lane = 0; lane < lanes; lane += 1) {
+      const tone = toneFor(channels[lane].name);
+      context.fillStyle = tone.ink;
+      context.globalAlpha = 0.45;
+      context.fillText(tone.label.toUpperCase(), 7, lane * (laneHeight + WAVE_LANE_GAP) + 5);
+      context.globalAlpha = 1;
+    }
+
+    // Loaded ranges, so a reviewer scrubbing a long call can tell the difference
+    // between silence and audio the browser has not fetched yet.
+    if (length) {
+      context.fillStyle = 'rgb(255 255 255 / 12%)';
+      for (let index = 0; index < audio.buffered.length; index += 1) {
+        const from = (audio.buffered.start(index) / length) * total - offsetX;
+        const to = (audio.buffered.end(index) / length) * total - offsetX;
+        context.fillRect(from, height - 2, Math.max(1, to - from), 2);
+      }
+    }
+  }
+
+  async function loadOverview() {
+    const requested = state.audioTrack;
+    const key = `${requested}:overview`;
+    if (peakCache.has(key)) { view.overview = peakCache.get(key); paintMini(); return; }
+    try {
+      const summary = await api(`/v1/sessions/${encodeURIComponent(session.id)}/audio/${encodeURIComponent(requested)}/peaks?buckets=360`);
+      if (state.audio !== audio || state.audioTrack !== requested) return;
+      for (const channel of summary.channels || []) {
+        const loudest = Math.max(0, ...(channel.peaks || [0]));
+        channel.gain = loudest > 0 ? Math.min(6, (summary.scale || 1000) / loudest) : 1;
+      }
+      peakCache.set(key, summary);
+      view.overview = summary;
+      paintMini();
+    } catch { /* the overview is an aid, never a requirement */ }
+  }
+
+  function paintMini() {
+    miniWrap.hidden = view.zoom === 1;
+    if (miniWrap.hidden) return;
+    const width = Math.max(1, miniStrip.clientWidth);
+    const height = Math.max(18, mini.clientHeight || 30);
+    const ratio = Math.min(2, window.devicePixelRatio || 1);
+    mini.style.width = `${width}px`;
+    mini.width = Math.round(width * ratio);
+    mini.height = Math.round(height * ratio);
+    const context = mini.getContext('2d');
+    if (!context) return;
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    context.clearRect(0, 0, width, height);
+    const channels = view.overview?.channels || [];
+    const scale = view.overview?.scale || 1000;
+    for (const channel of channels) {
+      const tone = toneFor(channel.name);
+      const peaks = channel.peaks || [];
+      const gain = channel.gain || 1;
+      context.fillStyle = tone.dim;
+      for (let x = 0; x < width; x += 2) {
+        const index = Math.min(peaks.length - 1, Math.floor((x / width) * peaks.length));
+        const amplitude = Math.max(0.5, Math.min(height / 2, (peaks[index] * gain / scale) * (height / 2)));
+        context.fillRect(x, height / 2 - amplitude, 1.5, amplitude * 2);
+      }
+    }
+    const total = stripWidth();
+    miniWindow.style.left = `${(viewport.scrollLeft / total) * 100}%`;
+    miniWindow.style.width = `${Math.min(100, (viewportWidth() / total) * 100)}%`;
+  }
+
+  const scrubMini = (clientX) => {
+    const box = miniStrip.getBoundingClientRect();
+    const fraction = Math.max(0, Math.min(1, (clientX - box.left) / Math.max(1, box.width)));
+    viewport.scrollLeft = Math.max(0, Math.min(stripWidth() - viewportWidth(), fraction * stripWidth() - viewportWidth() / 2));
+    paintMini();
+  };
+  bind('pointerdown', (event) => {
+    if (event.button !== 0) return;
+    miniDragging = true;
+    try { miniStrip.setPointerCapture(event.pointerId); } catch { /* no live pointer */ }
+    scrubMini(event.clientX);
+    event.preventDefault();
+  }, miniStrip);
+  bind('pointermove', (event) => { if (miniDragging) scrubMini(event.clientX); }, miniStrip);
+  bind('pointerup', () => { miniDragging = false; }, miniStrip);
+  bind('pointercancel', () => { miniDragging = false; }, miniStrip);
+
+  function paintRuler() {
+    clear(ruler);
+    const total = stripWidth();
+    const seconds = clockLength();
+    if (!seconds) return;
+    const step = tickStep(seconds / (total / 90));
+    for (let at = 0; at <= seconds + 0.001; at += step) {
+      const fraction = at / seconds;
+      if (fraction > 1) break;
+      ruler.append(h('span', { class: 'wave-tick', style: { left: `${fraction * 100}%` }, text: clockShort(at) }));
+    }
+    paintTurnMarks();
+    paintGaps();
+    paintLanes();
+  }
+
+  /** Round tick spacing to something a person reads as a clock. */
+  function tickStep(rough) {
+    const options = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
+    return options.find((option) => option >= rough) || 900;
+  }
+
+  /** The dead air between the caller finishing and the agent's first frame,
+   *  and which stage of the pipeline ate it.
+   *
+   *  "Time to first audio: 8.71s" names the symptom; a reviewer still has to
+   *  open the waterfall to learn whether the model, the voice or the endpointer
+   *  was responsible. Attributing it here is what makes the silence on the
+   *  waveform readable rather than merely visible. */
+  function responseGap(turn) {
+    const ops = turn.operations || [];
+    const stt = ops.find((op) => op.type === 'stt');
+    const tts = ops.find((op) => op.type === 'tts' && op.milestones?.audio_chunk);
+    // The last spoken word, not the moment the endpointer noticed — the same
+    // clock `time_to_first_audio_ms` uses. Anchoring on `speech_ended` instead
+    // would hide the endpointer's own silence window, which is exactly one of
+    // the stages this rail exists to attribute, and would draw a band that
+    // disagreed with every other latency number on the page.
+    const from = stt?.presentation_window?.to_ms ?? sttMilestone(stt, 'speech_ended') ?? stt?.ended_at_ms;
+    const to = tts?.milestones?.audio_chunk?.occurred_at_ms;
+    if (from == null || to == null || to <= from) return null;
+    const finalAt = Math.min(to, sttMilestone(stt, 'final_transcript') ?? sttMilestone(stt, 'speech_final') ?? from);
+    // The moment synthesis was asked for splits the silence in two: nothing
+    // before it is voice, and nothing after it is thinking. Clipping every span
+    // at that boundary rather than at the first audio frame is what keeps the
+    // "say a filler and keep thinking" pattern — whose second model call opens
+    // on the *same millisecond* as the TTS request — from being charged to the
+    // model and driving voice synthesis to a flat zero.
+    const spoke = Math.min(to, Math.max(from, tts.started_at_ms ?? to));
+    // Agents routinely run two or three model calls at once, and one nested
+    // inside another is common. Adding their durations charges the same wall
+    // clock twice: a turn whose two overlapping spans covered 2.5s of real time
+    // was being billed 4.6s of "the model", which both overshot the gap and
+    // named the wrong culprit. Only the union of the clipped spans is time the
+    // caller actually spent waiting on that stage.
+    const union = (list) => {
+      const spans = list
+        // A span with no end did not take zero time — it is one that crashed or
+        // hung, which makes it the single most likely cause of the silence being
+        // measured. Left as `?? 0` it would be filtered out and the rail would
+        // blame the wait on nothing at all, so an open span is treated as still
+        // running when synthesis was finally asked for.
+        .map((op) => [Math.max(op.started_at_ms ?? 0, from), Math.min(op.ended_at_ms ?? spoke, spoke)])
+        .filter(([start, end]) => end > start)
+        .sort((a, b) => a[0] - b[0]);
+      let total = 0;
+      let openFrom = 0;
+      let openTo = -Infinity;
+      for (const [start, end] of spans) {
+        if (start > openTo) { total += Math.max(0, openTo - openFrom); openFrom = start; openTo = end; }
+        else if (end > openTo) openTo = end;
+      }
+      return total + Math.max(0, openTo - openFrom);
+    };
+    const thinking = ops.filter((op) => op.type === 'llm');
+    const tools = ops.filter((op) => op.type === 'tool');
+    const stages = [
+      { label: 'endpointing', ms: Math.max(0, finalAt - from) },
+      { label: 'tool calls', ms: union(tools) },
+      { label: 'the model', ms: union(thinking) },
+      { label: 'voice synthesis', ms: Math.max(0, to - spoke) },
+    ].filter((stage) => stage.ms > 0).sort((a, b) => b.ms - a.ms);
+    const total = to - from;
+    return { from, to, ms: total, cause: stages[0] || null, stages };
+  }
+
+  /** Every gap in the call, computed once per render rather than per repaint. */
+  function gapIndex() {
+    if (view.gaps) return view.gaps;
+    view.gaps = (state.session?.turns || [])
+      .map((turn) => ({ turn, gap: responseGap(turn) }))
+      .filter((entry) => entry.gap);
+    return view.gaps;
+  }
+
+  function paintGaps() {
+    // The hovered node is about to be removed, and `mouseleave` never fires on
+    // an element that is no longer in the tree.
+    hideTooltip();
+    clear(gaps);
+    const seconds = clockLength();
+    if (!seconds || !view.aligned) return;
+    const ranked = [...gapIndex()].sort((a, b) => b.gap.ms - a.gap.ms).slice(0, 3).map((entry) => entry.gap);
+    for (const { turn, gap } of gapIndex()) {
+      // Sub-second gaps are the system working; drawing them would turn the
+      // waveform into stripes and bury the ones that hurt.
+      if (gap.ms < 700) continue;
+      const left = (gap.from / 1000 / seconds) * 100;
+      const width = (gap.ms / 1000 / seconds) * 100;
+      if (left > 100 || width <= 0) continue;
+      // A centred label near either end would be cut off by the viewport, and
+      // the last turn of a call is exactly the one people scroll to.
+      const centre = left + Math.min(100 - left, width) / 2;
+      const margin = (56 / stripWidth()) * 100;
+      // Colour is absolute — the same 3s means "danger" here, in the KPI and in
+      // the turns table — but on a call where every reply took four seconds an
+      // absolute scale saturates and the rail says only "all of them". Rank
+      // within this call is the second, relative encoding: it survives a corpus
+      // where everything is red and answers "which ones here were worst".
+      const place = ranked.indexOf(gap);
+      const band = h('div', {
+        class: 'wave-gap',
+        dataset: {
+          tone: latencyTone(turn.time_to_first_audio_ms) || 'warn',
+          rank: place >= 0 ? 'worst' : null,
+          edge: centre > 100 - margin ? 'end' : centre < margin ? 'start' : null,
+        },
+        style: { left: `${left}%`, width: `${Math.min(100 - left, width)}%` },
+      }, h('span', { class: 'wave-gap-label', text: `${duration(gap.ms)}${gap.cause ? ` · ${gap.cause.label}` : ''}` }));
+      band.addEventListener('mouseenter', () => showTooltip(band, `${duration(gap.ms)} of silence`, [
+        `turn #${turnName(turn.turn_id)}, from ${offset(gap.from)}`,
+        place >= 0 ? `the ${['longest', '2nd longest', '3rd longest'][place]} silence in this call` : null,
+        'the caller had stopped talking and nothing was coming back',
+        ...gap.stages.map((stage) => `${stage.label}: ${duration(stage.ms)}`),
+        gap.stages.reduce((sum, stage) => sum + stage.ms, 0) > gap.ms * 1.05
+          ? 'stages overlap, so they total more than the gap'
+          : null,
+      ].filter(Boolean)));
+      band.addEventListener('mouseleave', hideTooltip);
+      gaps.append(band);
+    }
+  }
+
+  /** The one sentence a screen-reader user needs before they start scrubbing:
+   *  how long the call is, how many turns it has, and where the worst wait was.
+   *  Sighted reviewers read this off the gap rail in a glance. */
+  function refreshSummary() {
+    const seconds = clockLength();
+    const turns = state.session?.turns || [];
+    const parts = [seconds ? `Call waveform, ${clockShort(seconds)} long` : 'Call waveform'];
+    if (view.aligned && turns.length) {
+      parts.push(`${turns.length} turn${turns.length === 1 ? '' : 's'}`);
+      const worst = gapIndex().slice().sort((a, b) => b.gap.ms - a.gap.ms)[0];
+      if (worst) {
+        parts.push(`longest silence ${duration(worst.gap.ms)} before turn ${turnName(worst.turn.turn_id)} at ${clockShort(worst.gap.from / 1000)}`
+          + (worst.gap.cause ? `, mostly ${worst.gap.cause.label}` : ''));
+      }
+    }
+    parts.push(view.zoom === 1 ? 'showing the whole call' : `zoomed ${view.zoom} times`);
+    waveSummary.textContent = `${parts.join('. ')}.`;
+  }
+
+  /* --------------------------------------------------------- span lanes */
+
+  /** The provider spans, drawn on the waveform's own axis so a bar and the
+   *  silence it explains occupy the same pixels. Only rows that actually
+   *  carry work are kept: an empty "TOOL" rail in a card pinned to the top of
+   *  the page costs height to say nothing. */
+  function paintLanes() {
+    hideTooltip();
+    clear(lanes);
+    const seconds = clockLength();
+    const on = prefs.lanes && view.aligned && seconds > 0;
+    card.dataset.lanes = String(on);
+    lanesButton.setAttribute('aria-pressed', String(prefs.lanes));
+    // Drawn on the recording's clock, not the call's. They agree to within the
+    // alignment tolerance, and using one number for both keeps a bar from
+    // sliding away from the envelope it belongs to.
+    const total = seconds * 1000;
+    // Sockets are deliberately not lanes here. They are connection-scope, not
+    // turn work: one is held open for the whole call and says nothing about
+    // where the time went, and the other is a 4px stub with no recorded
+    // duration. Two rows of that in a card pinned to the top of the page cost
+    // more than they explain, and both are still listed with their timings
+    // under All spans and drawn in full on a call with no audio.
+    const rows = on ? spanRows(session).rows.filter((row) => row.ops.length && TYPES.includes(row.key)) : [];
+    // 11px row + 2px gap, plus the strip's 2px top padding.
+    card.style.setProperty('--lanes-h', rows.length ? `${rows.length * 13 + 4}px` : '0px');
+    if (!rows.length) return;
+    for (const row of rows) {
+      const track = h('div', { class: 'lane-track' });
+      for (const op of row.ops) track.append(timelineBar(op, total, row.color));
+      wireBarKeys(track);
+      lanes.append(h('div', { class: 'lane-row' },
+        // Sticky so the name survives a scroll at 16×, where the left edge of
+        // the strip is minutes off screen.
+        h('span', { class: 'lane-label', title: row.hint || row.label, text: row.short }),
+        track,
+      ));
+    }
+  }
+
+  function setLanes(on) {
+    prefs.lanes = on;
+    savePrefs();
+    paintLanes();
+    // The strip got taller or shorter, so everything measured against its
+    // height has to be told.
+    paintWave();
+  }
+
+  function paintTurnMarks() {
+    hideTooltip();
+    clear(marks);
+    const seconds = clockLength();
+    if (!seconds || !view.aligned) return;
+    const turns = state.session?.turns || [];
+    const width = stripWidth();
+    // Labelling every turn buries the answer in its own evidence: a long call
+    // becomes a solid band of chips. The slowest few are named, everything else
+    // is a tick that keeps its colour, its tooltip and its click.
+    const worst = new Set(turns.filter((turn) => turn.time_to_first_audio_ms != null)
+      .sort((a, b) => b.time_to_first_audio_ms - a.time_to_first_audio_ms)
+      .slice(0, 4).map((turn) => turn.turn_id));
+    let lastLabel = -Infinity;
+    let lastTick = -Infinity;
+    for (const turn of turns) {
+      const at = (turn.started_at_ms || 0) / 1000;
+      if (at > seconds) continue;
+      const x = (at / seconds) * width;
+      const reply = turn.time_to_first_audio_ms;
+      const tone = latencyTone(reply) || 'none';
+      // A hundred turns in half an hour puts several marks on the same pixel.
+      // Healthy turns are the ones worth dropping: the strip is there to show
+      // where the trouble is, and zooming in brings the rest back.
+      if (x - lastTick < 4 && tone !== 'danger' && tone !== 'warn' && String(turn.turn_id) !== String(state.selection?.id)) continue;
+      lastTick = x;
+      // Room is checked even for a named turn, so two slow turns half a second
+      // apart cannot print over each other.
+      const labelled = (worst.has(turn.turn_id) || view.zoom >= 4) && x - lastLabel > 46;
+      if (labelled) lastLabel = x;
+      const spoken = callerLine(turn.turn_id);
+      const mark = h('button', {
+        type: 'button',
+        class: labelled ? 'wave-turn' : 'wave-turn is-tick',
+        // A centred mark at either end would hang outside the strip and clip.
+        style: { left: `${(x / width) * 100}%`, transform: x < 24 ? 'translateX(0)' : x > width - 24 ? 'translateX(-100%)' : null },
+        dataset: { tone, turn: String(turn.turn_id) },
+        'aria-label': `Turn ${turnName(turn.turn_id)} at ${offset(turn.started_at_ms)}${reply != null ? `, first audio back after ${duration(reply)}` : ''}`,
+        text: labelled ? `#${turnName(turn.turn_id)}${reply != null ? ` ${duration(reply)}` : ''}` : '',
+        onClick: (event) => {
+          event.stopPropagation();
+          seekTo(at);
+          setSelection('turn', turn.turn_id, { scroll: false });
+        },
+      });
+      const describe = () => showTooltip(mark, `Turn #${turnName(turn.turn_id)}`, [
+        `starts ${offset(turn.started_at_ms)}`,
+        reply != null ? `first audio back ${duration(reply)}${tone === 'danger' ? ' — audible lag' : tone === 'warn' ? ' — borderline' : ''}` : 'no first-audio mark',
+        turn.user_speech_ms != null ? `caller spoke ${duration(turn.user_speech_ms)}` : null,
+        spoken ? `“${spoken}”` : null,
+        'click to seek and inspect',
+      ].filter(Boolean));
+      mark.addEventListener('mouseenter', describe);
+      mark.addEventListener('focus', describe);
+      mark.addEventListener('mouseleave', hideTooltip);
+      mark.addEventListener('blur', hideTooltip);
+      marks.append(mark);
+    }
+  }
+
+  /** What the caller said in a turn, for the marker tooltip and the live chip. */
+  function callerLine(turnId) {
+    const entry = (state.transcript?.entries || []).find((item) => item.role === 'user' && String(item.turnId) === String(turnId) && item.text);
+    if (!entry) return null;
+    const text = entry.text.replace(/\s+/g, ' ').trim();
+    return text.length > 90 ? `${text.slice(0, 88)}…` : text;
+  }
+
+  /** The turn a point on the recording belongs to, for the hover read-out. */
+  function lastTurnBefore(seconds) {
+    const ms = seconds * 1000;
+    let found = null;
+    for (const turn of state.session?.turns || []) {
+      if ((turn.started_at_ms || 0) <= ms) found = turn; else break;
+    }
+    return found;
+  }
+
+  function turnAt(seconds) {
+    if (!view.aligned) return null;
+    const ms = seconds * 1000;
+    return (state.session?.turns || []).find((turn) => ms >= (turn.started_at_ms || 0) && ms <= (turn.ended_at_ms ?? turn.started_at_ms ?? 0)) || null;
+  }
+
+  /* ------------------------------------------------------------ pointing */
+
+  let dragging = null;
+  let miniDragging = false;
+
+  bind('pointerdown', (event) => {
+    if (event.button !== 0 || !clockLength()) return;
+    // Whatever they did with it, they have found the waveform.
+    if (!coach.hidden) dismissCoach();
+    if (event.target.closest('.wave-turn')) return;
+    // A span in the lane is a target in its own right: it is clicked to inspect
+    // and audition the operation. Letting the press also start a scrub would
+    // seek the recording out from under the click.
+    if (event.target.closest('.timeline-bar')) return;
+    // A grip on the loop band moves that edge instead of starting a new scrub,
+    // so a range can be nudged after it has been drawn.
+    const grip = event.target.closest('.loop-grip');
+    if (grip && view.selection) {
+      dragging = { mode: 'grip', edge: grip.dataset.edge };
+      try { viewport.setPointerCapture(event.pointerId); } catch { /* no live pointer */ }
+      event.preventDefault();
+      return;
+    }
+    // Capture keeps a scrub alive when the pointer leaves the waveform, but a
+    // synthetic or already-released pointer has nothing to capture.
+    try { viewport.setPointerCapture(event.pointerId); } catch { /* no live pointer */ }
+    const at = timeAt(event.clientX);
+    if (event.shiftKey) {
+      dragging = { mode: 'select', anchor: at };
+      setSelectionRange({ from: at, to: at });
+    } else {
+      dragging = { mode: 'seek' };
+      seekTo(at);
+    }
+    // Dragging the playhead should feel like holding it, not like repeatedly
+    // clicking somewhere new.
+    shell.classList.toggle('is-scrubbing', dragging.mode !== 'grip');
+    event.preventDefault();
+  }, viewport);
+
+  bind('pointermove', (event) => {
+    if (!clockLength()) return;
+    const at = timeAt(event.clientX);
+    if (dragging?.mode === 'select') {
+      setSelectionRange({ from: Math.min(dragging.anchor, at), to: Math.max(dragging.anchor, at) });
+    } else if (dragging?.mode === 'grip') {
+      const edge = dragging.edge === 'from'
+        ? { from: Math.min(at, view.selection.to - 0.1), to: view.selection.to }
+        : { from: view.selection.from, to: Math.max(at, view.selection.from + 0.1) };
+      setSelectionRange({ ...edge, label: view.selection.label });
+    } else if (dragging?.mode === 'seek') {
+      seekTo(at);
+    }
+    showHover(event.clientX, at);
+  }, viewport);
+
+  const endDrag = (event) => {
+    if (!dragging) return;
+    // A shift-drag that never moved is a mis-click, not a zero-length loop.
+    if (dragging.mode === 'select' && view.selection && view.selection.to - view.selection.from < 0.15) setSelectionRange(null);
+    dragging = null;
+    shell.classList.remove('is-scrubbing');
+    try {
+      if (event?.pointerId != null && viewport.hasPointerCapture?.(event.pointerId)) viewport.releasePointerCapture(event.pointerId);
+    } catch { /* the pointer is already gone */ }
+  };
+  bind('pointerup', endDrag, viewport);
+  bind('pointercancel', endDrag, viewport);
+  bind('pointerleave', () => { hideHover(); }, viewport);
+
+  bind('dblclick', (event) => {
+    // A span in the lane has already answered the double-click with its own
+    // click: it auditions exactly that operation. Looping the whole turn on top
+    // of it would immediately override the narrower thing they asked for.
+    if (event.target.closest('.timeline-bar')) return;
+    const at = timeAt(event.clientX);
+    const turn = turnAt(at);
+    if (!turn) return;
+    const from = (turn.started_at_ms || 0) / 1000;
+    const to = Math.max(from + 0.3, (turn.ended_at_ms ?? turn.started_at_ms ?? 0) / 1000);
+    setSelectionRange({ from, to, label: `turn #${turnName(turn.turn_id)}` });
+    if (!view.loop) { view.loop = true; applyLoop(); }
+    seekTo(from);
+    if (audio.paused) togglePlay();
+  }, viewport);
+
+  bind('scroll', () => { paintWave(); paintMini(); paintReturn(); }, viewport);
+
+  // Trackpad and wheel zoom keeps the point under the cursor fixed, which is
+  // what every timeline tool trains a reviewer to expect.
+  bind('wheel', (event) => {
+    if (!event.ctrlKey && !event.metaKey) return;
+    event.preventDefault();
+    setZoom(event.deltaY < 0 ? 1 : -1, { around: timeAt(event.clientX) });
+  }, viewport);
+
+  function showHover(clientX, at) {
+    const box = shell.getBoundingClientRect();
+    const stripBox = strip.getBoundingClientRect();
+    hoverLine.hidden = false;
+    hoverLine.style.left = `${((clientX - stripBox.left) / Math.max(1, stripBox.width)) * 100}%`;
+    const turn = turnAt(at);
+    bubble.hidden = false;
+    clear(bubble).append(
+      h('b', { class: 'num', text: clockShort(at, true) }),
+      turn ? h('span', { text: `turn #${turnName(turn.turn_id)}` }) : null,
+    );
+    const width = bubble.offsetWidth || 60;
+    bubble.style.left = `${Math.max(0, Math.min(box.width - width, clientX - box.left - width / 2))}px`;
+  }
+  function hideHover() {
+    if (dragging) return;
+    hoverLine.hidden = true;
+    bubble.hidden = true;
+  }
+
+  /* ---------------------------------------------------------- selections */
+
+  function setSelectionRange(range) {
+    view.selection = range && range.to > range.from ? range : null;
+    refreshDownload();
+    if (!view.selection) {
+      loopBand.hidden = true;
+      selectionChip.hidden = true;
+      applyLoop();
+      return;
+    }
+    const seconds = clockLength();
+    if (!seconds) return;
+    loopBand.hidden = false;
+    loopBand.style.left = `${(view.selection.from / seconds) * 100}%`;
+    loopBand.style.width = `${Math.max(0.2, ((view.selection.to - view.selection.from) / seconds) * 100)}%`;
+    loopTag.textContent = view.selection.label || `${duration((view.selection.to - view.selection.from) * 1000)} selected`;
+    selectionChip.hidden = false;
+    clear(selectionChip).append(
+      h('span', { class: 'num', text: `${clockShort(view.selection.from)}–${clockShort(view.selection.to)}` }),
+      h('span', { class: 'chip-x', text: '×' }),
+    );
+    selectionChip.title = `Clear the ${view.selection.label || 'loop'} selection`;
+    applyLoop();
+  }
+  ui.setAudioSelection = setSelectionRange;
+
+  function applyLoop() {
+    loopButton.setAttribute('aria-pressed', String(view.loop));
+    loopButton.dataset.on = String(view.loop);
+    loopBand.dataset.on = String(view.loop);
+    // A whole-track loop is the media element's own job; a range loop has to be
+    // policed on the clock because `loop` only wraps at the end of the file.
+    audio.loop = view.loop && !view.selection;
+    // Turning a range loop on under reduced motion has to restart the frame
+    // loop that `animate` would otherwise have declined to schedule.
+    if (view.loop && view.selection && !audio.paused && !raf) raf = requestAnimationFrame(animate);
+  }
+
+  /** Highlights the slice of the recording a trace span answers for. */
+  function markSpan(window) {
+    view.span = window;
+    const seconds = clockLength();
+    if (!window || !seconds) { spanBand.hidden = true; return; }
+    spanBand.hidden = false;
+    spanBand.style.left = `${Math.max(0, Math.min(100, (window.from / 1000 / seconds) * 100))}%`;
+    spanBand.style.width = `${Math.max(0.2, Math.min(100, ((window.to - window.from) / 1000 / seconds) * 100))}%`;
+    spanBand.dataset.channel = window.channel || 'call';
+  }
+  ui.markAudioSpan = markSpan;
+
+  /* --------------------------------------------------------------- zoom */
+
+  function setZoom(step, { absolute = null, around = null } = {}) {
+    const index = ZOOMS.indexOf(view.zoom);
+    const next = absolute != null ? absolute : ZOOMS[Math.max(0, Math.min(ZOOMS.length - 1, index + step))];
+    if (next === view.zoom) return;
+    const anchor = around != null ? around : audio.currentTime || 0;
+    view.zoom = next;
+    strip.style.width = `${next * 100}%`;
+    // "1×" invites the question "one times what?"; the resting state is a fit.
+    zoomLabel.textContent = next === 1 ? 'fit' : `${next}×`;
+    zoomOut.disabled = next === ZOOMS[0];
+    zoomIn.disabled = next === ZOOMS[ZOOMS.length - 1];
+    viewport.classList.toggle('is-zoomed', next > 1);
+    // The canvas is torn down and redrawn at a new scale in a single frame,
+    // which reads as a blink. A short dip in opacity turns that into a change
+    // the eye can follow, and the class is dropped by the next paint anyway.
+    shell.classList.add('is-rescaling');
+    clearTimeout(view.rescaleTimer);
+    view.rescaleTimer = setTimeout(() => shell.classList.remove('is-rescaling'), 200);
+    requestAnimationFrame(() => {
+      centreOn(anchor);
+      paintRuler();
+      paintWave();
+      paintMini();
+      paintReturn();
+      refreshSummary();
+      loadPeaks();
+    });
+  }
+
+  function centreOn(seconds) {
+    const length = clockLength();
+    if (!length || view.zoom === 1) { viewport.scrollLeft = 0; return; }
+    const target = (seconds / length) * stripWidth() - viewportWidth() / 2;
+    // Deliberately instant. A smooth scroll here would stack a slide on top of
+    // the zoom's opacity dip, and at high zoom it would travel through minutes
+    // of a call the reviewer never asked to see. The dip is the transition.
+    viewport.scrollLeft = Math.max(0, Math.min(stripWidth() - viewportWidth(), target));
+  }
+
+  /** Says which way the playhead went once it is off the visible window, so a
+   *  panned view can never quietly describe a different part of the call than
+   *  the clock does. */
+  function paintReturn() {
+    const length = clockLength();
+    const off = !length || view.zoom === 1;
+    const x = off ? 0 : (playedSeconds() / length) * stripWidth() - viewport.scrollLeft;
+    const left = off ? true : x >= 0;
+    const right = off ? true : x <= viewportWidth();
+    // Only write when the answer changes. This runs on every animation frame
+    // during playback, and a write between two layout reads costs a reflow.
+    if (backLeft.hidden !== left) backLeft.hidden = left;
+    if (backRight.hidden !== right) backRight.hidden = right;
+  }
+
+  /** Keeps a zoomed view following playback without fighting a reviewer who has
+   *  just scrolled somewhere else. */
+  function followPlayhead() {
+    const length = clockLength();
+    if (view.zoom === 1 || !length || dragging) return;
+    // A viewport that slides itself under the cursor is exactly the motion the
+    // reduced-motion preference is about; the playhead still moves, the frame
+    // around it just stops chasing.
+    if (wantsCalm()) return;
+    const x = (playedSeconds() / length) * stripWidth() - viewport.scrollLeft;
+    const width = viewportWidth();
+    if (x < width * 0.12 || x > width * 0.88) centreOn(audio.currentTime);
+  }
+
+  /* ------------------------------------------------------------ painting */
+
+  let raf = null;
+  function paintPlayer() {
+    if (state.audio !== audio) return;
+    const seconds = clockLength();
+    const at = playedSeconds();
+    const fraction = seconds ? at / seconds : 0;
+    playhead.hidden = !seconds;
+    playhead.style.left = `${Math.max(0, Math.min(100, fraction * 100))}%`;
+    viewport.setAttribute('aria-valuenow', String(Math.round(fraction * 100)));
+    // Screen readers read this character by character, so millisecond precision
+    // becomes "zero colon zero zero point zero zero zero" on every seek.
+    viewport.setAttribute('aria-valuetext', `${clockShort(at)} of ${clockShort(seconds)}`);
+    current.textContent = clockShort(at, true);
+    total.textContent = seconds ? clockShort(seconds) : '--:--';
+    // A span play button drives this same element for its own window. Wrapping
+    // it back into the waveform's loop would strand the span at zero and play
+    // the wrong audio, so the loop yields while a span is on.
+    if (view.loop && view.selection && !segment.playing && at >= view.selection.to - 0.02) {
+      audio.currentTime = view.selection.from;
+    }
+    paintNow(at);
+    followPlayhead();
+    paintWave();
+    paintReturn();
+  }
+
+  /** The turn the playhead is inside, published to the chip and to every row on
+   *  the page that belongs to it. Listening and reading then stay in step
+   *  without the player hijacking the reviewer's own selection. */
+  function paintNow(at) {
+    // Between turns there is no turn, but there is still a most recent one —
+    // and a chip that blinks out during every silence is worse than one that
+    // keeps naming what you just heard.
+    const turn = view.aligned ? (turnAt(at) || lastTurnBefore(at)) : null;
+    if (turn === view.liveTurn) return;
+    view.liveTurn = turn;
+    for (const node of document.querySelectorAll('[data-turn-id].is-live')) node.classList.remove('is-live');
+    if (!turn) { nowChip.hidden = true; return; }
+    for (const node of document.querySelectorAll(`[data-turn-id="${CSS.escape(String(turn.turn_id))}"]`)) node.classList.add('is-live');
+    ui.liveTurnId = turn.turn_id;
+    // Only while the recording is running. Scrolling the panel under a reviewer
+    // who is scrubbing by hand fights the thing they are already doing.
+    if (!audio.paused) scrollTranscriptTo(turn.turn_id);
+    const reply = turn.time_to_first_audio_ms;
+    const tone = latencyTone(reply);
+    const spoken = callerLine(turn.turn_id);
+    const gap = gapIndex().find((entry) => entry.turn === turn)?.gap;
+    // Only while the audio is actually running: announcing a turn the reviewer
+    // moved to themselves repeats what they just did.
+    if (!audio.paused) {
+      waveLive.textContent = [
+        `Turn ${turnName(turn.turn_id)}`,
+        reply != null ? `replied in ${duration(reply)}` : null,
+        tone === 'danger' ? 'audible lag' : tone === 'warn' ? 'slow' : null,
+        spoken ? `caller said ${spoken}` : null,
+      ].filter(Boolean).join(', ');
+    }
+    nowChip.hidden = false;
+    nowChip.dataset.tone = tone || 'none';
+    nowChip.title = `Inspect turn #${turnName(turn.turn_id)}`;
+    // `append` stringifies whatever it is handed, so an absent measurement
+    // would print the word "null" into the control bar.
+    clear(nowChip).append(...[
+      h('span', { class: 'now-turn', text: `Turn #${turnName(turn.turn_id)}` }),
+      reply != null ? h('span', { class: 'now-latency num', text: duration(reply) }) : null,
+      // Naming the stage that dominated the wait turns the chip from a label
+      // into the beginning of an answer.
+      // Stages overlap (three model calls inside one turn), so their durations
+      // do not add up to the gap. Naming the dominant one without a number is
+      // the claim the data actually supports; the exact split is a hover away.
+      tone && gap?.cause ? h('span', {
+        class: 'now-cause',
+        text: `${tone === 'danger' ? 'audible lag' : 'slow'} · mostly ${gap.cause.label}`,
+        title: `Stages can overlap, so this names the largest one rather than a share: ${gap.stages.map((stage) => `${stage.label} ${duration(stage.ms)}`).join(', ')}.`,
+      }) : null,
+      spoken ? h('span', { class: 'now-said', text: `“${spoken}”` }) : null,
+    ].filter(Boolean));
+  }
+
+  const animate = () => {
+    paintPlayer();
+    // Sixty repaints a second is a sweeping playhead. Asked for calm, the
+    // player leans on `timeupdate` (roughly four a second) instead, so the
+    // playhead steps rather than glides and the canvas stops redrawing. A live
+    // loop still needs the frames: `timeupdate` is too coarse to catch the end
+    // of a range, and a loop that overshoots by a quarter second is broken, not
+    // calm.
+    if (wantsCalm() && !(view.loop && view.selection)) { raf = null; return; }
+    if (!audio.paused && !audio.ended) raf = requestAnimationFrame(animate);
+  };
+
+  bind('timeupdate', paintPlayer);
+  bind('progress', paintWave);
+  bind('play', () => {
+    playIcon.firstChild.setAttribute('d', PATH.pause);
+    playButton.setAttribute('aria-label', 'Pause');
+    card.dataset.playing = 'true';
+    // `paintNow` only acts when the live turn changes, and seeking while paused
+    // has usually already set it. Without this, pressing play on a turn the
+    // reviewer just scrubbed to leaves the transcript wherever it was.
+    scrollTranscriptTo(ui.liveTurnId);
+    if (!raf) raf = requestAnimationFrame(animate);
   });
+  bind('pause', () => {
+    if (raf) cancelAnimationFrame(raf);
+    raf = null;
+    card.dataset.playing = 'false';
+    paintPlayer();
+    playIcon.firstChild.setAttribute('d', PATH.play);
+    playButton.setAttribute('aria-label', 'Play');
+    // A live region keeps its last message. Left there, a screen reader can
+    // re-announce a turn the playhead has long since left.
+    waveLive.textContent = '';
+  });
+  bind('ended', () => {
+    playIcon.firstChild.setAttribute('d', PATH.play);
+    card.dataset.playing = 'false';
+    waveLive.textContent = '';
+  });
+
   bind('loadedmetadata', () => {
     // A queued event from a track the reviewer has already switched away from
     // must not publish its duration or alignment as the current track's.
     if (state.audio !== audio || !sameSource(audio.currentSrc, expectedSrc)) return;
-    total.textContent = clock(audio.duration);
-    if (resume && resume.token === loadToken) {
-      if (resume.at) audio.currentTime = Math.min(resume.at, audio.duration || resume.at);
-      if (resume.wasPlaying) audio.play().catch(() => {});
-      resume = null;
+    total.textContent = clockShort(audio.duration);
+    if (pendingSeek != null) {
+      audio.currentTime = Math.min(pendingSeek, audio.duration || pendingSeek);
+      pendingSeek = null;
     }
+    if (pendingResume && pendingResume.token === loadToken) {
+      if (pendingResume.at) audio.currentTime = Math.min(pendingResume.at, audio.duration || pendingResume.at);
+      if (pendingResume.wasPlaying) audio.play().catch(() => {});
+      pendingResume = null;
+    }
+    refreshClock();
+  });
+
+  /** Decides whether the recording and the call share a clock, and redraws
+   *  everything that is measured against it.
+   *
+   *  The envelope carries the preview's length, so this can be settled — and
+   *  the ruler and turn marks drawn — before the media element has read enough
+   *  of a long recording to report a duration of its own. */
+  function refreshClock() {
     // The preview is rendered against the call clock, but legacy packages
     // without chunk timings play back contiguously. Only drive the timeline
-    // playhead when the two clocks actually agree.
+    // playhead, the turn marks and the hover read-out when the two clocks agree.
     const callMs = session.manifest?.duration_ms || 0;
-    const audioMs = (audio.duration || 0) * 1000;
-    ui.playheadAligned = callMs > 0 && Math.abs(audioMs - callMs) <= Math.max(2000, callMs * 0.12);
-    if (!ui.playheadAligned) {
-      ui.playhead?.classList.remove('is-on');
+    const audioMs = durationMs() || view.peaks?.duration_ms || 0;
+    // Running past the end of the call does not break alignment — the agent's
+    // last utterance often drains after the call is closed. Compaction, which
+    // shows up as a recording shorter than the call, is what does.
+    view.aligned = callMs > 0 && audioMs > 0 && callMs - audioMs <= Math.max(2000, callMs * 0.12);
+    ui.playheadAligned = view.aligned;
+    if (audioMs && !view.aligned) {
       drift.hidden = false;
-      drift.textContent = `This track is ${duration(audioMs)} long against a ${duration(callMs)} call, so it has no chunk timings to align with the timeline.`;
+      drift.textContent = `This track is ${duration(audioMs)} long against a ${duration(callMs)} call, so it has no chunk timings to align with the call clock.`;
     } else {
       drift.hidden = true;
     }
-  });
-  bind('play', () => { playIcon.firstChild.setAttribute('d', PAUSE); playButton.setAttribute('aria-label', 'Pause'); });
-  bind('pause', () => { playIcon.firstChild.setAttribute('d', PLAY); playButton.setAttribute('aria-label', 'Play'); });
-  bind('ended', () => { playIcon.firstChild.setAttribute('d', PLAY); });
+    // The agent's last utterance often drains after the call is closed, so the
+    // recording outlives the call clock. Left unmarked, the ruler quietly
+    // contradicts the "6m 39s" printed at the top of the page.
+    const tail = view.aligned && callMs > 0 && audioMs > callMs + 1500 ? callMs / 1000 : null;
+    tailBand.hidden = !tail;
+    if (tail) {
+      tailBand.style.left = `${(tail / (audioMs / 1000)) * 100}%`;
+      tailBand.style.width = `${Math.max(0, 100 - (tail / (audioMs / 1000)) * 100)}%`;
+      tailBand.title = `The call ended at ${offset(callMs)}; the recording runs ${duration(audioMs - callMs)} longer.`;
+    }
+    paintRuler();
+    paintPlayer();
+    refreshSummary();
+    applyCue();
+  }
+
+  /** A link that says "listen from 3:14" is worthless until the clock exists,
+   *  so the cue waits for the first measurement and then retires itself. */
+  function applyCue() {
+    const cue = state.audioCue;
+    if (!cue || !clockLength()) return;
+    state.audioCue = null;
+    if (cue.range) setSelectionRange({ ...cue.range });
+    seekTo(cue.at);
+  }
+
+  ui.applyAudioCue = applyCue;
+
   bind('error', () => {
     if (state.audio !== audio || !audio.getAttribute('src')) return;
     if (!sameSource(audio.currentSrc, expectedSrc)) return;
     error.hidden = false;
     error.textContent = `Could not decode the ${state.audioTrack} preview. The observer may not be able to render this encoding.`;
+    skeleton.hidden = true;
   });
 
+  /* -------------------------------------------------------------- source */
+
+  let loadToken = 0;
+  let expectedSrc = '';
+  let pendingResume = null;
+  let pendingSeek = null;
+
+  /** Downloading the whole call to attach eight seconds to a bug report is a
+   *  tax on everyone who opens the attachment, so the link follows the
+   *  selection whenever there is one. */
+  function refreshDownload() {
+    const id = state.audioTrack;
+    const base = `/v1/sessions/${encodeURIComponent(session.id)}/audio/${encodeURIComponent(id)}?preview=wav`;
+    const cut = view.selection
+      ? `&from_ms=${Math.round(view.selection.from * 1000)}&to_ms=${Math.round(view.selection.to * 1000)}`
+      : '';
+    download.href = `${base}${cut}`;
+    download.setAttribute('download', `${session.id}-${id}${cut ? '-clip' : ''}.wav`);
+    download.title = cut ? 'Download the selected range as WAV' : 'Download this track as WAV';
+    download.classList.toggle('is-scoped', Boolean(cut));
+  }
+
+  function chooseTrack(id, { resumePlayback = true } = {}) {
+    const token = ++loadToken;
+    state.audioTrack = id;
+    const wasPlaying = resumePlayback && !audio.paused;
+    const at = audio.currentTime;
+    audio.src = `/v1/sessions/${encodeURIComponent(session.id)}/audio/${encodeURIComponent(id)}?preview=wav`;
+    expectedSrc = audio.src;
+    refreshDownload();
+    error.hidden = true;
+    for (const button of trackChips.querySelectorAll('button')) {
+      button.setAttribute('aria-pressed', String(button.dataset.track === id));
+    }
+    view.peaksKey = null;
+    view.overview = null;
+    view.gaps = null;
+    // Blanking the canvas to a flat rail loses the reviewer's place: the shape
+    // they were reading is the only landmark on a six-minute recording. The old
+    // envelope is held as a dimmed ghost under the skeleton instead — it is
+    // labelled as loading, so it claims nothing about the new track, and both
+    // tracks are the same call so the landmarks still line up.
+    shell.classList.add('is-swapping');
+    skeleton.hidden = false;
+    paintWave();
+    loadPeaks();
+    loadOverview();
+    // Switching tracks fires a fresh `loadedmetadata`; only the newest request
+    // is allowed to restore the previous position and resume playback.
+    pendingResume = { token, at, wasPlaying };
+  }
+  ui.chooseAudioTrack = chooseTrack;
+
+  /* ------------------------------------------------------------ lifecycle */
+
+  const resize = new ResizeObserver(() => { paintWave(); paintRuler(); paintMini(); loadPeaks(); });
+  resize.observe(viewport);
+  listeners.signal.addEventListener('abort', () => { resize.disconnect(); if (raf) cancelAnimationFrame(raf); });
+
+  // A background tab never runs `requestAnimationFrame`, and neither the
+  // canvas nor a zoom applied while hidden would ever be drawn: open a call in
+  // a new tab and it sits on "Reading the waveform…" until you look at it.
+  // Coming back into view is the moment to catch up.
+  bind('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    paintWave();
+    paintRuler();
+    paintMini();
+    loadPeaks();
+  }, document);
+
+  bind('keydown', (event) => {
+    // The lane spans and the turn marks live inside the viewport and run their
+    // own keyboard model: arrows rove between bars, Enter activates one. Without
+    // this, every key does both — Right moves focus *and* seeks 5s, and Enter
+    // starts whole-call playback instead of auditioning the focused span.
+    if (event.target.closest('.timeline-bar, .wave-turn')) return;
+    const step = event.shiftKey ? 10 : 5;
+    const keys = {
+      ArrowRight: () => seekTo(audio.currentTime + step),
+      ArrowLeft: () => seekTo(audio.currentTime - step),
+      ArrowUp: () => seekTo(audio.currentTime + step),
+      ArrowDown: () => seekTo(audio.currentTime - step),
+      PageUp: () => seekTo(audio.currentTime + step * 6),
+      PageDown: () => seekTo(audio.currentTime - step * 6),
+      Home: () => seekTo(0),
+      End: () => seekTo(clockLength()),
+      Enter: togglePlay,
+      ' ': togglePlay,
+    };
+    const action = keys[event.key];
+    if (!action) return;
+    action();
+    event.preventDefault();
+  }, viewport);
+
+  ui.playerKeys = (event) => {
+    const key = event.key;
+    if (key === 'm') { audio.muted = !audio.muted; savePrefs(); paintVolume(); return true; }
+    if (key === 'l') { view.loop = !view.loop; applyLoop(); return true; }
+    if (key === 's') { setLanes(!prefs.lanes); return true; }
+    if (key === '[' || key === ']') {
+      const index = SPEEDS.indexOf(Number(speed.value));
+      const next = SPEEDS[Math.max(0, Math.min(SPEEDS.length - 1, index + (key === ']' ? 1 : -1)))];
+      speed.value = String(next);
+      audio.playbackRate = next;
+      savePrefs();
+      return true;
+    }
+    if (key === '+' || key === '=') { setZoom(1); return true; }
+    if (key === '-' || key === '_') { setZoom(-1); return true; }
+    if (key === '0') { setZoom(0, { absolute: 1 }); return true; }
+    if (key === 'ArrowLeft' || key === 'ArrowRight') {
+      seekTo(audio.currentTime + (key === 'ArrowRight' ? 1 : -1) * (event.shiftKey ? 10 : 5));
+      return true;
+    }
+    return false;
+  };
+  ui.clearAudioSelection = () => {
+    if (!view.selection) return false;
+    setSelectionRange(null);
+    return true;
+  };
+
+  zoomOut.disabled = true;
   chooseTrack(tracks[0].id);
+  paintWave();
   return card;
+}
+
+/** Position on the recording, the way a reviewer reads a player. */
+function clockShort(seconds, precise = false) {
+  if (!Number.isFinite(seconds)) return precise ? '0:00.000' : '--:--';
+  const milliseconds = Math.max(0, Math.round(seconds * 1000));
+  const minutes = Math.floor(milliseconds / 60000);
+  const rest = milliseconds - minutes * 60000;
+  const whole = `${minutes}:${String(Math.floor(rest / 1000)).padStart(2, '0')}`;
+  return precise ? `${whole}.${String(rest % 1000).padStart(3, '0')}` : whole;
 }
 
 /** Compares a resolved media URL with the relative one we asked for. */
@@ -2099,8 +4632,244 @@ function seekMs(callMs) {
   const audio = state.audio;
   if (!audio) { toast('This call has no audio to seek.'); return; }
   if (!Number.isFinite(audio.duration)) { toast('Audio is still loading — try again in a moment.'); return; }
-  if (!ui.playheadAligned) { toast('This track has no chunk timings, so it cannot be seeked from the timeline.'); return; }
+  if (!ui.playheadAligned) { toast('This track has no chunk timings, so it cannot be located on the call clock.'); return; }
   audio.currentTime = Math.max(0, Math.min(audio.duration, callMs / 1000));
+}
+
+/* ------------------------------------------------------ segment playback */
+
+// Below this a window is as likely to be silence as speech: measured across the
+// corpus, every window of 300ms or more lands on audible speech, while under it
+// barely half do — those are utterances cut off by barge-in and first frames
+// marked before the recorder had anything to write. Offering to play them just
+// plays nothing and makes the control look broken.
+const MIN_SEGMENT_MS = 300;
+
+/**
+ * The slice of the recording a span is answerable for, and the channel that can
+ * corroborate it.
+ *
+ * Durations and transcripts cannot settle "did the caller really stop talking
+ * there" or "is that actually what we played" — only the audio can. So an STT
+ * span points at the call recording across the speech or playout it represents.
+ */
+function audioWindow(op) {
+  // A per-turn streaming TTS/STT span is also a WebSocket operation.  Do not
+  // reject it merely because of its transport: that hid playback for every
+  // live streamed TTS response.  Connection-lifetime spans are different,
+  // they have no answerable audio window and must stay excluded.
+  if (!op || (op.type !== 'stt' && op.type !== 'tts') || op.scope === 'connection') return null;
+  const canonical = op.presentation_window;
+  if (canonical && typeof canonical.from_ms === 'number' && typeof canonical.to_ms === 'number'
+      && canonical.to_ms - canonical.from_ms >= MIN_SEGMENT_MS) {
+    const track = segmentTrack(canonical.track);
+    if (!track) return null;
+    return {
+      from: canonical.from_ms, to: canonical.to_ms, track, channel: canonical.track,
+      label: canonical.kind === 'playout'
+        ? `audible agent audio${canonical.segments?.length > 1 ? ` (${canonical.segments.length} playout ranges)` : ''}`
+        : 'caller speech',
+      isolated: track === canonical.track, source: canonical.source, confidence: canonical.confidence,
+      segments: canonical.segments,
+    };
+  }
+  const marks = op.milestones && typeof op.milestones === 'object' ? op.milestones : {};
+  const at = (name, key = 'occurred_at_ms') => (typeof marks[name]?.[key] === 'number' ? marks[name][key] : null);
+
+  let from;
+  let to;
+  let channel;
+  let label;
+  if (op.type === 'stt') {
+    channel = 'caller';
+    label = 'caller audio';
+    // The socket opens before anyone speaks, so the span's own start would play
+    // silence; fall back to it only when the provider marked no speech. Keep
+    // the clip open through finalisation so playback matches the STT span
+    // displayed in the trace, including any post-speech processing gap.
+    from = at('speech_started') ?? op.started_at_ms;
+    to = at('final_transcript') ?? at('speech_final') ?? at('speech_ended') ?? op.ended_at_ms;
+  } else {
+    channel = 'agent';
+    label = 'agent audio';
+    // Synthesis starts before the first frame is on the wire; the audible part
+    // is the streaming window, not the request.
+    from = at('audio_chunk') ?? at('first_byte') ?? op.started_at_ms;
+    // `last_at_ms` says when the final chunk was received, not when its PCM
+    // finished playing. Rendered duration is the usable fallback for old calls.
+    const renderedMs = Number(op.response?.audio_ms);
+    to = Number.isFinite(renderedMs) && renderedMs > 0 ? from + renderedMs : op.ended_at_ms;
+  }
+
+  if (typeof from !== 'number' || typeof to !== 'number' || to - from < MIN_SEGMENT_MS) return null;
+  const track = segmentTrack(channel);
+  if (!track) return null;
+  return { from, to, track, channel, label, isolated: track === channel };
+}
+
+/** The uploaded track that best isolates one speaker. A stereo call is split
+ *  server side, so a single recording still answers for both. */
+function segmentTrack(channel) {
+  const uploaded = (state.session?.recordings || []).filter((track) => track.uploaded);
+  if (!uploaded.length) return null;
+  // Review uses one call player and one source. Speaker ownership still labels
+  // the window, but never swaps in a second virtual channel/player.
+  if (uploaded.some((track) => track.track === 'call')) return 'call';
+  if (uploaded.length > 1) return 'mixed';
+  return uploaded[0].track;
+}
+
+// Segment controls are only remote controls for the one visible call player.
+const segment = { token: 0, opId: null, playing: false, raf: null, timer: null, disarm: null, nodes: null };
+
+/** Looks the controls up by span id rather than holding them, because the trace
+ *  rebuilds its rows on every expand and would leave us pointing at dead nodes. */
+function segmentNodes(opId) {
+  if (segment.nodes?.opId === opId && segment.nodes.button?.isConnected) return segment.nodes;
+  const found = {
+    opId,
+    button: document.querySelector(`.phase-play[data-op="${CSS.escape(opId)}"]`),
+    head: document.querySelector(`.phase-playhead[data-op="${CSS.escape(opId)}"]`),
+  };
+  segment.nodes = found;
+  return found;
+}
+
+function paintSegment(opId, fraction) {
+  const { button, head } = segmentNodes(opId);
+  const playing = fraction != null;
+  if (head) {
+    head.hidden = !playing;
+    if (playing) head.style.left = `${Math.max(0, Math.min(1, fraction)) * 100}%`;
+  }
+  if (button) {
+    button.dataset.playing = String(playing);
+    button.setAttribute('aria-pressed', String(playing));
+    button.setAttribute('aria-label', playing ? 'Stop this span' : 'Play this span');
+    button.textContent = playing ? '■' : '▶';
+  }
+}
+
+function stopSegment() {
+  const opId = segment.opId;
+  segment.token += 1;
+  if (segment.raf) cancelAnimationFrame(segment.raf);
+  segment.raf = null;
+  if (segment.timer) clearTimeout(segment.timer);
+  segment.timer = null;
+  segment.disarm?.();
+  segment.disarm = null;
+  state.audio?.pause();
+  segment.playing = false;
+  segment.opId = null;
+  if (opId) paintSegment(opId, null);
+  ui.markAudioSpan?.(null);
+  segment.nodes = null;
+}
+
+/** Drops the previous call's media before the next one's controls are built. */
+function releaseSegments() {
+  stopSegment();
+}
+
+function playSegment(op) {
+  const win = audioWindow(op);
+  if (!win) return;
+  const toggleOff = segment.playing && segment.opId === op.event_id;
+  stopSegment();
+  if (toggleOff) return;
+
+  const audio = state.audio;
+  if (!audio || !ui.chooseAudioTrack) { toast('This call has no audio player.'); return; }
+  const token = ++segment.token;
+  const opId = op.event_id;
+  segment.opId = opId;
+  const onError = () => {
+    if (segment.token !== token) return;
+    toast(`The ${win.track} track could not be decoded, so this span cannot be played.`);
+    stopSegment();
+  };
+  const begin = () => {
+    if (segment.token !== token) return;
+    const audioMs = (audio.duration || 0) * 1000;
+    if (!Number.isFinite(audioMs) || audioMs <= 0) {
+      toast('That recording has no readable duration, so this span cannot be located inside it.');
+      stopSegment();
+      return;
+    }
+    if (win.from >= audioMs) {
+      toast('This span starts after the recording ends.');
+      stopSegment();
+      return;
+    }
+    audio.currentTime = Math.max(0, win.from / 1000);
+    audio.play().then(() => {
+      if (segment.token !== token) { audio.pause(); return; }
+      segment.playing = true;
+      paintSegment(opId, 0);
+      // The waveform shows which slice of the recording is being auditioned, so
+      // the reviewer can see the span they clicked against the whole call.
+      ui.markAudioSpan?.({ from: win.from, to: win.to, channel: win.channel });
+      follow(audio, token, opId, win);
+    }).catch((reason) => {
+      if (segment.token !== token) return;
+      toast(`Could not play that span: ${reason.message}`);
+      stopSegment();
+    });
+  };
+
+  if (state.audioTrack !== win.track) {
+    // A segment owns this source change. Do not resume whatever the reviewer
+    // happened to be hearing on the old track before its exact seek is ready.
+    ui.chooseAudioTrack(win.track, { resumePlayback: false });
+    audio.addEventListener('loadedmetadata', begin, { once: true });
+    audio.addEventListener('error', onError, { once: true });
+    return;
+  }
+  if (audio.readyState >= 1) { begin(); return; }
+  audio.addEventListener('loadedmetadata', begin, { once: true });
+  audio.addEventListener('error', onError, { once: true });
+}
+
+/** `timeupdate` only fires a few times a second, which is too coarse both to
+ *  stop on the span's end and to move a playhead without it stuttering. */
+function follow(audio, token, opId, win) {
+  const span = Math.max(1, win.to - win.from);
+  const stop = () => {
+    if (segment.token !== token) return;
+    // Leave the one player at the precise review boundary, even if a media
+    // frame crossed it before the browser delivered this animation frame.
+    if (!audio.ended) audio.currentTime = win.to / 1000;
+    audio.pause();
+    stopSegment();
+  };
+  // A hidden tab runs no animation frames, so the rAF chain cannot be the only
+  // thing holding the span's end: play a span, switch tabs, and the rest of the
+  // call would play out behind your back. The timer owns the boundary; the
+  // frames only move the progress bar.
+  const arm = () => {
+    if (segment.timer) clearTimeout(segment.timer);
+    const left = (win.to - audio.currentTime * 1000) / (audio.playbackRate || 1);
+    segment.timer = setTimeout(() => { if (segment.token === token && !audio.paused) stop(); }, Math.max(0, left) + 30);
+  };
+  const tick = () => {
+    if (segment.token !== token) return;
+    const nowMs = audio.currentTime * 1000;
+    if (nowMs >= win.to || audio.ended) { stop(); return; }
+    if (audio.paused) { stopSegment(); return; }
+    paintSegment(opId, (nowMs - win.from) / span);
+    segment.raf = requestAnimationFrame(tick);
+  };
+  arm();
+  // Seeking or changing speed mid-span invalidates the deadline the timer was
+  // armed against.
+  audio.addEventListener('seeked', arm);
+  audio.addEventListener('ratechange', arm);
+  segment.disarm = () => {
+    audio.removeEventListener('seeked', arm);
+    audio.removeEventListener('ratechange', arm);
+  };
+  segment.raf = requestAnimationFrame(tick);
 }
 
 /* -------------------------------------------------------------- keyboard */
@@ -2124,6 +4893,19 @@ document.addEventListener('keydown', (event) => {
 
   // Escape is the only shortcut that still makes sense while a control has
   // focus; the rest would fight the control's own keyboard behaviour.
+  // The exception is the player: its viewport is a `role="slider"` and its
+  // controls are buttons, so this rule would silence m / l / s / [ / ] / zoom
+  // exactly where a reviewer is most likely to press them — right after
+  // clicking the waveform. Only the keys the focused control genuinely owns
+  // (arrows, Enter, Space, paging) still belong to it.
+  const inPlayer = event.target instanceof Element && event.target.closest('.call-player');
+  const controlOwns = event.key.startsWith('Arrow')
+    || ['Enter', ' ', 'Home', 'End', 'PageUp', 'PageDown', 'Tab'].includes(event.key);
+  if (inPlayer && !controlOwns && state.audio && ui.playerKeys?.(event)) {
+    event.preventDefault();
+    return;
+  }
+
   if (onControl && event.key !== 'Escape') return;
 
   if (event.key === 'j' || event.key === 'ArrowDown') {
@@ -2135,19 +4917,54 @@ document.addEventListener('keydown', (event) => {
     event.preventDefault();
   } else if (event.key.toLowerCase() === 'r') {
     if (!$('#refresh').disabled) loadSessions({ reload: true });
+  } else if (event.key.toLowerCase() === 'b') {
+    toggleRail();
+    event.preventDefault();
   } else if (event.key === ' ' && state.audio) {
     ui.togglePlay?.();
     event.preventDefault();
+  } else if (state.audio && ui.playerKeys?.(event)) {
+    event.preventDefault();
   } else if (event.key === 'Escape') {
+    // A loop range is the most recent thing the reviewer set, so it clears
+    // before the selection the rest of the page is drawn from.
+    if (ui.clearAudioSelection?.()) return;
     setSelection(null, null);
   }
 });
 
+/* ------------------------------------------------------------------ rail */
+
+/** The rail is 292px of furniture on every screen. Folding it to a strip is a
+ *  view preference, not call state, so it outlives the session and the URL. */
+const RAIL_KEY = 'vaani.rail.collapsed';
+
+function setRailCollapsed(collapsed) {
+  const button = $('#rail-toggle');
+  $('#shell').dataset.rail = collapsed ? 'collapsed' : 'open';
+  button.setAttribute('aria-expanded', String(!collapsed));
+  const label = collapsed ? 'Show the call list' : 'Hide the call list';
+  button.setAttribute('aria-label', label);
+  button.title = `${label}  ·  b`;
+  try { localStorage.setItem(RAIL_KEY, collapsed ? '1' : '0'); } catch { /* private mode */ }
+}
+
+function toggleRail() {
+  setRailCollapsed($('#shell').dataset.rail !== 'collapsed');
+}
+
+let railStart = false;
+try { railStart = localStorage.getItem(RAIL_KEY) === '1'; } catch { /* private mode */ }
+setRailCollapsed(railStart);
+
 /* ------------------------------------------------------------- bootstrap */
 
+$('#rail-toggle').addEventListener('click', toggleRail);
 $('#refresh').addEventListener('click', () => loadSessions({ reload: true }));
 $('#session-search').addEventListener('input', (event) => { state.filter = event.target.value; renderRail(); });
-window.addEventListener('scroll', hideTooltip, { passive: true });
+// The page itself no longer scrolls — the call pane and the rail do — and a
+// tooltip is positioned against a rectangle that any of them can move.
+document.addEventListener('scroll', hideTooltip, { capture: true, passive: true });
 window.addEventListener('hashchange', () => {
   if (suppressHashHandling) return;
   const requested = readLocation();

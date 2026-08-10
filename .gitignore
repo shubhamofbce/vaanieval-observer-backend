@@ -8,3 +8,7 @@ venv/
 
 # Local runtime data (SQLite DB + uploaded audio/event objects)
 data/
+
+# Never commit provider keys.
+.env
+.env.*

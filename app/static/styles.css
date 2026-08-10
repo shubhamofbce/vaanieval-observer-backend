@@ -44,10 +44,23 @@
 
 * { box-sizing: border-box; min-width: 0; }
 
+/* A component that sets its own `display` would otherwise ignore `hidden`. */
+[hidden] { display: none !important; }
+
 html, body { height: 100%; }
 
+/* The console is an app shell, not a document: the topbar and the call rail are
+   furniture, and only the call detail scrolls. Letting the page scroll as well
+   put a second scrollbar behind the first and left the sticky review deck and
+   the sticky inspector fighting over the same viewport — the deck would pin
+   itself over the top third of the inspector, which then had no way to scroll
+   back into view. One scrollport per pane removes the whole class of bug. */
 body {
   margin: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  overflow: hidden;
   font-family: var(--sans);
   font-size: 13px;
   line-height: 1.5;
@@ -94,9 +107,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
 /* ---------------------------------------------------------------- topbar */
 .topbar {
-  position: sticky;
-  top: 0;
+  position: relative;
   z-index: 30;
+  flex: none;
   height: var(--topbar-h);
   display: flex;
   align-items: center;
@@ -221,16 +234,16 @@ button.status-pill:hover { filter: brightness(1.25); }
 /* ----------------------------------------------------------------- shell */
 .shell {
   display: grid;
-  grid-template-columns: 268px minmax(0, 1fr);
-  align-items: start;
-  min-height: calc(100vh - var(--topbar-h));
+  grid-template-columns: 292px minmax(0, 1fr);
+  align-items: stretch;
+  flex: 1;
+  min-height: 0;
 }
 
 /* ------------------------------------------------------------------ rail */
 .rail {
-  position: sticky;
-  top: var(--topbar-h);
-  height: calc(100vh - var(--topbar-h));
+  height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -238,8 +251,28 @@ button.status-pill:hover { filter: brightness(1.25); }
   border-right: 1px solid var(--line);
   background: var(--bg-raised);
 }
-.rail-head { display: flex; align-items: center; justify-content: space-between; }
+.rail-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .rail-head h2 { display: flex; align-items: center; gap: 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .09em; color: var(--text-faint); }
+/* The rail is 292px of permanent furniture on every screen. A reviewer reading
+   a waveform or a payload wants those pixels back without losing their place,
+   so it folds to a strip that still names itself and still counts the calls. */
+.rail-toggle {
+  display: grid; place-items: center;
+  width: 24px; height: 24px; flex: none;
+  border: 1px solid var(--line); border-radius: 7px;
+  background: var(--bg-inset); color: var(--text-faint);
+  cursor: pointer;
+  transition: color .12s ease, border-color .12s ease, transform .12s ease;
+}
+.rail-toggle:hover { color: var(--text); border-color: var(--line-strong); }
+.rail-panel { display: flex; flex-direction: column; gap: 10px; flex: 1; min-height: 0; }
+
+.shell[data-rail="collapsed"] { grid-template-columns: 46px minmax(0, 1fr); }
+.shell[data-rail="collapsed"] .rail { padding: 14px 8px; align-items: center; gap: 12px; }
+.shell[data-rail="collapsed"] .rail-panel { display: none; }
+.shell[data-rail="collapsed"] .rail-head { flex-direction: column-reverse; justify-content: flex-start; gap: 12px; }
+.shell[data-rail="collapsed"] .rail-head h2 { writing-mode: vertical-rl; gap: 10px; }
+.shell[data-rail="collapsed"] .rail-toggle svg { transform: rotate(180deg); }
 
 .rail-search { position: relative; display: flex; align-items: center; }
 .rail-search svg { position: absolute; left: 9px; color: var(--text-faint); pointer-events: none; }
@@ -254,38 +287,75 @@ button.status-pill:hover { filter: brightness(1.25); }
 .rail-search input::placeholder { color: var(--text-faint); }
 .rail-search input:focus { border-color: var(--line-strong); }
 
-.session-list { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; flex: 1; margin: 0 -4px; padding: 0 4px; }
+.session-list { display: flex; flex-direction: column; overflow-y: auto; overscroll-behavior: contain; flex: 1; margin: 0 -4px; padding: 0 4px; }
 
+/* One line per call. Scanning a few hundred recordings is the job, so the row
+   is sized for density and the full id lives on the title attribute. */
 .session {
   display: grid;
-  gap: 3px;
+  grid-template-columns: 7px minmax(0, 1fr) 22px 24px 50px 30px;
+  align-items: center;
+  gap: 7px;
   width: 100%;
   text-align: left;
-  padding: 9px 10px;
-  border: 1px solid transparent;
-  border-radius: var(--radius);
+  padding: 5px 8px;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: var(--radius-sm);
   background: transparent;
   cursor: pointer;
-  transition: background .1s ease;
+  line-height: 1.3;
 }
 .session:hover { background: var(--bg-panel); }
-.session[aria-current="true"] { background: var(--bg-inset); border-color: var(--line-strong); }
-.session-top { display: flex; align-items: center; gap: 7px; }
+.session[aria-current="true"] { background: var(--bg-inset); border-left-color: var(--accent); }
 .session-dot { width: 7px; height: 7px; border-radius: 99px; flex: none; background: var(--text-faint); }
 .session-dot[data-status="ready"] { background: var(--ok); }
 .session-dot[data-status="partial"] { background: var(--warn); }
 .session-dot[data-status="uploading"] { background: var(--accent); }
-.session-agent { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-meta { display: flex; gap: 6px; font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
-.session-meta span:not(:first-child)::before { content: "·"; margin-right: 6px; color: var(--text-faint); }
-.session-id { font-family: var(--mono); font-size: 10.5px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-agent { font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A failed operation is the reason a reviewer opens a call at all, so the count
+   is on the row rather than three clicks inside it. The cell is reserved on
+   every row, failures or not, so the columns stay in one line down the rail. */
+.session-errs {
+  font: 700 9.5px var(--mono);
+  text-align: center;
+  border-radius: 4px;
+  color: var(--danger);
+  background: rgb(255 123 131 / 15%);
+  padding: 1px 0;
+}
+.session-errs:empty { background: none; }
+.session-turns, .session-dur, .session-when {
+  font-size: 10.5px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+.session[aria-current="true"] .session-turns,
+.session[aria-current="true"] .session-dur,
+.session[aria-current="true"] .session-when { color: var(--text-dim); }
 
 .rail-note { font-size: 11.5px; color: var(--text-faint); padding: 4px 2px; }
 .rail-keys { font-size: 10.5px; color: var(--text-faint); border-top: 1px solid var(--line-soft); padding-top: 9px; line-height: 1.9; }
 kbd { font-family: var(--mono); font-size: 9.5px; padding: 1px 4px; border-radius: 3px; background: var(--bg-inset); border: 1px solid var(--line); margin-right: 2px; }
 
 /* ------------------------------------------------------------------ call */
-.call { padding: 18px 20px 56px; display: flex; flex-direction: column; gap: var(--gap); }
+/* The one scrollport for everything about a call. Sticky offsets inside it are
+   measured from its own top edge, not the window's — and a sticky child can
+   never rise above its containing block, so the top inset is a margin on the
+   first card rather than padding on the scrollport. Padding would have left an
+   18px band above the pinned deck with content sliding through it. */
+.call {
+  padding: 0 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  min-height: 0;
+}
+.call > :first-child { margin-top: 18px; }
 .call:focus { outline: none; }
 
 .call-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
@@ -343,9 +413,21 @@ button.kpi:hover { border-color: var(--line-strong); background: var(--bg-inset)
 .kpi[data-tone="warn"] .kpi-value { color: var(--warn); }
 
 /* ---------------------------------------------------------------- layout */
+/* No trailing slack below the columns: when the left column is shorter than the
+   pinned inspector the row has no sticky travel, so any extra scrollable space
+   only serves to slide the inspector's header up behind the deck. */
 .columns { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: var(--gap); align-items: start; }
 .col { display: flex; flex-direction: column; gap: var(--gap); min-width: 0; }
-.col-side { position: sticky; top: calc(var(--topbar-h) + 14px); height: calc(100vh - var(--topbar-h) - 28px); overflow: hidden; }
+/* Pinned under the review deck rather than under the topbar: the deck is the
+   scrollport's own sticky header, so an inspector that pinned to zero would
+   spend its top third hidden behind it. `--deck-h` is measured whenever the
+   deck resizes and is 0 when the deck is not pinned. */
+.col-side {
+  position: sticky;
+  top: calc(var(--deck-h, 0px) + 14px);
+  height: calc(100dvh - var(--topbar-h) - var(--deck-h, 0px) - 46px);
+  overflow: hidden;
+}
 
 /* ------------------------------------------------------------------ card */
 .card {
@@ -357,6 +439,47 @@ button.kpi:hover { border-color: var(--line-strong); background: var(--bg-inset)
   min-height: 0;
   overflow: hidden;
 }
+/* Player and transcript, as one review surface.
+
+   Stacked and with only the player sticky, the player pinned itself over the
+   transcript on the first scroll: at a 690px viewport the transcript was either
+   below the fold or 90% occluded, so the words could never be read while the
+   audio stayed in reach. Side by side above 1240px they share one sticky row
+   and neither can cover the other. Below that width there is no room to split,
+   so the deck stacks and stops sticking — scrolling past the player to read is
+   better than a player that eats a short viewport. */
+.review-deck { margin-bottom: var(--gap); }
+.review-deck > .card { margin-bottom: 0; }
+@media (min-width: 1240px) {
+  .review-deck {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(300px, 380px);
+    gap: var(--gap);
+    /* The deck is pinned and mostly opaque, but the page still scrolled through
+       the gutter between the two cards. */
+    background: var(--bg);
+    /* The two cards are the only things that should carry a shadow; the gutter
+       must not clip the shadow the cards cast downward. */
+    box-shadow: 0 0 0 6px var(--bg);
+    /* The player sets the height of the row. The transcript is taken out of
+       flow inside its slot so that however much was said — 5,800px on a
+       22-turn call — cannot stretch the deck and swallow the page below it. */
+    align-items: stretch;
+  }
+  .review-deck > .card { box-shadow: 0 10px 28px rgb(0 0 0 / 20%); }
+  .transcript-slot { position: relative; min-height: 0; }
+  .review-deck .transcript-card {
+    position: absolute; inset: 0;
+    margin: 0;
+    display: flex; flex-direction: column; min-height: 0;
+    box-shadow: 0 10px 28px rgb(0 0 0 / 20%);
+  }
+  .review-deck .transcript-body { max-height: none; flex: 1; min-height: 0; }
+}
+.call-player { box-shadow: 0 10px 28px rgb(0 0 0 / 20%); }
 .card-head {
   display: flex;
   align-items: center;
@@ -370,6 +493,9 @@ button.kpi:hover { border-color: var(--line-strong); background: var(--bg-inset)
 .card-head h3 { display: flex; align-items: center; gap: 8px; font-size: 12.5px; letter-spacing: .01em; }
 .card-head .hint { font-size: 11px; color: var(--text-faint); font-weight: 400; }
 .card-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.challenger-control { display: inline-flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.challenger-select { min-height: 31px; max-width: 210px; }
+.challenger-state { color: var(--muted); font-size: 11px; max-width: 245px; }
 .card-body { padding: 15px; overflow: auto; min-height: 0; }
 .card-body.flush { padding: 0; }
 
@@ -441,25 +567,30 @@ button.kpi:hover { border-color: var(--line-strong); background: var(--bg-inset)
 .timeline-tick.at-end::before { left: auto; right: 0; }
 
 .timeline-surface { position: relative; }
-.timeline-playhead {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 1.5px;
-  margin-left: var(--track-inset);
-  background: #fff;
-  pointer-events: none;
-  opacity: .85;
-  display: none;
-  z-index: 4;
-}
-.timeline-playhead::before { content: ""; position: absolute; top: -3px; left: 50%; width: 7px; height: 7px; border-radius: 99px; background: #fff; transform: translateX(-50%); }
-.timeline-playhead.is-on { display: block; }
-
+/* Only reached when the spans cannot be drawn on the waveform — a call with no
+   audio at all. The lane inside the player is the normal home. */
+.player-timeline { margin-top: 14px; padding-top: 13px; border-top: 1px solid var(--line-soft); }
+.player-timeline-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 11px; }
+.player-timeline-head b { font-size: 12px; }
+.player-timeline-head .hint { font-size: 11px; color: var(--text-faint); }
+.player-timeline-head .timeline-legend { margin-left: auto; }
 .turn-guides { position: absolute; inset: 0; margin-left: var(--track-inset); pointer-events: none; }
 .turn-guide { position: absolute; top: 0; bottom: 16px; background: rgb(76 154 255 / 12%); border-left: 1px solid rgb(76 154 255 / 45%); border-right: 1px solid rgb(76 154 255 / 45%); border-radius: 2px; }
 
 /* ------------------------------------------------------------ transcript */
+/* The transcript sits under the player rather than in a tab of its own, so the
+   panel scrolls inside itself: following the playhead must never drag the page
+   away from whatever else the reviewer has open. */
+.transcript-card { margin-bottom: var(--gap); min-width: 0; }
+/* No `scroll-behavior: smooth` here: `scrollTo({ behavior: 'auto' })` defers to
+   the CSS, so declaring it would defeat the reduced-motion path in the script. */
+.transcript-body { max-height: 42vh; overflow: auto; overscroll-behavior: contain; }
+.follow-toggle[aria-pressed="true"] { background: var(--accent-soft); color: #dbe9ff; box-shadow: inset 0 0 0 1px rgb(76 154 255 / 45%); }
+.follow-toggle[aria-pressed="false"] { opacity: .72; }
+/* The turn now playing. Distinct from `.is-selected`, which is what the
+   reviewer chose — the two are often different rows and must not look alike. */
+.transcript-turn.is-live { box-shadow: inset 3px 0 0 var(--accent); background: rgb(76 154 255 / 6%); }
+
 .transcript { display: flex; flex-direction: column; gap: 2px; }
 .transcript-turn { border-radius: var(--radius); }
 .transcript-turn.is-selected { background: rgb(76 154 255 / 8%); box-shadow: inset 0 0 0 1px var(--accent-soft); }
@@ -481,6 +612,18 @@ button.kpi:hover { border-color: var(--line-strong); background: var(--bg-inset)
 .tag[data-tone="ok"] { color: var(--ok); border-color: #1d4437; }
 .tag[data-tone="warn"] { color: var(--warn); border-color: #4b3a17; }
 .tag[data-tone="danger"] { color: var(--danger); border-color: #4d2027; }
+.msg-shell { display: flex; flex-direction: column; }
+.msg-shell .msg-payload { margin: 0 10px 8px 84px; }
+.msg-payload { border: 1px solid var(--line-soft); border-radius: var(--radius-sm); background: var(--bg-inset); }
+.msg-payload > summary { display: flex; align-items: baseline; gap: 8px; padding: 5px 9px; cursor: pointer; font-size: 11px; list-style: none; }
+.msg-payload > summary::-webkit-details-marker { display: none; }
+.msg-payload > summary::before { content: "\25b8"; color: var(--text-faint); }
+.msg-payload[open] > summary::before { content: "\25be"; }
+.msg-payload > summary:hover { background: var(--bg-hover, rgb(255 255 255 / 4%)); border-radius: var(--radius-sm); }
+.payload-name { font-weight: 600; color: var(--tool); white-space: nowrap; }
+.payload-peek { color: var(--text-faint); font-family: var(--mono); font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.payload-size { color: var(--text-faint); font-size: 10px; white-space: nowrap; }
+.msg-payload > .msg-tool { border: 0; border-top: 1px solid var(--line-soft); border-radius: 0; background: transparent; }
 .msg-tool { font-family: var(--mono); font-size: 11.5px; color: var(--text-dim); background: var(--bg-inset); border: 1px solid var(--line-soft); border-radius: var(--radius-sm); padding: 7px 9px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 140px; overflow: auto; }
 
 details.system-prompt { border: 1px solid var(--line-soft); border-radius: var(--radius); background: var(--bg-inset); margin-bottom: 10px; }
@@ -520,8 +663,186 @@ details.system-prompt pre { margin: 0; padding: 0 11px 11px; font: 11.5px/1.6 va
 .row[aria-selected="true"] { background: rgb(76 154 255 / 12%); box-shadow: inset 2px 0 0 var(--accent); }
 .row .num { font-variant-numeric: tabular-nums; }
 
-.turns-grid { grid-template-columns: 52px 1fr 1fr 1fr 1fr 92px; }
 .ops-grid { grid-template-columns: 46px 1fr 74px 78px 84px 66px; }
+
+/* -------------------------------------------------------------- workbench */
+.workbench { display: flex; flex-direction: column; min-width: 0; }
+.view-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: -1px; }
+.view-tabs button {
+  border: 1px solid transparent;
+  border-bottom: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font: 500 12px var(--sans);
+  padding: 8px 14px;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  cursor: pointer;
+}
+.view-tabs button:hover { color: var(--text); background: var(--bg-panel); }
+.view-tabs button[aria-selected="true"] {
+  color: var(--text);
+  background: var(--bg-panel);
+  border-color: var(--line);
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+.workbench-body > .card { border-top-left-radius: 0; }
+
+.view-note { padding: 10px 15px 0; font-size: 11.5px; line-height: 1.6; color: var(--text-faint); }
+
+/* ------------------------------------------------------------------ trace */
+.trace-grid { grid-template-columns: 96px minmax(0, 1fr) 62px 108px 74px; }
+.trace .trace-row { border-bottom: 1px solid var(--line-soft); }
+
+.trace-row {
+  display: grid;
+  /* Indent eats into the lead column so every deeper row still lines its
+     timing and status up with the turn it belongs to. */
+  grid-template-columns: calc(96px - var(--depth) * 18px) minmax(0, 1fr) 62px 108px 74px;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 5px 15px;
+  padding-left: calc(15px + var(--depth) * 18px);
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  line-height: 1.35;
+}
+.trace-row:hover { background: var(--bg-inset); }
+.trace-row.is-selected { background: rgb(76 154 255 / 12%); box-shadow: inset 2px 0 0 var(--accent); }
+.trace-row[data-depth="0"] { background: rgb(255 255 255 / 2%); }
+.trace-row[data-depth="0"]:hover { background: var(--bg-inset); }
+.trace-row[data-depth="0"] .trace-title b { font-weight: 600; }
+
+.trace-lead { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.trace-twisty { width: 10px; font-size: 9px; color: var(--text-faint); flex: none; }
+.trace-row .type-tag { white-space: nowrap; }
+.trace-row .type-tag[data-type="turn"] { background: rgb(76 154 255 / 16%); color: var(--accent); }
+
+.trace-title { display: flex; align-items: baseline; gap: 8px; min-width: 0; overflow: hidden; }
+.trace-title b { font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 46%; flex: none; }
+.trace-headline { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.trace-start { font-size: 11px; color: var(--text-faint); text-align: right; }
+.trace-dur { display: grid; gap: 3px; font-size: 11.5px; }
+.trace-dur .num { font-variant-numeric: tabular-nums; }
+.trace-row .state-dot { font-size: 11px; }
+
+/* The number a reviewer is actually judging the agent by, called out under the
+   turn it belongs to instead of hiding in a column of similar-looking times. */
+.trace-response {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 15px 5px;
+  padding-left: calc(15px + 106px);
+  font-size: 10.5px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  border-bottom: 1px solid var(--line-soft);
+  background: rgb(255 255 255 / 2%);
+}
+.trace-response b { font-size: 12px; letter-spacing: 0; text-transform: none; }
+.trace-response[data-tone="ok"] b { color: var(--ok); }
+.trace-response[data-tone="warn"] b { color: var(--warn); }
+.trace-response[data-tone="danger"] b { color: var(--danger); }
+
+.trace-detail {
+  padding: 10px 15px 12px;
+  padding-left: calc(15px + var(--depth) * 18px);
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--bg-inset);
+}
+.trace-explain { font-size: 11.5px; line-height: 1.6; color: var(--text-dim); max-width: 76ch; }
+.trace-explain[data-tone] { border-left: 2px solid var(--line-strong); padding-left: 8px; }
+.trace-explain[data-tone="info"] { border-left-color: var(--accent); }
+.trace-explain[data-tone="warn"] { border-left-color: var(--warn); }
+
+/* --------------------------------------------------------------- phases */
+/* "When did the caller start and stop talking" cannot be read off a duration,
+   so every recorded phase is placed against the span's own window. */
+.phase { display: grid; gap: 9px; }
+.phase-rail { display: grid; grid-template-columns: 46px minmax(0, 1fr) 46px; align-items: center; gap: 8px; }
+.phase-edge { font-size: 10px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.phase-rail > .phase-edge:last-child { text-align: right; }
+.phase-track { position: relative; height: 16px; border-radius: 4px; background: var(--bg); border: 1px solid var(--line-soft); }
+.phase-mark {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  width: 2px;
+  min-width: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.phase-mark[data-type="stt"] { background: var(--stt); }
+.phase-mark[data-type="llm"] { background: var(--llm); }
+.phase-mark[data-type="tts"] { background: var(--tts); }
+/* A band drawn at tick weight swallows every point mark inside it. */
+.phase-mark[data-range="true"] { opacity: 0.4; border-radius: 3px; }
+
+/* The audible part of a span is narrower than the span itself — an STT socket
+   is open well before the caller speaks — so the playable window is shaded
+   rather than left to be inferred from the marks. */
+.phase-window {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.phase-window[data-type="stt"] { background: color-mix(in srgb, var(--stt) 22%, transparent); }
+.phase-window[data-type="tts"] { background: color-mix(in srgb, var(--tts) 22%, transparent); }
+.phase-playhead {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 2px;
+  background: var(--text);
+  box-shadow: 0 0 0 1px var(--bg);
+  pointer-events: none;
+}
+.phase-playhead[hidden] { display: none; }
+
+.phase-rail.has-audio { grid-template-columns: 22px 46px minmax(0, 1fr) 46px; }
+.phase-play {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  font-size: 9px;
+  line-height: 1;
+  border-radius: 50%;
+  cursor: pointer;
+  color: var(--text);
+  background: var(--bg-panel);
+  border: 1px solid var(--line);
+}
+.phase-play:hover { border-color: var(--accent); color: var(--accent); }
+.phase-play:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.phase-play[data-playing="true"] { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+
+.phase-legend { display: flex; flex-wrap: wrap; gap: 6px 8px; }
+.phase-item.is-audio { border-style: dashed; }
+.phase-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 99px;
+  background: var(--bg-panel);
+  border: 1px solid var(--line-soft);
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+.phase-item b { color: var(--text); font-weight: 500; }
+.phase-item .num { font-variant-numeric: tabular-nums; color: var(--text); }
+.phase-item small { color: var(--text-faint); }
 .ops-grid.with-cost { grid-template-columns: 46px 1fr 74px 78px 82px 84px 66px; }
 
 .cell-dim { color: var(--text-dim); font-size: 12px; }
@@ -562,8 +883,38 @@ details.system-prompt pre { margin: 0; padding: 0 11px 11px; font: 11.5px/1.6 va
    makes long calls hard to scan and loses your place. */
 .scroll-cap { max-height: none; }
 
+/* ------------------------------------------------------------ STT quality */
+.stt-notice {
+  display: grid;
+  gap: 3px;
+  padding: 11px 15px;
+  border-bottom: 1px solid var(--line-soft);
+  background: rgb(98 180 255 / 7%);
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+.stt-notice b { color: #b9ddff; font-size: 11.5px; }
+.stt-summary { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border-bottom: 1px solid var(--line-soft); }
+.stt-metric { display: grid; gap: 3px; padding: 12px 14px; border-right: 1px solid var(--line-soft); }
+.stt-metric:last-child { border-right: 0; }
+.stt-metric > span { color: var(--text-faint); font-size: 10px; text-transform: uppercase; letter-spacing: .065em; }
+.stt-metric b { color: var(--text); font-size: 15px; font-weight: 620; letter-spacing: -.01em; }
+.stt-metric small { min-height: 2.9em; color: var(--text-dim); font-size: 10.5px; line-height: 1.35; }
+.stt-metric[data-tone="warn"] b { color: var(--warn); }
+.stt-turns { display: flex; flex-direction: column; }
+.stt-turn { display: grid; grid-template-columns: 58px minmax(190px, 1fr) 104px 116px 70px; align-items: center; gap: 12px; padding: 10px 15px; border-bottom: 1px solid var(--line-soft); }
+.stt-turn:last-child { border-bottom: 0; }
+.stt-turn-head { padding-top: 7px; padding-bottom: 7px; background: var(--bg-panel); color: var(--text-faint); font-size: 10px; text-transform: uppercase; letter-spacing: .065em; }
+.stt-turn-id { justify-self: start; padding: 0; border: 0; color: var(--stt); background: transparent; font: 600 11.5px var(--mono); cursor: pointer; }
+.stt-turn-id:hover { color: #b9ddff; text-decoration: underline; }
+.stt-copy { display: grid; gap: 3px; overflow: hidden; }
+.stt-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.stt-copy small, .stt-stream small { color: var(--text-faint); font-size: 10.5px; }
+.stt-stream { display: grid; gap: 2px; }
+.stt-stream .num { font-size: 12px; }
+
 /* ------------------------------------------------------------- inspector */
-.inspector { max-height: calc(100vh - var(--topbar-h) - 28px); }
+.inspector { max-height: 100%; }
 .col-side .inspector { flex: 1; min-height: 260px; }
 .inspector .card-body { padding: 0; }
 .tabs { display: flex; gap: 2px; padding: 8px 10px 0; border-bottom: 1px solid var(--line-soft); overflow-x: auto; flex: none; }
@@ -574,7 +925,7 @@ details.system-prompt pre { margin: 0; padding: 0 11px 11px; font: 11.5px/1.6 va
 }
 .tabs button:hover { color: var(--text); }
 .tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
-.tab-panel { padding: 13px 15px; overflow: auto; min-height: 0; flex: 1; }
+.tab-panel { padding: 13px 15px; overflow: auto; overscroll-behavior: contain; min-height: 0; flex: 1; }
 
 .kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 14px; font-size: 12px; align-items: baseline; }
 .kv dt { color: var(--text-faint); white-space: nowrap; }
@@ -608,38 +959,496 @@ details.system-prompt pre { margin: 0; padding: 0 11px 11px; font: 11.5px/1.6 va
 .waterfall-fill { position: absolute; top: 0; height: 100%; border-radius: 3px; min-width: 2px; }
 
 /* ----------------------------------------------------------------- audio */
-.player { display: grid; gap: 11px; }
-.player-scrub { display: grid; gap: 6px; }
-.scrub {
+.player { display: grid; gap: 10px; }
+.call-player { --wave-h: 112px; --ruler-h: 20px; --marks-h: 17px; --lanes-h: 0px; }
+.call-player .card-head { background: linear-gradient(90deg, rgb(76 154 255 / 10%), transparent 58%); }
+.call-player .card-body { padding: 12px 14px 13px; }
+
+/* Source switch --------------------------------------------------------- */
+.seg { display: inline-flex; padding: 2px; gap: 2px; border: 1px solid var(--line); border-radius: 999px; background: var(--bg-inset); }
+.seg-btn {
+  border: 0; border-radius: 999px; cursor: pointer;
+  padding: 4px 11px;
+  background: transparent; color: var(--text-faint);
+  font: 600 11px var(--sans);
+  transition: color .12s ease, background .12s ease;
+}
+.seg-btn:hover { color: var(--text); }
+.seg-btn[aria-pressed="true"] { background: var(--accent-soft); color: #dbe9ff; box-shadow: inset 0 0 0 1px rgb(76 154 255 / 45%); }
+
+/* Waveform -------------------------------------------------------------- */
+.wave-shell {
   position: relative;
-  height: 26px;
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, #101a2c, #0c1526);
+  box-shadow: inset 0 0 0 1px var(--line-soft);
+  overflow: hidden;
+}
+.wave-viewport {
+  position: relative;
+  height: calc(var(--wave-h) + var(--lanes-h) + var(--marks-h) + var(--ruler-h));
+  overflow-x: auto;
+  overflow-y: hidden;
+  cursor: crosshair;
+  /* A classic scrollbar would sit permanently across the bottom of the wave and
+     steal a strip of the clock ruler even at fit zoom, where there is nothing
+     to scroll. The overview strip below is the scrollbar. */
+  scrollbar-width: none;
+  touch-action: pan-y;
+}
+.wave-viewport::-webkit-scrollbar { display: none; }
+.wave-viewport:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.wave-viewport.is-zoomed { cursor: grab; }
+
+.wave-strip { position: relative; width: 100%; height: calc(var(--wave-h) + var(--lanes-h) + var(--marks-h) + var(--ruler-h)); }
+/* The canvas only ever paints the visible window, so a 16× zoom costs no more
+   memory than a 1× one; sticky keeps it under the cursor while the strip
+   scrolls beneath it. */
+.wave-canvas { position: sticky; left: 0; display: block; height: var(--wave-h); width: 100%; }
+
+/* The bands run through the span lane as well: a loop or an auditioned span
+   selects a stretch of the call, and the provider work inside it is part of
+   what was selected. */
+.wave-regions, .wave-span, .wave-loop, .wave-tail { position: absolute; top: 0; height: calc(var(--wave-h) + var(--lanes-h)); pointer-events: none; }
+/* Audio that outlives the call clock: still playable, but not part of the call
+   the rest of the page is describing. */
+.wave-tail {
+  background: repeating-linear-gradient(135deg, rgb(255 255 255 / 4%) 0 6px, transparent 6px 12px);
+  border-left: 1px dashed rgb(255 255 255 / 28%);
+  pointer-events: auto;
+}
+.wave-tail-label {
+  position: absolute; top: 6px; left: 6px;
+  font: 600 9px var(--mono); color: var(--text-faint); white-space: nowrap;
+}
+.wave-span {
+  border-radius: 3px;
+  background: rgb(255 255 255 / 7%);
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 14%);
+}
+.wave-span[data-channel="agent"] { background: rgb(79 214 165 / 12%); box-shadow: inset 0 0 0 1px rgb(79 214 165 / 34%); }
+.wave-span[data-channel="caller"] { background: rgb(98 180 255 / 12%); box-shadow: inset 0 0 0 1px rgb(98 180 255 / 34%); }
+.wave-loop {
+  border-radius: 3px;
+  background: rgb(240 179 85 / 10%);
+  border-left: 1px solid rgb(240 179 85 / 75%);
+  border-right: 1px solid rgb(240 179 85 / 75%);
+  pointer-events: none;
+}
+.wave-loop[data-on="true"] { background: rgb(240 179 85 / 18%); }
+.loop-grip {
+  position: absolute; top: 0; bottom: 0; width: 11px;
+  cursor: ew-resize; pointer-events: auto;
+}
+.loop-grip[data-edge="from"] { left: -6px; }
+.loop-grip[data-edge="to"] { right: -6px; }
+.loop-grip::after {
+  content: ""; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: 5px; height: 26px; border-radius: 3px;
+  background: rgb(240 179 85 / 90%); box-shadow: 0 1px 4px rgb(0 0 0 / 45%);
+}
+.loop-grip:hover::after { background: #ffd08a; }
+.loop-tag {
+  position: absolute; top: 4px; left: 50%; transform: translateX(-50%);
+  padding: 1px 6px; border-radius: 4px;
+  background: rgb(240 179 85 / 90%); color: #221503;
+  font: 700 9.5px var(--mono); white-space: nowrap;
+}
+
+/* Dashed and dimmer than the playhead: two vertical lines on one waveform must
+   never be mistaken for each other. */
+.wave-hover {
+  position: absolute; top: 0; height: calc(var(--wave-h) + var(--lanes-h) + var(--marks-h)); width: 0;
+  border-left: 1px dashed rgb(255 255 255 / 38%);
+  pointer-events: none;
+}
+.wave-head {
+  position: absolute; top: 0; height: calc(var(--wave-h) + var(--lanes-h) + var(--marks-h)); width: 2px; margin-left: -1px;
+  background: #fff; box-shadow: 0 0 10px rgb(255 255 255 / 55%);
+  pointer-events: none; z-index: 3;
+}
+.wave-head::after {
+  content: ""; position: absolute; top: -1px; left: 50%; transform: translateX(-50%);
+  width: 9px; height: 9px; border-radius: 2px; background: #fff;
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+}
+/* Dragging the playhead should feel like holding it. The head takes the accent
+   colour and grows while the pointer is down, so a scrub reads as one
+   continuous gesture rather than a series of jumps. */
+.wave-shell.is-scrubbing .wave-viewport { cursor: grabbing; }
+.wave-shell.is-scrubbing .wave-head { background: var(--accent); box-shadow: 0 0 14px var(--accent); width: 3px; }
+.wave-shell.is-scrubbing .wave-head::after { background: var(--accent); width: 11px; height: 11px; }
+/* Zoom rebuilds every layer in a single frame, which reads as a blink. */
+.wave-shell.is-rescaling .wave-canvas,
+.wave-shell.is-rescaling .wave-marks,
+.wave-shell.is-rescaling .wave-gaps { opacity: .35; }
+/* Swapping the source keeps the old envelope as a ghost so the reviewer does
+   not lose their place, dimmed hard enough that nobody reads it as the new
+   track and labelled as loading by the skeleton over it. */
+.wave-shell.is-swapping .wave-canvas { opacity: .22; }
+.wave-canvas, .wave-marks, .wave-gaps { transition: opacity .16s ease; }
+.wave-shell.is-rescaling .wave-lanes, .wave-shell.is-swapping .wave-lanes { opacity: .35; }
+.wave-lanes { transition: opacity .16s ease; }
+
+/* Span lanes ------------------------------------------------------------ */
+/* The provider spans, drawn between the envelope and the turn marks on the
+   waveform's own axis. They zoom and scroll with it, so a bar and the silence
+   it explains sit on the same pixels. */
+.wave-lanes {
+  position: absolute; left: 0; right: 0;
+  bottom: calc(var(--ruler-h) + var(--marks-h));
+  height: var(--lanes-h);
+  display: flex; flex-direction: column; gap: 2px;
+  padding-top: 2px;
+}
+.wave-lanes:empty { display: none; }
+.lane-row { position: relative; flex: none; height: 11px; line-height: 0; }
+.lane-track { position: absolute; inset: 0; border-radius: 3px; background: rgb(255 255 255 / 4%); }
+/* Sticky so the row keeps its name at 16×, where the left edge of the strip is
+   minutes off screen. It sits over the bars, because a lane whose identity is
+   hidden under a span starting at 0:00 is worse than one whose first few pixels
+   are covered — and hovering the lane fades the labels back out, so the span
+   underneath can still be read and clicked. Block, not inline-block: an inline
+   box sits on the row's baseline and drops the label onto the lane below it. */
+.lane-label {
+  position: sticky; left: 0; z-index: 2;
+  display: block; width: max-content; height: 11px;
+  padding: 0 5px 0 3px;
+  font: 700 8px var(--sans); letter-spacing: .07em; line-height: 11px;
+  color: var(--text-faint);
+  background: linear-gradient(90deg, #0e1729 72%, transparent);
+  pointer-events: none; white-space: nowrap;
+  transition: opacity .12s ease;
+}
+.wave-lanes:hover .lane-label { opacity: .12; }
+.wave-lanes .timeline-bar { top: 0; height: 11px; border-radius: 2px; z-index: 1; }
+/* The 24px target of a full-width timeline cannot apply here: rows are 13px
+   apart, so a target taller than the row reaches into the lane above and the
+   later bar in DOM order wins the click. Selecting the wrong span is worse than
+   a small one, so the target grows only across the 2px gutter, and horizontally
+   only to 14px — beyond that adjacent spans in the same lane start stealing
+   from each other. Zoom is the answer to a crowded lane. */
+.wave-lanes .timeline-bar::after { top: -1px; bottom: -1px; min-width: 14px; }
+/* Where the playhead went, once a panned or zoomed view no longer contains it.
+   Without this the clock reads 0:20 while the picture shows 5:45, and nothing
+   on screen admits the two disagree. */
+.wave-return {
+  position: absolute; top: 50%; transform: translateY(-50%); z-index: 7;
+  display: flex; align-items: center; gap: 4px;
+  padding: 4px 8px; border-radius: 99px;
+  border: 1px solid var(--line-strong);
+  background: rgb(13 21 38 / 92%); color: var(--text-dim);
+  font: 600 10px var(--sans); letter-spacing: .04em;
+  cursor: pointer; backdrop-filter: blur(3px);
+  box-shadow: 0 4px 14px rgb(0 0 0 / 35%);
+}
+.wave-return:hover { color: #fff; border-color: var(--accent); }
+.wave-return.at-left { left: 8px; }
+.wave-return.at-right { right: 8px; }
+.wave-return[hidden] { display: none; }
+
+.wave-marks { position: absolute; left: 0; right: 0; bottom: var(--ruler-h); height: var(--marks-h); }
+.wave-turn {
+  position: absolute; bottom: 0; transform: translateX(-50%);
+  padding: 0 4px; height: 14px;
+  border: 1px solid var(--line-strong); border-radius: 4px;
+  background: rgb(13 21 38 / 88%); color: var(--text-faint);
+  font: 600 9.5px var(--mono); line-height: 12px;
+  cursor: pointer; white-space: nowrap;
+}
+.wave-turn:hover, .wave-turn:focus-visible { color: var(--text); border-color: var(--accent); background: var(--accent-soft); z-index: 2; }
+.wave-turn.is-tick {
+  width: 3px; padding: 0; height: 9px; border-radius: 2px;
+  background: var(--line-strong); border-color: transparent;
+  cursor: pointer;
+}
+/* Hue alone fails for a deuteranopic reviewer, so severity is also height and
+   width: a slow turn is taller than a healthy one and a bad turn is taller and
+   wider still, which survives being printed in greyscale too. */
+.wave-turn.is-tick[data-tone="warn"] { background: var(--warn); height: 12px; }
+.wave-turn.is-tick[data-tone="danger"] { background: var(--danger); height: 15px; width: 4px; }
+.wave-turn.is-tick[data-tone="ok"] { background: rgb(79 214 165 / 65%); height: 7px; }
+.wave-turn.is-tick:hover { background: var(--accent); height: 13px; }
+.wave-turn[data-tone="ok"] { color: var(--ok); border-color: rgb(79 214 165 / 40%); }
+.wave-turn[data-tone="warn"] { color: var(--warn); border-color: rgb(240 179 85 / 45%); }
+.wave-turn[data-tone="danger"] { color: var(--danger); border-color: rgb(255 123 131 / 45%); }
+
+.wave-ruler {
+  position: absolute; left: 0; right: 0; bottom: 0; height: var(--ruler-h);
+  border-top: 1px solid var(--line-soft);
+  background: rgb(9 14 24 / 55%);
+}
+.wave-tick {
+  position: absolute; top: 0; padding-left: 4px;
+  font: 500 9.5px var(--mono); color: var(--text-faint);
+  line-height: var(--ruler-h);
+  border-left: 1px solid var(--line-soft);
+  height: var(--ruler-h);
+  pointer-events: none;
+}
+
+.wave-bubble {
+  position: absolute; top: 6px; z-index: 6;
+  display: flex; align-items: center; gap: 6px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: rgb(6 11 20 / 92%);
+  box-shadow: 0 2px 10px rgb(0 0 0 / 45%), inset 0 0 0 1px var(--line);
+  font-size: 10.5px; color: var(--text-dim);
+  pointer-events: none; white-space: nowrap;
+}
+.wave-bubble b { color: var(--text); font-size: 11px; }
+
+.wave-skeleton {
+  position: absolute; inset: 0 0 calc(var(--ruler-h) + var(--marks-h) + var(--lanes-h)) 0;
+  display: grid; place-items: center;
+  background: linear-gradient(90deg, transparent, rgb(76 154 255 / 7%), transparent) 0 0 / 220% 100%;
+  animation: wave-shimmer 1.3s linear infinite;
+  pointer-events: none;
+}
+.wave-skeleton-label { font-size: 11px; color: var(--text-faint); }
+@keyframes wave-shimmer { from { background-position: -110% 0; } to { background-position: 110% 0; } }
+
+/* First-run coach mark ---------------------------------------------------- */
+.wave-coach {
+  position: absolute; left: 50%; top: 10px; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 14px;
+  padding: 6px 8px 6px 12px; border-radius: 999px;
+  background: rgb(12 20 36 / 92%); border: 1px solid var(--line-strong);
+  box-shadow: 0 10px 24px rgb(0 0 0 / 45%);
+  font-size: 11px; color: var(--text-dim);
+  z-index: 6;
+  /* A hint must never intercept the gesture it is describing: the pill sits
+     across the agent lane, and a reviewer's first instinct is to click the
+     waveform, not to read. Clicks pass through to the viewport, which both
+     seeks and dismisses the hint. */
+  pointer-events: none;
+  animation: coach-in .32s ease both;
+}
+@keyframes coach-in { from { opacity: 0; transform: translate(-50%, -6px); } to { opacity: 1; transform: translate(-50%, 0); } }
+.wave-coach .coach-line { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.wave-coach .coach-x {
+  border: 0; background: transparent; color: var(--text-faint);
+  cursor: pointer; font-size: 11px; line-height: 1; padding: 4px 6px; border-radius: 6px;
+  pointer-events: auto;
+}
+.wave-coach .coach-x:hover { background: var(--bg-hover); color: var(--text); }
+
+.peaks-note { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.peaks-note .btn { padding: 2px 8px; font-size: 11px; }
+
+/* Said once in text for anyone who cannot see the drawing. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
+}
+
+/* Overview strip ---------------------------------------------------------- */
+.wave-mini { padding: 2px 0 0; }
+.mini-strip {
+  position: relative; height: 30px;
   border-radius: var(--radius-sm);
-  background: var(--bg-inset);
+  background: #0c1424;
   box-shadow: inset 0 0 0 1px var(--line-soft);
   cursor: pointer;
   overflow: hidden;
 }
-.scrub-fill { position: absolute; inset: 0 auto 0 0; background: rgb(76 154 255 / 22%); pointer-events: none; }
-.scrub-head { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; pointer-events: none; }
-.scrub-time { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.mini-canvas { display: block; height: 30px; width: 100%; }
+.mini-window {
+  position: absolute; top: 0; bottom: 0;
+  border-radius: 3px;
+  background: rgb(76 154 255 / 14%);
+  box-shadow: inset 0 0 0 1px rgb(76 154 255 / 65%);
+  pointer-events: none;
+  min-width: 6px;
+}
 
-.player-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+/* Now playing ------------------------------------------------------------- */
+.now-chip {
+  display: inline-flex; align-items: center; gap: 8px; min-width: 0;
+  max-width: 100%; height: 30px; padding: 0 10px;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--bg-inset); color: var(--text-dim);
+  font: 500 11px var(--sans); cursor: pointer; text-align: left;
+}
+.now-chip:hover { border-color: var(--line-strong); color: var(--text); }
+.now-turn { font-weight: 700; color: var(--text); white-space: nowrap; }
+.now-latency { font-family: var(--mono); font-size: 10.5px; padding: 1px 5px; border-radius: 4px; background: rgb(255 255 255 / 6%); }
+.now-chip[data-tone="ok"] .now-latency { color: var(--ok); }
+.now-chip[data-tone="warn"] .now-latency { color: var(--warn); }
+.now-chip[data-tone="danger"] .now-latency { color: var(--danger); }
+.now-said { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); }
+
+/* A row anywhere on the page that the playhead is currently inside. */
+[data-turn-id].is-live { box-shadow: inset 2px 0 0 var(--accent); }
+
+/* Transport ------------------------------------------------------------- */
+/* One row, always. The bar is pinned above the fold, so it compacts — labels
+   first, then the volume slider — rather than wrapping onto a second line. */
+.player-bar { display: flex; align-items: center; gap: 10px; flex-wrap: nowrap; container-type: inline-size; }
+.transport { display: flex; align-items: center; gap: 5px; flex: none; }
 .play-btn {
   display: grid; place-items: center;
-  width: 34px; height: 34px; flex: none;
+  width: 38px; height: 38px; flex: none;
   border-radius: 99px; border: 0;
   background: var(--accent); color: #04101f; cursor: pointer;
+  box-shadow: 0 4px 14px rgb(76 154 255 / 28%);
+  transition: transform .12s ease, background .12s ease;
 }
 .play-btn:hover { background: #63a9ff; }
-.player-vol { display: flex; align-items: center; gap: 6px; color: var(--text-faint); }
-.player-vol input { width: 74px; accent-color: var(--accent); }
+.play-btn:active { transform: scale(.94); }
+.player-card[data-playing="true"] .play-btn { box-shadow: 0 0 0 4px rgb(76 154 255 / 14%); }
+
+.icon-btn {
+  display: grid; place-items: center;
+  width: 30px; height: 30px; flex: none;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--bg-inset); color: var(--text-dim);
+  cursor: pointer;
+  transition: color .12s ease, border-color .12s ease;
+}
+.icon-btn:hover { color: var(--text); border-color: var(--line-strong); }
+.icon-btn[disabled] { opacity: .4; cursor: not-allowed; }
+.icon-btn[data-off="true"] { color: var(--danger); }
+.nudge {
+  display: inline-flex; align-items: center; gap: 3px; height: 32px; padding: 0 8px;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--bg-inset); color: var(--text-dim); cursor: pointer;
+}
+.nudge:hover { border-color: var(--line-strong); background: var(--bg-raise); color: var(--text); }
+.nudge:active { transform: translateY(1px); }
+.nudge-n { font: 700 10.5px var(--mono); letter-spacing: -.02em; }
+
+/* Dead air ---------------------------------------------------------------- */
+/* Silence belongs to neither speaker, so it is drawn in the gutter between the
+   two lanes rather than over them — the rail reads as a third track without
+   competing with the waveform it is explaining. */
+.wave-gaps {
+  position: absolute; left: 0; right: 0;
+  top: calc(var(--wave-h) / 2 - 6px); height: 12px;
+  pointer-events: none;
+}
+.wave-gap {
+  position: absolute; top: 3px; height: 6px; min-width: 2px;
+  border-radius: 3px;
+  background: var(--warn);
+  opacity: .55;
+  pointer-events: auto; cursor: help;
+  container-type: inline-size;
+}
+.wave-gap[data-tone="danger"] {
+  background: var(--danger); opacity: .75; height: 8px; top: 2px;
+  /* The worst gaps are hatched as well as red, so the rail still reads without
+     colour vision — and the texture reinforces "this one hurt" for everyone. */
+  background-image: repeating-linear-gradient(115deg, rgb(0 0 0 / 30%) 0 2px, transparent 2px 5px);
+}
+.wave-gap:hover { opacity: 1; box-shadow: 0 0 0 2px rgb(255 255 255 / 18%); }
+.wave-gap-label {
+  position: absolute; bottom: calc(100% + 3px); left: 50%; transform: translateX(-50%);
+  /* set to `end`/`start` when centring would push the label off the strip */
+  padding: 0 4px; border-radius: 3px; white-space: nowrap;
+  background: rgb(9 14 24 / 88%); color: var(--warn);
+  font: 600 9px var(--mono); opacity: 0; transition: opacity .12s; pointer-events: none;
+}
+/* A label only earns its space when the band is wide enough to hold it. */
+@container (min-width: 78px) { .wave-gap-label { opacity: .9; } }
+/* The three longest silences in the call are named whatever the zoom. */
+.wave-gap[data-rank="worst"] .wave-gap-label { opacity: .9; }
+/* Rank is the relative encoding that survives a call where every gap is red:
+   the three longest silences stand proud of the rail and carry a ring, so the
+   eye lands on them before it reads a single number. */
+.wave-gap[data-rank="worst"] { height: 11px; top: 0; opacity: .92; box-shadow: 0 0 0 1px rgb(255 255 255 / 35%); }
+.wave-gap[data-tone="danger"] .wave-gap-label { color: var(--danger); }
+.wave-gap[data-edge="end"] .wave-gap-label { left: auto; right: 0; transform: none; }
+.wave-gap[data-edge="start"] .wave-gap-label { left: 0; transform: none; }
+.wave-gap:hover .wave-gap-label { opacity: 1; }
+
+.icon-btn.is-scoped { color: var(--warn); border-color: rgb(240 179 85 / 45%); }
+.icon-btn.is-done { color: var(--ok); border-color: rgb(79 214 165 / 55%); }
+
+.now-cause { font-size: 10.5px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.now-chip[data-tone="danger"] .now-cause { color: var(--danger); }
+.now-chip[data-tone="warn"] .now-cause { color: var(--warn); }
+a.icon-btn { text-decoration: none; }
+
+.player-time { display: flex; align-items: baseline; gap: 5px; flex: none; font-family: var(--mono); }
+.time-now { font-size: 14px; color: var(--text); font-variant-numeric: tabular-nums; }
+.time-sep, .time-total { font-size: 11.5px; color: var(--text-faint); }
+.player-spacer { flex: 1 1 auto; display: flex; align-items: center; gap: 8px; min-width: 0; overflow: hidden; }
+.player-tools { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; flex: none; }
+
+.chip-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 30px; padding: 0 10px; flex: none;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--bg-inset); color: var(--text-dim);
+  font: 600 11px var(--sans); cursor: pointer;
+}
+.chip-btn:hover { color: var(--text); border-color: var(--line-strong); }
+.chip-btn[data-on="true"] { color: #ffd9a2; border-color: rgb(240 179 85 / 55%); background: rgb(240 179 85 / 12%); }
+.selection-chip { font-family: var(--mono); font-size: 10.5px; color: #ffd9a2; border-color: rgb(240 179 85 / 45%); background: rgb(240 179 85 / 10%); }
+.chip-x { color: var(--text-faint); font-size: 13px; line-height: 1; }
+
+.vol { display: flex; align-items: center; gap: 6px; flex: none; }
+.vol-range { width: 62px; accent-color: var(--accent); }
+.player-select {
+  height: 30px; padding: 0 6px;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--bg-inset); color: var(--text-dim);
+  font: 600 11px var(--sans); cursor: pointer;
+}
+.player-select:hover { color: var(--text); border-color: var(--line-strong); }
+.zoom { display: flex; align-items: center; gap: 4px; flex: none; }
+.zoom-level {
+  min-width: 30px; height: 30px;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--bg-inset); color: var(--text-dim);
+  font: 600 11px var(--mono); cursor: pointer;
+}
+.zoom-level:hover { color: var(--text); border-color: var(--line-strong); }
 
 .track-note { font-size: 11px; color: var(--text-faint); }
+.track-note.is-warn { color: var(--warn); }
 .audio-error { font-size: 11.5px; color: var(--danger); }
+
+/* The bar sheds width in the order a reviewer misses it least: the zoom
+   steppers go first (the wheel over the waveform and +/-/0 do the same job, and
+   the level button stays to say where the zoom is), then the volume slider,
+   which becomes a popover over its own button, and finally the chip wording —
+   but only while the live turn chip is on screen, since that chip is the one
+   control in the bar that says something about *this* call. */
+@container (max-width: 880px) {
+  .zoom .icon-btn { display: none; }
+  .vol { position: relative; }
+  .vol-range {
+    position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%);
+    width: 96px; padding: 6px 8px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--bg-raise);
+    box-shadow: 0 8px 20px rgb(0 0 0 / 35%);
+    opacity: 0; pointer-events: none; transition: opacity .12s ease;
+  }
+  .vol:hover .vol-range, .vol:focus-within .vol-range { opacity: 1; pointer-events: auto; }
+  .now-said { display: none; }
+  .player-bar:has(.player-spacer > *:not([hidden])) .player-tools .chip-btn span { display: none; }
+  .player-bar:has(.player-spacer > *:not([hidden])) .player-tools .chip-btn { padding: 0 8px; }
+}
+@container (max-width: 660px) {
+  .player-tools .chip-btn span { display: none; }
+  .player-tools .chip-btn { padding: 0 8px; }
+  .now-cause { display: none; }
+  .player-time .time-total, .player-time .time-sep { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wave-skeleton { animation: none; }
+  .wave-coach { animation: none; }
+  .wave-canvas, .wave-marks, .wave-gaps, .wave-lanes, .lane-label { transition: none; }
+}
 
 /* --------------------------------------------------------------- banners */
 .banner { display: flex; align-items: flex-start; gap: 10px; padding: 11px 13px; border-radius: var(--radius); border: 1px solid; font-size: 12px; }
 .banner[data-tone="warn"] { background: #241c0e; border-color: #4b3a17; color: #f2d5a1; }
+.banner[data-tone="info"] { background: #101d2b; border-color: #1d3a55; color: #bcd8f5; }
 .banner[data-tone="danger"] { background: #260f13; border-color: #4d2027; color: #ffc7cb; }
 .banner b { display: block; margin-bottom: 2px; color: var(--text); }
 .banner .btn { margin-left: auto; flex: none; }
@@ -696,17 +1505,29 @@ details.system-prompt pre { margin: 0; padding: 0 11px 11px; font: 11.5px/1.6 va
 }
 
 @media (max-width: 860px) {
-  .shell { grid-template-columns: minmax(0, 1fr); }
+  /* A phone has no room for panes inside panes, and pull-to-refresh belongs to
+     the document. Below this width the shell goes back to being a page. */
+  body { height: auto; min-height: 100dvh; display: block; overflow: visible; }
+  .topbar { position: sticky; top: 0; }
+  .shell { display: block; }
+  .call { overflow: visible; padding: 0 13px 40px; }
   .rail { position: static; height: auto; max-height: 42vh; border-right: 0; border-bottom: 1px solid var(--line); }
+  /* Collapsing is still useful here — the list is 42vh of a phone screen — but
+     it folds to a header bar rather than a vertical strip. */
+  .shell[data-rail="collapsed"] .rail { padding: 14px 12px; align-items: stretch; gap: 10px; }
+  .shell[data-rail="collapsed"] .rail-head { flex-direction: row; justify-content: space-between; gap: 8px; }
+  .shell[data-rail="collapsed"] .rail-head h2 { writing-mode: horizontal-tb; gap: 8px; }
   /* Touch layouts have no keyboard, so the shortcut strip is only noise. */
   .rail-keys { display: none; }
   /* Seven ticks collide on a phone; every other one still reads the scale. */
   .timeline-tick:nth-child(even) { display: none; }
-  .call { padding: 14px 13px 40px; }
-  .turns-grid { grid-template-columns: 44px 1fr 1fr 84px; }
-  .turns-grid > :nth-child(3), .turns-grid > :nth-child(4) { display: none; }
   .ops-grid { grid-template-columns: 44px 1fr 84px 66px; }
   .ops-grid > :nth-child(3), .ops-grid > :nth-child(5) { display: none; }
   .timeline-row { grid-template-columns: 46px minmax(0, 1fr); }
   :root { --track-inset: 56px; }
+  .stt-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stt-metric { border-bottom: 1px solid var(--line-soft); }
+  .stt-metric:nth-child(even) { border-right: 0; }
+  .stt-turn { grid-template-columns: 42px minmax(150px, 1fr) 70px; gap: 8px; padding: 9px 11px; }
+  .stt-turn > :nth-child(4), .stt-turn > :nth-child(5) { display: none; }
 }

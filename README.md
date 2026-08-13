@@ -38,13 +38,55 @@ uvicorn app.main:app --reload --port 8000
 ```
 
 The console is served at `http://localhost:8000/` and the per-call STT
-evaluation workspace at `/stt-evaluation?session=<id>`.
+evaluation workspace at `/stt-evaluation?session=<id>`. Start at
+`/onboarding`, which mints an API key and walks an SDK integration end to end.
 
-There is **no authentication** and no tenant isolation: this is a development
-tool. Point an SDK at it with `endpoint: 'http://localhost:8000'` and any
-non-empty API key — the local service intentionally does not validate it.
+Ingest is **unauthenticated by default** and there is no tenant isolation: this
+is a development tool, and every agent already pointed at a local instance
+sends the documented placeholder key `local-dev`. Keys minted on the onboarding
+page are always *recorded* when presented — that is what verifies the setup —
+and setting `VAANI_REQUIRE_API_KEY=1` turns that record into a gate, rejecting
+`POST /v1/sessions` and `/complete` with `401` unless a live key is sent as
+`Authorization: Bearer <key>`. Object `PUT`s stay open under enforcement
+because both SDKs strip the header from them, modelling the upload URL as a
+pre-signed object-store URL rather than an authenticated endpoint.
+
+Under enforcement, minting and revoking keys need a live key too — otherwise
+the gate costs an attacker exactly one unauthenticated `POST /v1/api-keys`.
+The one exception is bootstrap: a request from the loopback interface may mint
+the **first** key when no active key exists, so switching enforcement on before
+minting a key cannot lock you out. A request carrying any forwarding header
+(`X-Forwarded-For`, `Forwarded`, `X-Real-IP`, `X-Forwarded-Host`) is never
+treated as local, because behind a reverse proxy every visitor arrives as
+`127.0.0.1`. If you terminate TLS on a proxy that neither strips nor annotates
+those headers, mint the first key on the host itself. Key *listing* stays open,
+like every other read endpoint on this console — it returns prefixes and usage,
+never a secret.
 
 ## What it does
+
+**Onboarding (`/onboarding`)** — the first surface a new developer sees: mint an
+API key, install the Python or Node.js SDK, instrument an agent, and confirm
+the result. Four steps, and three of them are decided entirely by rows that
+ingest wrote — an active key, a manifest carrying an SDK version, a session,
+and a session with at least one operation on it. Nothing is ticked because a
+button was clicked.
+
+The last two steps are deliberately not one step. The most common way a
+correct-looking integration fails is that the call uploads perfectly and
+captures nothing, because no configured `endpoints` rule matched the URLs the
+agent calls. Collapsed into a single "first call received ✓" the developer
+declares victory over an empty dashboard; kept apart, the page states that the
+call arrived, that no operation was recorded, and which config line explains
+both. Installing a package is the one step this service genuinely cannot
+observe until data flows, so it is the only one a developer may mark
+themselves — rendered as their own note rather than borrowing the tick
+everything else has to earn.
+
+| Module | Responsibility |
+| --- | --- |
+| `app/keys.py` | API keys: mint, list, revoke, verify, record use. Only a SHA-256 digest is stored, so the plaintext exists exactly once — in the creation response. |
+| `app/onboarding.py` | Derives each setup step from the row that proves it, with bounded, index-served queries so the setup page does not become the most expensive endpoint in the product. |
 
 **Console** — a calls rail, a trace view, an all-spans table, an audio player
 with server-rendered waveform peaks, and a transcript panel that follows
@@ -79,6 +121,9 @@ Three interpretation rules are enforced throughout:
 | Method | Path | Description |
 | --- | --- | --- |
 | `GET` | `/health` | Health check |
+| `GET` | `/v1/onboarding/status` | Per-step setup state, each derived from a row this instance holds |
+| `GET`/`POST` | `/v1/api-keys` | List keys (digests only) / mint one; the plaintext token is returned exactly once. `POST` needs a live key under enforcement |
+| `DELETE` | `/v1/api-keys/{key_id}` | Revoke a key. A tombstone, not a delete — "which key was live when" survives. Needs a live key under enforcement |
 | `POST` | `/v1/sessions` | Create a session from a manifest |
 | `PUT` | `/v1/uploads/{session_id}/{object_name}` | Upload `events.jsonl`, `call.audio`, `caller.audio` or `agent.audio` |
 | `POST` | `/v1/sessions/{session_id}/complete` | Mark a session complete with byte sizes and digests |
@@ -95,6 +140,7 @@ Three interpretation rules are enforced throughout:
 | Variable | Purpose |
 | --- | --- |
 | `VAANI_DATA_DIR` | Runtime data directory (default `./data`) |
+| `VAANI_REQUIRE_API_KEY` | `1` rejects ingest that does not present a live key. Off by default so existing local agents keep working |
 | `ELEVENLABS_API_KEY` | Challenger transcription; required to run an evaluation |
 | `OPENAI_API_KEY` | Semantic risk judge |
 | `STT_EVAL_JUDGE_MODEL` | Judge model (default `gpt-4o-mini`) |

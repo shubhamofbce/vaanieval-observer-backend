@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Get started · Vaani Observer</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230d1526'/%3E%3Cg fill='%2359d3ab'%3E%3Crect x='6' y='13' width='3' height='6' rx='1.5'/%3E%3Crect x='12' y='8' width='3' height='16' rx='1.5'/%3E%3Crect x='18' y='11' width='3' height='10' rx='1.5'/%3E%3Crect x='24' y='14' width='3' height='4' rx='1.5'/%3E%3C/g%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/assets/styles.css">
+  <link rel="stylesheet" href="/assets/onboarding.css">
+</head>
+<body class="onboarding-page">
+  <a class="skip-link" href="#main">Skip to setup steps</a>
+
+  <div class="workspace" data-workspace>
+    <aside class="sidebar" id="sidebar" aria-label="Vaani Observer">
+      <div class="sidebar-head">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32" width="20" height="20"><g fill="currentColor"><rect x="4" y="13" width="3" height="6" rx="1.5"/><rect x="10" y="7" width="3" height="18" rx="1.5"/><rect x="16" y="10" width="3" height="12" rx="1.5"/><rect x="22" y="13" width="3" height="6" rx="1.5"/></g></svg>
+        </span>
+        <b class="brand-name">Vaani Observer</b>
+        <button type="button" class="sidebar-toggle" id="sidebar-toggle" aria-expanded="true" aria-controls="sidebar" title="Collapse the sections rail  ·  n" aria-label="Collapse the sections rail">
+          <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path fill="currentColor" d="M10.03 3.47a.75.75 0 0 1 0 1.06L6.56 8l3.47 3.47a.75.75 0 1 1-1.06 1.06L4.97 8.53a.75.75 0 0 1 0-1.06l4-4a.75.75 0 0 1 1.06 0Z"/></svg>
+        </button>
+      </div>
+      <div data-nav-slot></div>
+      <div class="sidebar-foot">
+        <span class="conn-state" id="conn-state" role="status" aria-live="polite"></span>
+        <button type="button" class="btn ghost sidebar-refresh" id="refresh" title="Re-check setup  ·  r" aria-label="Re-check setup">
+          <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" class="icon-refresh"><path fill="currentColor" d="M8 2.75a5.25 5.25 0 1 0 5.09 6.56.75.75 0 0 1 1.45.38A6.75 6.75 0 1 1 8 1.25c1.7 0 3.24.63 4.42 1.66V1.9a.75.75 0 0 1 1.5 0v3a.75.75 0 0 1-.75.75h-3a.75.75 0 0 1 0-1.5h1.36A5.23 5.23 0 0 0 8 2.75Z"/></svg>
+          <span class="sidebar-refresh-label">Re-check</span>
+        </button>
+      </div>
+    </aside>
+
+    <main class="guide" id="main" tabindex="-1">
+      <header class="guide-head">
+        <div class="guide-title">
+          <h1>Get started</h1>
+          <p class="guide-sub">Four steps to get one of your agent's calls onto this dashboard. Each one is confirmed against data this instance actually received — nothing here is ticked because a page thinks it should be.</p>
+        </div>
+        <div class="guide-progress" id="progress" role="status" aria-live="polite"></div>
+      </header>
+
+      <div class="runtime-switch" id="runtime-switch" hidden>
+        <span class="runtime-label" id="runtime-label">Runtime</span>
+        <div class="seg" role="radiogroup" aria-labelledby="runtime-label">
+          <button type="button" class="seg-btn" data-runtime="python" role="radio" aria-checked="false">
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M7.9 1c-1.7 0-3 .5-3 2.1v1.6h3.1v.5H3.6C2 5.2 1 6.2 1 7.9s.9 2.7 2.5 2.7h1v-1.8c0-1.5 1.3-2.6 2.8-2.6h3c1.3 0 2.3-1 2.3-2.3V3.1C12.6 1.8 11.4 1 9.8 1H7.9Zm-1.7.9c.4 0 .7.3.7.7s-.3.7-.7.7-.7-.3-.7-.7.3-.7.7-.7Z"/><path fill="currentColor" d="M8.1 15c1.7 0 3-.5 3-2.1v-1.6H8v-.5h4.4c1.6 0 2.6-1 2.6-2.7s-.9-2.7-2.5-2.7h-1v1.8c0 1.5-1.3 2.6-2.8 2.6h-3c-1.3 0-2.3 1-2.3 2.3v1c0 1.2 1.2 2 2.8 2h1.9Zm1.7-.9c-.4 0-.7-.3-.7-.7s.3-.7.7-.7.7.3.7.7-.3.7-.7.7Z"/></svg>
+            Python
+          </button>
+          <button type="button" class="seg-btn" data-runtime="nodejs" role="radio" aria-checked="false">
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M8 .6a1 1 0 0 1 .5.13l5.4 3.12a1 1 0 0 1 .5.87v6.24a1 1 0 0 1-.5.87L8.5 14.95a1 1 0 0 1-1 0L2.1 11.83a1 1 0 0 1-.5-.87V4.72a1 1 0 0 1 .5-.87L7.5.73A1 1 0 0 1 8 .6Zm.02 3.55c-1.72 0-2.74.73-2.74 1.95 0 1.33 1.03 1.7 2.7 1.86 1.99.2 2.14.49 2.14.88 0 .68-.55.97-1.83.97-1.62 0-1.97-.4-2.09-1.2a.3.3 0 0 0-.3-.25h-.7a.3.3 0 0 0-.3.32c.17 1.4 .94 2.05 3.39 2.05 1.9 0 3-.75 3-2.06 0-1.3-.88-1.65-2.73-1.9-1.87-.24-2.05-.37-2.05-.81 0-.36.16-.85 1.53-.85 1.23 0 1.68.27 1.87 1.1a.3.3 0 0 0 .29.23h.7a.3.3 0 0 0 .3-.33c-.2-1.4-1.13-2-3.18-2Z"/></svg>
+            Node.js
+          </button>
+        </div>
+        <p class="runtime-hint" id="runtime-hint"></p>
+      </div>
+
+      <ol class="steps" id="steps"></ol>
+
+      <section class="guide-foot" id="guide-foot" hidden></section>
+    </main>
+  </div>
+
+  <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+  <script src="/assets/nav.js"></script>
+  <script src="/assets/onboarding.js"></script>
+</body>
+</html>

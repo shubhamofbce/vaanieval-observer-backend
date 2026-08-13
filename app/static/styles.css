@@ -32,7 +32,12 @@
   --radius-sm: 6px;
   --radius-lg: 14px;
 
-  --topbar-h: 56px;
+  /* The app used to wear a 56px brand strip above every page. It carried a
+     logo, a subtitle and a Refresh button — none of which are call data — on
+     every screen and at every scroll position. Brand and refresh now live in
+     the sections rail, and this stays only because the panes that size
+     themselves against the viewport still read it. */
+  --topbar-h: 0px;
   --gap: 16px;
   --track-inset: 62px;
 
@@ -105,30 +110,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 *::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 99px; border: 2px solid transparent; background-clip: content-box; }
 *::-webkit-scrollbar-thumb:hover { background: #405a86; background-clip: content-box; }
 
-/* ---------------------------------------------------------------- topbar */
-.topbar {
-  position: relative;
-  z-index: 30;
-  flex: none;
-  height: var(--topbar-h);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 0 18px;
-  background: color-mix(in srgb, var(--bg-raised) 92%, transparent);
-  backdrop-filter: blur(10px);
-  border-bottom: 1px solid var(--line);
-}
-
-.brand { display: flex; align-items: center; gap: 10px; }
-.brand-mark { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; background: var(--bg-inset); color: var(--ok); }
-.brand-text { display: flex; flex-direction: column; line-height: 1.25; }
-.brand-text b { font-size: 13.5px; font-weight: 650; letter-spacing: -.01em; }
-.brand-text small { font-size: 11px; color: var(--text-faint); }
-
-.topbar-actions { display: flex; align-items: center; gap: 10px; }
-.conn-state { font-size: 11.5px; color: var(--text-faint); }
+/* ----------------------------------------------------------------- brand */
+.brand-mark { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 7px; background: var(--bg-inset); color: var(--ok); flex: none; }
+.conn-state { font-size: 11px; color: var(--text-faint); }
 .conn-state[data-state="error"] { color: var(--danger); }
 
 /* --------------------------------------------------------------- controls */
@@ -218,23 +202,113 @@ a.btn:hover { color: var(--text); }
 button.status-pill { cursor: pointer; font: inherit; }
 button.status-pill:hover { filter: brightness(1.25); }
 
-.provider-row { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin: -4px 0 2px; }
-.provider-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--text-faint); }
 .chip-action { cursor: pointer; font: inherit; }
 .chip-action:hover { border-color: var(--accent); color: var(--text); }
-.provider-models { font-size: 11.5px; color: var(--text-dim); }
 
-.kpi-legend { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11.5px; color: var(--text-dim); margin: -4px 0 2px; }
 .tone-key { display: inline-flex; align-items: center; gap: 5px; font-variant-numeric: tabular-nums; }
 .tone-key::before { content: ""; width: 8px; height: 8px; border-radius: 2px; background: currentColor; }
 .tone-key[data-tone="ok"] { color: var(--ok); }
 .tone-key[data-tone="warn"] { color: var(--warn); }
 .tone-key[data-tone="danger"] { color: var(--danger); }
 
+/* --------------------------------------------------- workspace + sidebar */
+/* Shared by every surface. The workspace is the row that holds the section
+   rail and whatever pane the page owns; the console's .shell and the
+   dashboard's .board are both just the second cell of that row. */
+.workspace { display: flex; flex: 1; min-height: 0; }
+
+/* The sections rail carries the brand, the three surfaces and the refresh
+   control — everything that used to be a full-width strip above the page.
+   Collapsed by default at 48px: three destinations do not earn 190px on every
+   screen, and this is a console people live inside, not a site they browse. */
+.sidebar {
+  flex: none;
+  width: 190px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 10px 8px;
+  border-right: 1px solid var(--line);
+  background: var(--bg-raised);
+  transition: width .14s ease;
+}
+.sidebar-head { display: flex; align-items: center; gap: 8px; padding: 2px 2px 6px; }
+.brand-name { font-size: 13px; font-weight: 650; letter-spacing: -.01em; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-toggle {
+  flex: none;
+  display: grid; place-items: center;
+  width: 22px; height: 22px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--bg-inset); color: var(--text-faint); cursor: pointer;
+}
+.sidebar-toggle:hover { color: var(--text); border-color: var(--line-strong); }
+.sidebar-foot { margin-top: auto; display: flex; flex-direction: column; align-items: stretch; gap: 6px; padding-top: 8px; border-top: 1px solid var(--line-soft); }
+.sidebar-refresh { justify-content: center; }
+
+.sidebar[data-collapsed="true"] { width: 48px; padding: 10px 4px 8px; }
+.sidebar[data-collapsed="true"] .brand-name,
+.sidebar[data-collapsed="true"] .conn-state,
+.sidebar[data-collapsed="true"] .sidebar-refresh-label,
+.sidebar[data-collapsed="true"] .sidenav-label,
+.sidebar[data-collapsed="true"] .sidenav-soon { display: none; }
+.sidebar[data-collapsed="true"] .sidebar-head { flex-direction: column; gap: 8px; padding: 0 0 6px; }
+.sidebar[data-collapsed="true"] .sidenav-item { justify-content: center; padding: 8px 0; }
+.sidebar[data-collapsed="true"] .sidebar-toggle svg { transform: rotate(180deg); }
+.sidebar[data-collapsed="true"] .sidebar-refresh { padding: 0; width: 100%; height: 28px; }
+
+/* ----------------------------------------------------------------- sidenav */
+.sidenav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sidenav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+  text-align: left;
+  cursor: pointer;
+  transition: background .12s ease, color .12s ease;
+}
+.sidenav-item:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
+.sidenav-item.is-active {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--text);
+  font-weight: 600;
+}
+.sidenav-item:disabled { color: var(--text-faint); opacity: .65; cursor: default; }
+.sidenav-label { flex: 1; }
+.sidenav-soon {
+  font-size: 9px;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: var(--bg-inset);
+  color: var(--text-faint);
+}
+
+@media (max-width: 900px) {
+  .sidebar { width: 48px; padding: 10px 4px 8px; }
+  .brand-name, .conn-state, .sidebar-refresh-label, .sidenav-label, .sidenav-soon { display: none; }
+  .sidebar-head { flex-direction: column; gap: 8px; padding: 0 0 6px; }
+  .sidenav-item { justify-content: center; padding: 8px 0; }
+  .sidebar-toggle { display: none; }
+}
+
 /* ----------------------------------------------------------------- shell */
 .shell {
   display: grid;
-  grid-template-columns: 292px minmax(0, 1fr);
+  grid-template-columns: 214px minmax(0, 1fr);
   align-items: stretch;
   flex: 1;
   min-height: 0;
@@ -247,13 +321,13 @@ button.status-pill:hover { filter: brightness(1.25); }
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 14px 12px;
+  padding: 12px 10px;
   border-right: 1px solid var(--line);
   background: var(--bg-raised);
 }
 .rail-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .rail-head h2 { display: flex; align-items: center; gap: 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .09em; color: var(--text-faint); }
-/* The rail is 292px of permanent furniture on every screen. A reviewer reading
+/* The rail is 214px of permanent furniture on every screen. A reviewer reading
    a waveform or a payload wants those pixels back without losing their place,
    so it folds to a strip that still names itself and still counts the calls. */
 .rail-toggle {
@@ -271,7 +345,11 @@ button.status-pill:hover { filter: brightness(1.25); }
 .shell[data-rail="collapsed"] .rail { padding: 14px 8px; align-items: center; gap: 12px; }
 .shell[data-rail="collapsed"] .rail-panel { display: none; }
 .shell[data-rail="collapsed"] .rail-head { flex-direction: column-reverse; justify-content: flex-start; gap: 12px; }
-.shell[data-rail="collapsed"] .rail-head h2 { writing-mode: vertical-rl; gap: 10px; }
+.shell[data-rail="collapsed"] .rail-head h2 { font-size: 0; gap: 0; }
+/* Folded, the strip keeps the count and drops the word: a list turned on
+   its side to spell "CALLS" vertically is decoration in the space the fold was
+   meant to reclaim. */
+.shell[data-rail="collapsed"] .rail-head h2 .chip { font-size: 10px; }
 .shell[data-rail="collapsed"] .rail-toggle svg { transform: rotate(180deg); }
 
 .rail-search { position: relative; display: flex; align-items: center; }
@@ -293,12 +371,12 @@ button.status-pill:hover { filter: brightness(1.25); }
    is sized for density and the full id lives on the title attribute. */
 .session {
   display: grid;
-  grid-template-columns: 7px minmax(0, 1fr) 22px 24px 50px 30px;
+  grid-template-columns: 7px 54px minmax(0, 1fr) 20px 46px;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   width: 100%;
   text-align: left;
-  padding: 5px 8px;
+  padding: 4px 7px;
   border: 0;
   border-left: 2px solid transparent;
   border-radius: var(--radius-sm);
@@ -306,13 +384,17 @@ button.status-pill:hover { filter: brightness(1.25); }
   cursor: pointer;
   line-height: 1.3;
 }
+/* With one agent the name column carries no signal, so the row closes over it
+   rather than leaving a column of blanks. */
+.session[data-agents="one"] { grid-template-columns: 7px 54px 20px minmax(46px, 1fr); }
 .session:hover { background: var(--bg-panel); }
 .session[aria-current="true"] { background: var(--bg-inset); border-left-color: var(--accent); }
 .session-dot { width: 7px; height: 7px; border-radius: 99px; flex: none; background: var(--text-faint); }
 .session-dot[data-status="ready"] { background: var(--ok); }
 .session-dot[data-status="partial"] { background: var(--warn); }
 .session-dot[data-status="uploading"] { background: var(--accent); }
-.session-agent { font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-time { font-size: 11.5px; font-weight: 550; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.session-agent { font-size: 11.5px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* A failed operation is the reason a reviewer opens a call at all, so the count
    is on the row rather than three clicks inside it. The cell is reserved on
    every row, failures or not, so the columns stay in one line down the rail. */
@@ -325,19 +407,33 @@ button.status-pill:hover { filter: brightness(1.25); }
   padding: 1px 0;
 }
 .session-errs:empty { background: none; }
-.session-turns, .session-dur, .session-when {
+.session-dur {
   font-size: 10.5px;
   color: var(--text-faint);
   font-variant-numeric: tabular-nums;
   text-align: right;
   white-space: nowrap;
 }
-.session[aria-current="true"] .session-turns,
-.session[aria-current="true"] .session-dur,
-.session[aria-current="true"] .session-when { color: var(--text-dim); }
+.session[aria-current="true"] .session-dur { color: var(--text-dim); }
+
+.session-day {
+  position: sticky; top: 0; z-index: 1;
+  padding: 7px 8px 3px;
+  font-size: 9.5px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--text-faint);
+  background: var(--bg-raised);
+}
+.session-day:first-child { padding-top: 2px; }
 
 .rail-note { font-size: 11.5px; color: var(--text-faint); padding: 4px 2px; }
-.rail-keys { font-size: 10.5px; color: var(--text-faint); border-top: 1px solid var(--line-soft); padding-top: 9px; line-height: 1.9; }
+/* Naming the deployment's usual agent once, here, is what buys the rail its
+   agent column back — the rows that print a name are the exceptions. */
+.rail-agent {
+  flex: none;
+  font-size: 10.5px; color: var(--text-faint);
+  padding: 4px 2px 0; border-top: 1px solid var(--line-soft);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 kbd { font-family: var(--mono); font-size: 9.5px; padding: 1px 4px; border-radius: 3px; background: var(--bg-inset); border: 1px solid var(--line); margin-right: 2px; }
 
 /* ------------------------------------------------------------------ call */
@@ -347,21 +443,58 @@ kbd { font-family: var(--mono); font-size: 9.5px; padding: 1px 4px; border-radiu
    first card rather than padding on the scrollport. Padding would have left an
    18px band above the pinned deck with content sliding through it. */
 .call {
-  padding: 0 20px 24px;
+  padding: 0 16px 24px;
   display: flex;
   flex-direction: column;
-  gap: var(--gap);
+  gap: 12px;
   overflow-y: auto;
   overscroll-behavior: contain;
   min-height: 0;
+  /* The deck folds and unfolds as this pane is scrolled, which is a ~550px
+     change in the content above the viewport — exactly what scroll anchoring
+     exists to absorb. Here it is the wrong instinct: the browser drags the
+     scroller back toward the top, which is the very position that unfolds the
+     deck again, and the two fight each other on every wheel notch. The fold is
+     nearly seamless without it, because the deck was covering that content
+     anyway. */
+  overflow-anchor: none;
 }
-.call > :first-child { margin-top: 18px; }
+/* Its own width is what decides whether the inspector can have a column, not
+   the window's: the sidebar and the call list both fold, so the same 1470px
+   screen gives this pane anywhere from 1000px to 1370px. */
+.call { container-type: inline-size; container-name: call; }
+/* The scrollport is a flex column, so its children would otherwise shrink to
+   fit the viewport rather than scroll — which silently clipped the metric band
+   inside a 30px header. */
+.call > * { flex: none; }
+.call > :first-child { margin-top: 10px; }
 .call:focus { outline: none; }
 
-.call-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
-.call-head h1 { font-size: 20px; letter-spacing: -.015em; }
-.call-sub { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 6px; font-size: 12px; color: var(--text-dim); }
+/* One band, always. Identity on the left, the call's numbers on the right, the
+   id chip at the far edge — so the header is not just wayfinding, it carries
+   the verdict too, and the waveform starts within 40px of the top. */
+.call-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; min-height: 30px; }
+.call-id { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 0 1 auto; }
+.call-head h1 { font-size: 14.5px; font-weight: 650; letter-spacing: -.015em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.call-sub { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-dim); white-space: nowrap; }
 .call-sub .dot-sep::before { content: "·"; color: var(--text-faint); }
+.call-sub .status-pill { padding: 0 5px; font-size: 9.5px; }
+.call-head .metric-strip { margin-left: auto; flex-wrap: nowrap; max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+.call-head .metric-strip::-webkit-scrollbar { display: none; }
+.call-head .card-tools { align-items: center; }
+/* As the pane narrows the band sheds its cheapest cells rather than wrapping
+   into a second and third row: the header's whole purpose is to not push the
+   waveform down. Everything dropped here is still one click away in the trace
+   filters, and the tooltip on each surviving cell keeps its own detail. */
+@container call (max-width: 1000px) {
+  .call-head .metric[data-metric="providers"] { display: none; }
+}
+@container call (max-width: 880px) {
+  .call-head .metric[data-metric="tools"], .call-head .metric[data-metric="length"] { display: none; }
+}
+@container call (max-width: 720px) {
+  .call-head .metric[data-metric="slowest"] { display: none; }
+}
 
 .copy-id {
   display: inline-flex;
@@ -378,46 +511,87 @@ kbd { font-family: var(--mono); font-size: 9.5px; padding: 1px 4px; border-radiu
 }
 .copy-id:hover { color: var(--text); border-color: var(--line-strong); }
 
-/* ------------------------------------------------------------------ kpis */
-.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 10px; }
-.kpi {
-  display: grid;
+/* --------------------------------------------------------- metric strip */
+/* One scannable row instead of a card grid. Each cell is a label above a
+   number; the sentence that used to sit under every number is now the
+   tooltip, because "user stops → first audio" is worth reading once. */
+.metric-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
   gap: 2px;
-  align-content: start;
-  padding: 11px 13px;
+  padding: 1px;
   background: var(--bg-panel);
   border: 1px solid var(--line-soft);
   border-radius: var(--radius);
+}
+.metric {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  justify-content: center;
+  padding: 2px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
   text-align: left;
-  position: relative;
+  color: inherit;
 }
-button.kpi { cursor: pointer; transition: border-color .12s ease, background .12s ease; }
-/* An actionable card must advertise itself before the pointer arrives. */
-button.kpi::after {
-  content: "›";
-  position: absolute;
-  top: 9px;
-  right: 11px;
-  font-size: 15px;
-  line-height: 1;
-  color: var(--text-faint);
-}
-button.kpi:hover::after, button.kpi:focus-visible::after { color: var(--text); }
-button.kpi:hover { border-color: var(--line-strong); background: var(--bg-inset); }
-.kpi-label { display: flex; align-items: center; gap: 5px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--text-faint); }
-.kpi-value { font-size: 19px; font-weight: 620; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
-.kpi-value small { font-size: 11px; font-weight: 500; color: var(--text-dim); margin-left: 2px; }
-.kpi-foot { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
-.kpi[data-tone="ok"] .kpi-value { color: var(--ok); }
-.kpi[data-tone="danger"] .kpi-value { color: var(--danger); }
-.kpi[data-tone="warn"] .kpi-value { color: var(--warn); }
+.metric + .metric { box-shadow: -1px 0 0 var(--line-soft); }
+button.metric { cursor: pointer; transition: background .12s ease; }
+button.metric:hover, button.metric:focus-visible { background: var(--bg-hover); }
+/* An actionable cell has to advertise itself before the pointer arrives. */
+button.metric .metric-value::after { content: "›"; margin-left: 4px; font-size: 12px; color: var(--text-faint); }
+button.metric:hover .metric-value::after { color: var(--text); }
+.metric-label { font-size: 9px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-faint); line-height: 1.15; }
+.metric-value { font-size: 13px; font-weight: 620; letter-spacing: -.015em; font-variant-numeric: tabular-nums; line-height: 1.2; }
+.metric[data-tone="ok"] .metric-value { color: var(--ok); }
+.metric[data-tone="danger"] .metric-value { color: var(--danger); }
+.metric[data-tone="warn"] .metric-value { color: var(--warn); }
+.metric-providers { min-width: 0; }
+.metric-chips { display: flex; flex-wrap: nowrap; gap: 4px; }
+.metric-chips .chip { font-size: 10.5px; padding: 1px 6px; }
 
 /* ---------------------------------------------------------------- layout */
 /* No trailing slack below the columns: when the left column is shorter than the
    pinned inspector the row has no sticky travel, so any extra scrollable space
    only serves to slide the inspector's header up behind the deck. */
 .columns { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: var(--gap); align-items: start; }
+/* Nothing selected means nothing to inspect: the column stands down and gives
+   its 400px to the trace, which is where selections are made. */
+.columns[data-inspector="idle"] { grid-template-columns: minmax(0, 1fr); }
+.columns[data-inspector="idle"] .col-side { display: none; }
 .col { display: flex; flex-direction: column; gap: var(--gap); min-width: 0; }
+
+/* Below this the inspector stops being a column and docks over the trace.
+   Taking 400px out of a 1000px pane left the step names in the trace — the
+   table the selection was made in — truncated to "Tur…", which is a poor trade
+   for a detail panel the reviewer can close with esc. `container-type` makes
+   this pane the containing block for the dock, so it covers the call and
+   nothing else. */
+/* Narrower than 1180px the whole page stacks and the inspector goes back to
+   being a block under the trace, so the dock is scoped above that. */
+@media (min-width: 1181px) {
+  @container call (max-width: 1240px) {
+    .columns[data-inspector="open"] { grid-template-columns: minmax(0, 1fr); }
+    .columns[data-inspector="open"] .col-side {
+      position: fixed;
+      top: calc(var(--deck-h, 0px) + 18px);
+      right: 0;
+      bottom: 8px;
+      width: min(400px, 62cqw);
+      height: auto; max-height: none;
+      z-index: 25;
+    }
+    .columns[data-inspector="open"] .inspector {
+      height: 100%;
+      box-shadow: 0 18px 48px rgb(0 0 0 / 55%);
+      border-color: var(--line-strong);
+    }
+  }
+}
+/* Esc closes the inspector, but a docked panel has to say so on screen. */
+.inspector-close { margin-left: 4px; }
 /* Pinned under the review deck rather than under the topbar: the deck is the
    scrollport's own sticky header, so an inspector that pinned to zero would
    spend its top third hidden behind it. `--deck-h` is measured whenever the
@@ -439,46 +613,116 @@ button.kpi:hover { border-color: var(--line-strong); background: var(--bg-inset)
   min-height: 0;
   overflow: hidden;
 }
-/* Player and transcript, as one review surface.
+/* ------------------------------------------------------------ review deck */
+/* Player, transcript and live trace, as one pinned review surface.
 
-   Stacked and with only the player sticky, the player pinned itself over the
-   transcript on the first scroll: at a 690px viewport the transcript was either
-   below the fold or 90% occluded, so the words could never be read while the
-   audio stayed in reach. Side by side above 1240px they share one sticky row
-   and neither can cover the other. Below that width there is no room to split,
-   so the deck stacks and stops sticking — scrolling past the player to read is
-   better than a player that eats a short viewport. */
-.review-deck { margin-bottom: var(--gap); }
-.review-deck > .card { margin-bottom: 0; }
+   The deck is the scrollport's own sticky header, so every pixel it keeps open
+   is a pixel the trace table below is read through. Fully open it is the review
+   surface: the waveform, the words under the words' audio, and the spans that
+   were running at the playhead beside it. Folded — which the script does the
+   moment the reviewer scrolls down to read anything else — it is a single
+   transport bar that still plays, still seeks and still names the turn and the
+   span under the playhead.
+
+   Below 1240px there is no room to split, so the deck stacks and stops
+   sticking: scrolling past the player is better than a player that eats a
+   short viewport. */
+.review-deck { margin-bottom: var(--gap); display: grid; gap: var(--gap); }
+.review-deck > .card, .deck-main > .card { margin-bottom: 0; }
+.deck-main { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+
 @media (min-width: 1240px) {
   .review-deck {
     position: sticky;
     top: 0;
     z-index: 5;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(300px, 380px);
-    gap: var(--gap);
+    grid-template-columns: minmax(0, 1fr) minmax(310px, 390px);
+    /* A pinned header is only affordable while it is bounded. Left to its own
+       content the deck reached 85% of a 711px viewport and everything below it
+       — the trace, the KPIs, the inspector — was read through the remaining
+       slot. The player keeps its natural height and the transcript takes
+       whatever is left, so the review surface fits the screen it is on instead
+       of the call it is showing. */
+    max-height: clamp(300px, 56vh, 600px);
     /* The deck is pinned and mostly opaque, but the page still scrolled through
        the gutter between the two cards. */
     background: var(--bg);
     /* The two cards are the only things that should carry a shadow; the gutter
        must not clip the shadow the cards cast downward. */
     box-shadow: 0 0 0 6px var(--bg);
-    /* The player sets the height of the row. The transcript is taken out of
-       flow inside its slot so that however much was said — 5,800px on a
-       22-turn call — cannot stretch the deck and swallow the page below it. */
     align-items: stretch;
   }
-  .review-deck > .card { box-shadow: 0 10px 28px rgb(0 0 0 / 20%); }
-  .transcript-slot { position: relative; min-height: 0; }
-  .review-deck .transcript-card {
-    position: absolute; inset: 0;
-    margin: 0;
-    display: flex; flex-direction: column; min-height: 0;
-    box-shadow: 0 10px 28px rgb(0 0 0 / 20%);
-  }
-  .review-deck .transcript-body { max-height: none; flex: 1; min-height: 0; }
+  .deck-main { min-height: 0; }
+  .deck-main > .call-player { flex: none; }
+  .deck-main > .transcript-card { flex: 1 1 auto; min-height: 0; }
+  .deck-main .transcript-body { max-height: none; flex: 1 1 auto; min-height: 0; }
+  .deck-main > .transcript-card[data-open="false"] { flex: none; }
+  .deck-main > .card, .deck-side > .card { box-shadow: 0 10px 28px rgb(0 0 0 / 20%); }
+  /* The left column sets the height of the row. The live panel is taken out of
+     flow inside its slot so that a 20-span turn cannot stretch the deck and
+     swallow the page below it. */
+  .deck-side { position: relative; min-height: 0; }
+  .deck-side > .card { position: absolute; inset: 0; margin: 0; }
+  .review-deck[data-compact="true"] { max-height: none; }
 }
+
+/* Folded ----------------------------------------------------------------- */
+/* A call with no recording has no transport bar to fold to, so its transcript
+   header becomes the folded deck — and must survive the fold, or the control
+   that unfolds it goes with it. */
+.review-deck[data-compact="true"][data-transport="player"] .transcript-card,
+.review-deck[data-compact="true"] .call-player .wave-shell,
+.review-deck[data-compact="true"] .call-player .wave-mini,
+.review-deck[data-compact="true"] .call-player .track-note,
+.review-deck[data-compact="true"] .call-player .audio-error,
+.review-deck[data-compact="true"] .live-body { display: none; }
+.review-deck[data-compact="true"][data-transport="transcript"] .transcript-body,
+.review-deck[data-compact="true"][data-transport="transcript"] .transcript-toggle { display: none; }
+/* With no recording the player card is an empty state and a static timeline —
+   nothing worth pinning, and far too tall to fold to. */
+.review-deck[data-compact="true"][data-transport="transcript"] .call-player { display: none; }
+.review-deck[data-compact="true"] .call-player .card-body { padding: 8px 11px; }
+.review-deck[data-compact="true"] .mini-rail { display: block; }
+/* Zoom, loop and the lane switch all act on a waveform that is not on screen. */
+.review-deck[data-compact="true"] .player-tools .zoom,
+.review-deck[data-compact="true"] .player-tools .chip-btn { display: none; }
+.review-deck[data-compact="true"] .player-spacer { flex: 0 1 auto; }
+.review-deck[data-compact="true"] .live-now { flex: 1 1 auto; border-radius: var(--radius-lg); border-bottom: 0; }
+.deck-toggle { margin-left: 2px; }
+
+/* The waveform is the scrubber while the deck is open; folded, this is. */
+.mini-rail {
+  display: none;
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 60px;
+  height: 18px;
+  cursor: pointer;
+  touch-action: none;
+}
+.mini-rail::before {
+  content: "";
+  position: absolute; left: 0; right: 0; top: 50%;
+  height: 5px; margin-top: -2.5px;
+  border-radius: 99px;
+  background: var(--bg-inset);
+  box-shadow: inset 0 0 0 1px var(--line-soft);
+}
+.mini-rail-fill {
+  position: absolute; left: 0; top: 50%;
+  height: 5px; margin-top: -2.5px;
+  border-radius: 99px;
+  background: var(--accent);
+  pointer-events: none;
+}
+.mini-rail-fill::after {
+  content: "";
+  position: absolute; right: -5px; top: 50%; transform: translateY(-50%);
+  width: 11px; height: 11px; border-radius: 99px;
+  background: #fff; box-shadow: 0 1px 5px rgb(0 0 0 / 55%);
+}
+.mini-rail:hover .mini-rail-fill, .mini-rail.is-scrubbing .mini-rail-fill { background: #63a9ff; }
+.mini-rail.is-scrubbing { cursor: grabbing; }
 .call-player { box-shadow: 0 10px 28px rgb(0 0 0 / 20%); }
 .card-head {
   display: flex;
@@ -578,13 +822,33 @@ button.kpi:hover { border-color: var(--line-strong); background: var(--bg-inset)
 .turn-guide { position: absolute; top: 0; bottom: 16px; background: rgb(76 154 255 / 12%); border-left: 1px solid rgb(76 154 255 / 45%); border-right: 1px solid rgb(76 154 255 / 45%); border-radius: 2px; }
 
 /* ------------------------------------------------------------ transcript */
-/* The transcript sits under the player rather than in a tab of its own, so the
-   panel scrolls inside itself: following the playhead must never drag the page
-   away from whatever else the reviewer has open. */
-.transcript-card { margin-bottom: var(--gap); min-width: 0; }
+/* The transcript sits directly under the player, on the same clock and the same
+   half of the deck, so a line and the audio that produced it are read together.
+   The panel scrolls inside itself: following the playhead must never drag the
+   page away from whatever else the reviewer has open. And because it is inside
+   a pinned deck it has to be able to get out of the way — collapsed it keeps
+   its header and gives the rest of its height back to the page. */
+.transcript-card { margin-bottom: 12px; min-width: 0; flex: none; }
+.transcript-card > .card-head { padding: 4px 8px 4px 6px; min-height: 0; }
+.transcript-card[data-open="false"] > .card-head { border-bottom: 0; }
+.transcript-card[data-open="false"] .transcript-body,
+.transcript-card[data-open="false"] .follow-toggle { display: none; }
+/* Title, count and collapse in one target rather than three items in a bar. */
+.icon-btn.strip-toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  width: auto; height: 24px; padding: 0 7px;
+}
+.strip-toggle b { font-size: 11.5px; font-weight: 600; }
+.strip-count { font-size: 10.5px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
 /* No `scroll-behavior: smooth` here: `scrollTo({ behavior: 'auto' })` defers to
    the CSS, so declaring it would defeat the reduced-motion path in the script. */
 .transcript-body { max-height: 42vh; overflow: auto; overscroll-behavior: contain; }
+/* Denser inside the deck: this is a panel to follow along in, not a document to
+   read, and every row of padding is a row of the page below it. */
+.deck-main .transcript-body { max-height: 30vh; padding: 8px 10px; }
+.deck-main .msg { grid-template-columns: 54px minmax(0, 1fr); gap: 10px; padding: 5px 8px; }
+.deck-main .msg-body { font-size: 12.5px; line-height: 1.45; }
+.deck-main .msg-tags { margin-top: 4px; }
 .follow-toggle[aria-pressed="true"] { background: var(--accent-soft); color: #dbe9ff; box-shadow: inset 0 0 0 1px rgb(76 154 255 / 45%); }
 .follow-toggle[aria-pressed="false"] { opacity: .72; }
 /* The turn now playing. Distinct from `.is-selected`, which is what the
@@ -626,6 +890,9 @@ button.kpi:hover { border-color: var(--line-strong); background: var(--bg-inset)
 .msg-payload > .msg-tool { border: 0; border-top: 1px solid var(--line-soft); border-radius: 0; background: transparent; }
 .msg-tool { font-family: var(--mono); font-size: 11.5px; color: var(--text-dim); background: var(--bg-inset); border: 1px solid var(--line-soft); border-radius: var(--radius-sm); padding: 7px 9px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 140px; overflow: auto; }
 
+/* Closed, it takes no room at all: the transcript header's `prompt` chip is
+   the affordance, so a permanent disclosure row here would be a second one. */
+details.system-prompt:not([open]) { display: none; }
 details.system-prompt { border: 1px solid var(--line-soft); border-radius: var(--radius); background: var(--bg-inset); margin-bottom: 10px; }
 details.system-prompt > summary { cursor: pointer; padding: 8px 11px; font-size: 11.5px; color: var(--text-dim); list-style: none; display: flex; align-items: center; gap: 7px; }
 details.system-prompt > summary::-webkit-details-marker { display: none; }
@@ -667,7 +934,10 @@ details.system-prompt pre { margin: 0; padding: 0 11px 11px; font: 11.5px/1.6 va
 
 /* -------------------------------------------------------------- workbench */
 .workbench { display: flex; flex-direction: column; min-width: 0; }
-.view-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: -1px; }
+/* Tabs and the current view's controls share one bar. */
+.view-bar { display: flex; align-items: flex-end; gap: 10px; border-bottom: 1px solid var(--line); margin-bottom: -1px; flex-wrap: wrap; }
+.view-tabs { display: flex; gap: 2px; }
+.view-tools { flex: 1 1 auto; justify-content: flex-end; padding-bottom: 5px; }
 .view-tabs button {
   border: 1px solid transparent;
   border-bottom: 0;
@@ -701,7 +971,7 @@ details.system-prompt pre { margin: 0; padding: 0 11px 11px; font: 11.5px/1.6 va
   align-items: center;
   gap: 10px;
   width: 100%;
-  padding: 5px 15px;
+  padding: 4px 15px;
   padding-left: calc(15px + var(--depth) * 18px);
   text-align: left;
   border: 0;
@@ -725,29 +995,30 @@ details.system-prompt pre { margin: 0; padding: 0 11px 11px; font: 11.5px/1.6 va
 .trace-title b { font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 46%; flex: none; }
 .trace-headline { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .trace-start { font-size: 11px; color: var(--text-faint); text-align: right; }
-.trace-dur { display: grid; gap: 3px; font-size: 11.5px; }
-.trace-dur .num { font-variant-numeric: tabular-nums; }
+/* Duration and its bar sit on one line: stacked, they made every timed row two
+   lines tall, which on a 60-span trace is a screen and a half of leading. */
+.trace-dur { display: flex; align-items: center; gap: 6px; font-size: 11.5px; }
+.trace-dur .num { font-variant-numeric: tabular-nums; flex: none; }
+.trace-dur .bar-track { flex: 1 1 auto; min-width: 0; }
 .trace-row .state-dot { font-size: 11px; }
 
-/* The number a reviewer is actually judging the agent by, called out under the
-   turn it belongs to instead of hiding in a column of similar-looking times. */
-.trace-response {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 3px 15px 5px;
-  padding-left: calc(15px + 106px);
+/* The number a reviewer is actually judging the agent by. It used to get a
+   full-width band under every turn — a second row, with a heading, for one
+   duration. As a chip on the turn itself it costs nothing and reads in the
+   same glance as the utterance it answers. */
+.reply-chip {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 999px;
   font-size: 10.5px;
-  letter-spacing: .04em;
-  text-transform: uppercase;
-  color: var(--text-faint);
-  border-bottom: 1px solid var(--line-soft);
-  background: rgb(255 255 255 / 2%);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  background: var(--bg-inset);
+  color: var(--text-dim);
 }
-.trace-response b { font-size: 12px; letter-spacing: 0; text-transform: none; }
-.trace-response[data-tone="ok"] b { color: var(--ok); }
-.trace-response[data-tone="warn"] b { color: var(--warn); }
-.trace-response[data-tone="danger"] b { color: var(--danger); }
+.reply-chip[data-tone="ok"] { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.reply-chip[data-tone="warn"] { color: var(--warn); background: color-mix(in srgb, var(--warn) 15%, transparent); }
+.reply-chip[data-tone="danger"] { color: var(--danger); background: color-mix(in srgb, var(--danger) 15%, transparent); }
 
 .trace-detail {
   padding: 10px 15px 12px;
@@ -855,6 +1126,104 @@ details.system-prompt pre { margin: 0; padding: 0 11px 11px; font: 11.5px/1.6 va
 .type-tag[data-type="tts"]  { background: rgb(79 214 165 / 16%); color: var(--tts); }
 .type-tag[data-type="tool"] { background: rgb(240 179 85 / 16%); color: var(--tool); }
 .type-tag[data-type="conn"] { background: rgb(109 137 176 / 18%); color: #a6bcd8; }
+.type-tag[data-type="turn"] { background: rgb(76 154 255 / 16%); color: var(--accent); }
+.type-tag[data-type="gap"]  { background: rgb(255 255 255 / 7%); color: var(--text-faint); }
+
+/* ------------------------------------------------------------ live trace */
+/* The trace read at the playhead: one turn, its spans on that turn's own
+   clock, and a line running across them where the audio currently is. The
+   table below answers "what happened in this call"; this answers "what is
+   happening right now", which is the question a reviewer actually has while
+   three seconds of silence go by. */
+.live-card { min-height: 0; }
+
+/* This card's whole header, and the one line that survives into the folded
+   deck. It is a button: the turn it names is the turn you want to inspect. */
+.live-now {
+  display: flex; align-items: center; gap: 9px;
+  width: 100%; text-align: left;
+  padding: 7px 12px; min-height: 34px; flex: none;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  background: var(--bg-inset);
+  color: inherit;
+  cursor: pointer;
+}
+.live-now:hover, .live-now:focus-visible { background: var(--bg-hover); }
+.live-now:disabled { cursor: default; }
+.live-now:disabled:hover { background: transparent; }
+.live-now .type-tag { flex: none; }
+.live-now-turn { flex: none; font: 700 11px var(--mono); color: var(--accent); }
+.live-now-label { flex: 1 1 auto; min-width: 0; font-size: 12px; font-weight: 550; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-now-time { flex: none; font-family: var(--mono); font-size: 10.5px; color: var(--text-faint); white-space: nowrap; }
+/* Only claim to be live when something is actually driving it. */
+.live-card[data-live="true"] .live-now-label { color: #dbe9ff; }
+.live-card[data-live="true"] .live-now::before {
+  content: ""; flex: none; width: 6px; height: 6px; border-radius: 99px;
+  background: var(--accent); box-shadow: 0 0 0 3px rgb(76 154 255 / 18%);
+}
+
+.live-body { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; }
+.live-said {
+  flex: none;
+  font-size: 11.5px; line-height: 1.5; color: var(--text-dim);
+  border-left: 2px solid var(--stt); padding-left: 8px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.live-scale { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex: none; font-size: 10px; color: var(--text-faint); }
+.live-scale .num { font-family: var(--mono); }
+.live-scale-mid { font-size: 10.5px; letter-spacing: .01em; }
+.live-scale-mid[data-tone="ok"] { color: var(--ok); }
+.live-scale-mid[data-tone="warn"] { color: var(--warn); }
+.live-scale-mid[data-tone="danger"] { color: var(--danger); }
+
+.live-stack { position: relative; flex: 1 1 auto; min-height: 0; }
+.live-rows { display: flex; flex-direction: column; gap: 2px; height: 100%; overflow: auto; overscroll-behavior: contain; }
+.live-row {
+  display: grid; gap: 4px;
+  width: 100%; padding: 5px 8px;
+  border: 0; border-radius: var(--radius-sm);
+  background: transparent; color: inherit; text-align: left; cursor: pointer;
+}
+.live-row:hover { background: var(--bg-inset); }
+.live-row.is-selected { background: rgb(76 154 255 / 12%); box-shadow: inset 2px 0 0 var(--accent); }
+/* The span the playhead is inside. Distinct from `.is-selected`, which is what
+   the reviewer chose — the two are usually different rows. */
+.live-row.is-live { background: rgb(76 154 255 / 9%); }
+.live-row.is-live .live-label { color: var(--text); font-weight: 600; }
+.live-row-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.live-label { flex: 1 1 auto; min-width: 0; font-size: 11.5px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-dur { flex: none; font-family: var(--mono); font-size: 10.5px; color: var(--text-faint); }
+.live-row[data-status="error"] .live-dur { color: var(--danger); }
+.live-row[data-status="cancelled"] .live-dur { color: var(--warn); }
+.live-track { position: relative; display: block; height: 5px; border-radius: 99px; background: rgb(255 255 255 / 4%); }
+.live-bar { position: absolute; top: 0; bottom: 0; min-width: 2px; border-radius: 99px; opacity: .8; }
+/* The at-rest overview has no span types to colour by, so its bars carry the
+   latency verdict instead — the only reading that matters before playback. */
+.live-bar[data-tone="ok"] { background: var(--ok); }
+.live-bar[data-tone="warn"] { background: var(--warn); }
+.live-bar[data-tone="danger"] { background: var(--danger); }
+.live-dur[data-tone="ok"] { color: var(--ok); }
+.live-dur[data-tone="warn"] { color: var(--warn); }
+.live-dur[data-tone="danger"] { color: var(--danger); }
+.live-row.is-live .live-bar { opacity: 1; box-shadow: 0 0 8px rgb(255 255 255 / 22%); }
+.live-row[data-status="error"] .live-bar { background-image: repeating-linear-gradient(45deg, rgb(0 0 0 / 45%) 0 3px, transparent 3px 6px); }
+
+/* One line for the whole chart: every track shares the row's 8px inset, so a
+   single absolute rule reads correctly against all of them. */
+.live-playhead {
+  position: absolute; top: 0; bottom: 0;
+  left: calc(8px + var(--live-x, 0) * (100% - 16px));
+  width: 2px; margin-left: -1px;
+  background: #fff; box-shadow: 0 0 8px rgb(255 255 255 / 45%);
+  pointer-events: none;
+}
+.live-card[data-empty="true"] .live-said,
+.live-card[data-empty="true"] .live-scale,
+.live-card[data-empty="true"] .live-stack { display: none; }
+.live-card:not([data-empty="true"]) .live-empty { display: none; }
+.live-empty { margin: auto 0; }
 
 .bar-cell { display: grid; gap: 3px; }
 .bar-track { height: 4px; border-radius: 99px; background: var(--bg-inset); overflow: hidden; }
@@ -960,7 +1329,7 @@ details.system-prompt pre { margin: 0; padding: 0 11px 11px; font: 11.5px/1.6 va
 
 /* ----------------------------------------------------------------- audio */
 .player { display: grid; gap: 10px; }
-.call-player { --wave-h: 112px; --ruler-h: 20px; --marks-h: 17px; --lanes-h: 0px; }
+.call-player { --wave-h: 96px; --ruler-h: 20px; --marks-h: 17px; --lanes-h: 0px; }
 .call-player .card-head { background: linear-gradient(90deg, rgb(76 154 255 / 10%), transparent 58%); }
 .call-player .card-body { padding: 12px 14px 13px; }
 
@@ -1273,6 +1642,13 @@ details.system-prompt pre { margin: 0; padding: 0 11px 11px; font: 11.5px/1.6 va
 }
 .now-chip:hover { border-color: var(--line-strong); color: var(--text); }
 .now-turn { font-weight: 700; color: var(--text); white-space: nowrap; }
+/* The bar is narrower than it used to be — the deck gives its right-hand third
+   to the trace panel — so the chip is squeezed sooner. Its parts have to give
+   way in order of importance instead of overlapping each other: the turn and
+   the latency are the reading, the cause and the quote are the colour. */
+.now-chip > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.now-turn, .now-latency { flex: none; }
+.now-cause { flex: 0 1 auto; white-space: nowrap; }
 .now-latency { font-family: var(--mono); font-size: 10.5px; padding: 1px 5px; border-radius: 4px; background: rgb(255 255 255 / 6%); }
 .now-chip[data-tone="ok"] .now-latency { color: var(--ok); }
 .now-chip[data-tone="warn"] .now-latency { color: var(--warn); }
@@ -1417,7 +1793,7 @@ a.icon-btn { text-decoration: none; }
    which becomes a popover over its own button, and finally the chip wording —
    but only while the live turn chip is on screen, since that chip is the one
    control in the bar that says something about *this* call. */
-@container (max-width: 880px) {
+@container (max-width: 1000px) {
   .zoom .icon-btn { display: none; }
   .vol { position: relative; }
   .vol-range {
@@ -1432,7 +1808,7 @@ a.icon-btn { text-decoration: none; }
   .player-bar:has(.player-spacer > *:not([hidden])) .player-tools .chip-btn span { display: none; }
   .player-bar:has(.player-spacer > *:not([hidden])) .player-tools .chip-btn { padding: 0 8px; }
 }
-@container (max-width: 660px) {
+@container (max-width: 760px) {
   .player-tools .chip-btn span { display: none; }
   .player-tools .chip-btn { padding: 0 8px; }
   .now-cause { display: none; }
@@ -1508,17 +1884,43 @@ a.icon-btn { text-decoration: none; }
   /* A phone has no room for panes inside panes, and pull-to-refresh belongs to
      the document. Below this width the shell goes back to being a page. */
   body { height: auto; min-height: 100dvh; display: block; overflow: visible; }
-  .topbar { position: sticky; top: 0; }
-  .shell { display: block; }
-  .call { overflow: visible; padding: 0 13px 40px; }
-  .rail { position: static; height: auto; max-height: 42vh; border-right: 0; border-bottom: 1px solid var(--line); }
+  /* The sections rail becomes a sticky icon strip across the top — a 48px
+     column on a 380px screen is 14% of the width for three destinations. */
+  .workspace { display: block; }
+  /* The collapsed-width rule is more specific than a bare `.sidebar`, so the
+     horizontal form has to answer it in kind or the strip stays 48px wide with
+     its three destinations crushed into it. */
+  .sidebar, .sidebar[data-collapsed="true"] {
+    position: sticky; top: 0; z-index: 40;
+    width: auto; flex-direction: row; align-items: center; gap: 10px;
+    padding: 6px 12px;
+    border-right: 0; border-bottom: 1px solid var(--line);
+    background: color-mix(in srgb, var(--bg-raised) 94%, transparent);
+    backdrop-filter: blur(10px);
+  }
+  .sidebar .sidebar-head, .sidebar[data-collapsed="true"] .sidebar-head { flex-direction: row; padding: 0; }
+  .sidebar .sidenav-item, .sidebar[data-collapsed="true"] .sidenav-item { padding: 7px 9px; }
+  .sidenav { flex-direction: row; gap: 4px; }
+  .sidebar-foot, .sidebar[data-collapsed="true"] .sidebar-foot { flex-direction: row; align-items: center; margin-top: 0; margin-left: auto; padding-top: 0; border-top: 0; }
+  .sidebar[data-collapsed="true"] .sidebar-refresh { width: auto; padding: 0 10px; }
+  /* The call comes first. Above this width the list is a column beside the
+     call and costs nothing; stacked, it was 375px of other people's calls
+     between the top of the screen and the waveform the reviewer opened. It
+     keeps its own sticky head, so it is still labelled once scrolled to. */
+  .shell { display: flex; flex-direction: column; }
+  .call { order: 1; overflow: visible; padding: 0 13px 24px; }
+  .rail {
+    order: 2;
+    position: static; height: auto; max-height: 60vh;
+    border-right: 0; border-top: 1px solid var(--line); border-bottom: 0;
+  }
+  .rail-head { position: sticky; top: 46px; z-index: 5; background: var(--bg-raised); }
   /* Collapsing is still useful here — the list is 42vh of a phone screen — but
      it folds to a header bar rather than a vertical strip. */
   .shell[data-rail="collapsed"] .rail { padding: 14px 12px; align-items: stretch; gap: 10px; }
   .shell[data-rail="collapsed"] .rail-head { flex-direction: row; justify-content: space-between; gap: 8px; }
   .shell[data-rail="collapsed"] .rail-head h2 { writing-mode: horizontal-tb; gap: 8px; }
   /* Touch layouts have no keyboard, so the shortcut strip is only noise. */
-  .rail-keys { display: none; }
   /* Seven ticks collide on a phone; every other one still reads the scale. */
   .timeline-tick:nth-child(even) { display: none; }
   .ops-grid { grid-template-columns: 44px 1fr 84px 66px; }

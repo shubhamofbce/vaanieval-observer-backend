@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
+import socket
 import sqlite3
 import struct
 import sys
 import threading
+import time
 import uuid
 from array import array
 from collections.abc import Iterator
@@ -21,7 +24,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from app import payload, pricing
+from app import aggregate, keys, metrics, onboarding, payload, pricing
 from app.latency import speech_window
 
 ROOT = Path(os.environ.get("VAANI_DATA_DIR", Path(__file__).resolve().parents[1] / "data"))
@@ -50,6 +53,66 @@ SEMANTIC_RISK_MODEL = os.environ.get("STT_EVAL_JUDGE_MODEL", "gpt-4o-mini")
 # SQLite, so the UI has a stable status to poll while a replay is running.
 CHALLENGER_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="challenger-evaluation")
 CHALLENGER_JOB_LOCK = threading.Lock()
+# Signals the aggregate maintenance thread to stop. Never set in the server; it
+# exists so a test or an embedding process can shut the loop down cleanly.
+MAINTENANCE_STOP = threading.Event()
+# How many pre-existing calls one backfill pass derives metrics for. Bounded so
+# startup stays fast; the rest is picked up by later passes.
+BACKFILL_STARTUP_LIMIT = 500
+# How long a statement waits for the single writer before giving up. SQLite is
+# single-writer, so a slow ingest must make a concurrent request wait, not fail.
+SQLITE_TIMEOUT_S = 30.0
+# Aggregate maintenance (backfill + rollup rebuilds) runs on this interval on a
+# background thread. It is deliberately NOT on the request path: rebuilding a
+# dirty bucket takes the write lock, and a GET that takes the write lock turns
+# every dashboard view into a writer that can block ingest for minutes.
+MAINTENANCE_INTERVAL_S = 20.0
+# Dirty buckets rebuilt per maintenance pass. Bounded so one pass cannot hold
+# the write lock for minutes after a metrics-version bump invalidates every
+# bucket; the remainder is picked up by the next pass and the dashboard reports
+# how much evidence is still pending.
+MAINTENANCE_ROLLUP_LIMIT = 120
+MAINTENANCE_BACKFILL_LIMIT = 100
+# Wall-clock ceiling on the rollup portion of one pass. The bucket count alone
+# is the wrong bound: a bucket in a busy hour costs far more to rebuild than one
+# in a quiet hour, and what ingest actually feels is elapsed write time.
+MAINTENANCE_ROLLUP_BUDGET_S = 5.0
+# Facet pruning scans every turn row (measured at 655 ms per pass at 100k calls,
+# almost always deleting nothing), so it runs on its own slow cadence instead of
+# on every pass. A retired filter value lingers in a dropdown for at most this
+# long, which is cosmetic; adding 655 ms of write-lock to every 20 s pass is not.
+FACET_PRUNE_INTERVAL_S = 900.0
+# Only one process should run maintenance. Every uvicorn worker executes the
+# startup hook, so N workers would otherwise run N maintenance threads and N
+# backfills against one SQLite file, multiplying the write contention they exist
+# to avoid. The owner renews a lease; another process takes over only if the
+# lease goes stale, so a crashed owner is replaced rather than leaving the tier
+# permanently unmaintained.
+# Host and pid alone are not unique: two containers both run as pid 1, and both
+# would satisfy "owner == me" and renew the same lease forever. The per-process
+# nonce makes the identity unique wherever the process runs.
+MAINTENANCE_IDENTITY = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+MAINTENANCE_LEASE_KEY = "maintenance_owner"
+MAINTENANCE_LEASE_TTL_S = MAINTENANCE_INTERVAL_S * 4
+# The shortest span that can physically be a spoken reply: STT finalisation,
+# a model round trip and the first TTS audio chunk. Below this, `first_audio`
+# and `speech_end` are the same instant recorded twice rather than a fast agent,
+# so the turn is reported as not measurable instead of as the fastest turn in
+# the fleet. Applied in `group_turns` so the call page and the aggregate agree.
+MIN_PLAUSIBLE_RESPONSE_MS = 250
+# Default dashboard window when the caller does not supply one.
+DEFAULT_RANGE_MS = 7 * 24 * 60 * 60 * 1000
+MAX_RANGE_MS = 180 * 24 * 60 * 60 * 1000
+# Ingest is unauthenticated by default, which is what every existing agent
+# pointed at a local instance depends on: both SDKs require *some* api_key to
+# upload, and the documented value is the literal string `local-dev`. Turning
+# enforcement on by default would break those integrations silently at the one
+# moment — mid-onboarding — when the developer is least able to tell a
+# credential problem from a wiring problem. Keys are therefore always minted and
+# always *recorded* when presented, and `VAANI_REQUIRE_API_KEY=1` is what turns
+# that record into a gate. Read per request, not at import, so a test or an
+# operator can flip it without a restart.
+REQUIRE_API_KEY_ENV = "VAANI_REQUIRE_API_KEY"
 
 
 def now() -> str:
@@ -109,6 +172,8 @@ def initialize() -> None:
         db.execute(
             "CREATE INDEX IF NOT EXISTS operations_turns ON operations(session_id, turn_id, started_at_ms)"
         )
+        aggregate.ensure_schema(db)
+        keys.ensure_schema(db)
         # A local worker cannot survive a process restart. Make that explicit
         # instead of showing a permanently spinning challenger in the console.
         db.execute(
@@ -120,8 +185,14 @@ def initialize() -> None:
 
 @contextmanager
 def connect():
-    db = sqlite3.connect(DATABASE)
+    db = sqlite3.connect(DATABASE, timeout=SQLITE_TIMEOUT_S)
     db.row_factory = sqlite3.Row
+    # WAL lets the dashboard read while a call is being ingested. Under the
+    # default rollback journal a single upload blocks every reader, which is
+    # exactly the moment someone is watching the dashboard. `busy_timeout` makes
+    # a contended writer wait rather than fail the request outright.
+    db.execute("PRAGMA journal_mode = WAL")
+    db.execute(f"PRAGMA busy_timeout = {round(SQLITE_TIMEOUT_S * 1000)}")
     try:
         yield db
         db.commit()
@@ -155,6 +226,13 @@ class ChallengerEvaluationRequest(BaseModel):
     model: str
 
 
+class ApiKeyCreate(BaseModel):
+    # The name is a label, not an identifier: two keys may share one, and the
+    # UI distinguishes them by prefix. Bounded so a paste accident cannot put a
+    # megabyte of text into a row that is rendered on every page load.
+    name: str = Field(default="", max_length=keys.MAX_NAME_LENGTH)
+
+
 app = FastAPI(title="Vaani Observer", version="0.1.0")
 app.mount("/assets", StaticFiles(directory=STATIC), name="assets")
 
@@ -172,11 +250,100 @@ async def no_store_assets(request: Request, call_next):
 @app.on_event("startup")
 def startup() -> None:
     initialize()
+    backfill_metrics(limit=BACKFILL_STARTUP_LIMIT)
+    # A metrics-version bump can retire facet values (canonicalising providers
+    # merged three Deepgram spellings into one). Pruning at startup means the
+    # first dashboard load after an upgrade does not offer filters that match
+    # nothing.
+    with connect() as db:
+        aggregate.prune_facets(db)
+    start_maintenance()
+
+
+_LAST_FACET_PRUNE = 0.0
+
+
+def maintenance_pass(force_prune: bool = False) -> dict[str, int]:
+    """One bounded pass of aggregate upkeep. Safe to call from anywhere.
+
+    Each piece takes the write lock only for as long as it needs it:
+    `refresh_rollups` commits per bucket under a wall-clock budget, and facet
+    pruning - a full scan of every turn row - runs on its own connection and its
+    own slow cadence rather than inside the rollup pass.
+    """
+    global _LAST_FACET_PRUNE
+    built = backfill_metrics(limit=MAINTENANCE_BACKFILL_LIMIT)
+    with connect() as db:
+        rebuilt = aggregate.refresh_rollups(db, limit=MAINTENANCE_ROLLUP_LIMIT,
+                                            budget_s=MAINTENANCE_ROLLUP_BUDGET_S)
+    pruned = 0
+    if force_prune or time.monotonic() - _LAST_FACET_PRUNE >= FACET_PRUNE_INTERVAL_S:
+        with connect() as db:
+            pruned = aggregate.prune_facets(db)
+        _LAST_FACET_PRUNE = time.monotonic()
+    with connect() as db:
+        aggregate.set_meta(db, "maintenance_heartbeat_ms", str(int(time.time() * 1000)))
+    return {"calls_built": built, "buckets_rebuilt": rebuilt, "facets_pruned": pruned}
+
+
+def claim_maintenance(db: sqlite3.Connection) -> bool:
+    """Take or renew the single-owner maintenance lease.
+
+    Returns whether this process owns maintenance. An owner that stops renewing
+    (crashed, killed, or stuck) loses the lease after `MAINTENANCE_LEASE_TTL_S`
+    and another process picks it up, so the rollup tier cannot be orphaned.
+    """
+    # The claim itself is atomic; see `aggregate.claim_lease`.
+    return aggregate.claim_lease(db, MAINTENANCE_LEASE_KEY, MAINTENANCE_IDENTITY,
+                                 MAINTENANCE_LEASE_TTL_S * 1000, int(time.time() * 1000))
+
+
+def start_maintenance() -> None:
+    """Runs aggregate upkeep on a timer instead of on a reader's request.
+
+    The first pass is deferred by a full interval: a short-lived process (a test
+    run, a CLI import) should never race the work it did synchronously.
+    """
+    if os.environ.get("VAANI_DISABLE_MAINTENANCE") == "1":
+        return
+
+    def loop() -> None:
+        while not MAINTENANCE_STOP.wait(MAINTENANCE_INTERVAL_S):
+            try:
+                with connect() as db:
+                    owns = claim_maintenance(db)
+                if owns:
+                    maintenance_pass()
+            except Exception:  # noqa: BLE001 - upkeep must never kill the server
+                pass
+
+    thread = threading.Thread(target=loop, name="aggregate-maintenance", daemon=True)
+    thread.start()
+
+
+def backfill_metrics(limit: int | None = None) -> int:
+    """Derive aggregate facts for calls ingested before this feature existed.
+
+    Bounded per pass so a large archive does not hold the first request open;
+    whatever is still pending is reported in the dashboard's coverage block, so
+    an under-counted total is visible rather than mistaken for a quiet week.
+    """
+    with connect() as db:
+        return aggregate.backfill(
+            db, lambda session_id: session_metric_inputs(session_id, db), limit=limit
+        )
 
 
 @app.get("/")
 def console() -> FileResponse:
     return FileResponse(STATIC / "index.html")
+
+
+@app.get("/dashboard")
+def dashboard_page() -> FileResponse:
+    """Fleet-wide view. The call console stays on `/` so existing `#/call/...`
+    links, bookmarks and the SDK's printed URLs keep working unchanged."""
+    return FileResponse(STATIC / "dashboard.html")
 
 
 @app.get("/stt-evaluation")
@@ -195,8 +362,187 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def require_api_key() -> bool:
+    """Whether ingest must present a key this instance knows."""
+    return os.environ.get(REQUIRE_API_KEY_ENV) == "1"
+
+
+def authenticate(request: Request) -> str | None:
+    """Record — and, when enforced, check — the key on an ingest request.
+
+    Called at the top of every write endpoint an SDK touches. It has two jobs
+    and they are deliberately independent:
+
+    * It always stamps `last_used_at` on a recognised key. That single write is
+      what lets the onboarding page distinguish "a key was created in a browser"
+      from "an agent authenticated", which is the only version of that step
+      worth showing a developer.
+    * It rejects the request *only* when `VAANI_REQUIRE_API_KEY=1`. Off by
+      default, because the documented local setup uses the literal key
+      `local-dev` and quietly 401-ing those agents would break every existing
+      integration.
+
+    Object `PUT`s are exempt by design: both SDKs strip the Authorization header
+    from them, because the upload URL is meant to be a pre-signed object-store
+    URL and re-sending the API key would hand it to that third party. The URL is
+    the capability; the session it names was created under an authenticated
+    request.
+
+    A failure to *record* usage must never fail ingest — the call is intact and
+    the timestamp is cosmetic — but a failure to *enforce* must, or the gate is
+    not a gate.
+    """
+    token = keys.bearer(request.headers.get("authorization"))
+    enforced = require_api_key()
+    try:
+        with connect() as db:
+            key_id = keys.record_use(db, token, now())
+    except Exception:  # noqa: BLE001 - usage telemetry is never worth a failed upload
+        if not enforced:
+            return None
+        raise
+    if enforced and key_id is None:
+        # The two failures are told apart because they have different fixes, and
+        # neither reveals anything an unauthenticated caller does not already
+        # know: that this instance requires a key.
+        raise HTTPException(
+            401,
+            "Missing API key. Send `Authorization: Bearer <key>`; create one on the dashboard's Onboarding page."
+            if token is None
+            else "Unknown or revoked API key. Create a new one on the dashboard's Onboarding page.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return key_id
+
+
+@app.get("/onboarding")
+def onboarding_page() -> FileResponse:
+    """The first screen a new developer should see: install, instrument, verify.
+
+    It is a separate surface from the dashboard rather than an empty-state
+    banner on it, because onboarding is not finished the moment the first call
+    lands — the step that catches a wrongly configured `endpoints` list is the
+    one *after* that — and a banner that vanishes on first data takes the
+    diagnosis with it.
+    """
+    return FileResponse(STATIC / "onboarding.html")
+
+
+@app.get("/v1/onboarding/status")
+def onboarding_status(request: Request) -> dict[str, Any]:
+    """Everything this instance can prove about a developer's setup.
+
+    The ingest endpoint is echoed back from the request rather than configured,
+    so the snippet the page renders is copy-pasteable as-is from wherever the
+    dashboard is actually being reached — `localhost:8000`, a LAN address or a
+    tunnel — instead of being right only on the machine that started it.
+    """
+    with connect() as db:
+        state = onboarding.status(db, require_api_key=require_api_key())
+    state["endpoint"] = str(request.base_url).rstrip("/")
+    state["generated_at"] = now()
+    return state
+
+
+@app.get("/v1/api-keys")
+def list_api_keys() -> dict[str, Any]:
+    """Key metadata — names, prefixes, usage. Never a secret, and deliberately
+    as open as every other read endpoint on this console, which has never had
+    authentication. Gating this one list while `/v1/sessions` and the whole
+    dashboard stay open would be theatre that locks an operator out of their own
+    key table without protecting anything."""
+    with connect() as db:
+        return {"keys": keys.listing(db)}
+
+
+def authorize_key_admin(request: Request) -> None:
+    """Guard the two endpoints that mint and retire credentials.
+
+    Unguarded, these defeat the very gate they exist to serve: an actor who can
+    reach ingest can `POST /v1/api-keys`, receive a live token and walk straight
+    through `VAANI_REQUIRE_API_KEY=1`. The gate has to be worth more than one
+    unauthenticated request.
+
+    So with enforcement on, minting or revoking requires an existing live key —
+    with exactly one exception, because otherwise an operator who switches
+    enforcement on before creating a key can never create one: a request from
+    the loopback interface may mint the *first* key when no active key exists.
+
+    Trusting a source address is normally the wrong instinct, and it is wrong
+    here too if a reverse proxy sits in front of this service: every remote
+    visitor would arrive as 127.0.0.1. Two things keep it narrow. A request
+    carrying any forwarding header is not treated as local, which covers every
+    proxy that annotates what it forwards; and the exception applies only while
+    zero active keys exist, so it closes permanently the moment it is used.
+    An operator terminating TLS on a proxy that strips *and* does not annotate
+    should mint the first key on the host itself.
+    """
+    if not require_api_key():
+        return
+    token = keys.bearer(request.headers.get("authorization"))
+    with connect() as db:
+        if keys.verify(db, token) is not None:
+            return
+        active = db.execute("SELECT COUNT(*) AS live FROM api_keys WHERE revoked_at IS NULL").fetchone()["live"]
+    if not active and is_loopback(request):
+        return
+    raise HTTPException(
+        401,
+        "This instance requires an API key to manage keys. Send `Authorization: Bearer <live key>`,"
+        " or create the first key from the host itself.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+# Headers a proxy adds to say "this request is not mine". Any of them means the
+# peer address belongs to the proxy, not the client, so it proves nothing.
+FORWARDING_HEADERS = ("x-forwarded-for", "x-forwarded-host", "x-real-ip", "forwarded")
+
+
+def is_loopback(request: Request) -> bool:
+    if any(request.headers.get(name) for name in FORWARDING_HEADERS):
+        return False
+    host = request.client.host if request.client else None
+    if not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        # A dual-stack listener reports an IPv4 client as `::ffff:127.0.0.1`.
+        # Matching literal strings would refuse the bootstrap to an operator
+        # standing on the host — locking them out of ever minting a first key.
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+@app.post("/v1/api-keys", status_code=201)
+def create_api_key(body: ApiKeyCreate, request: Request) -> dict[str, Any]:
+    """Mint a key. The `token` field in this response is the only time it exists
+    outside the caller's clipboard — the server keeps a SHA-256 digest and
+    cannot reproduce it."""
+    authorize_key_admin(request)
+    with connect() as db:
+        try:
+            record, token = keys.mint(db, body.name, now())
+        except keys.KeyLimitExceeded as error:
+            raise HTTPException(409, str(error)) from error
+    return {**record, "token": token}
+
+
+@app.delete("/v1/api-keys/{key_id}")
+def revoke_api_key(key_id: str, request: Request) -> dict[str, Any]:
+    authorize_key_admin(request)
+    with connect() as db:
+        record = keys.revoke(db, key_id, now())
+    if record is None:
+        raise HTTPException(404, "Unknown API key")
+    return record
+
+
 @app.post("/v1/sessions", status_code=201)
 def create_session(manifest: SessionCreate, request: Request) -> dict[str, Any]:
+    authenticate(request)
     session_id = manifest.session_id
     # The idempotency key is deliberately advisory in this no-auth local MVP.
     if request.headers.get("idempotency-key") not in (None, session_id):
@@ -242,7 +588,8 @@ async def upload_object(session_id: str, object_name: str, request: Request) -> 
 
 
 @app.post("/v1/sessions/{session_id}/complete", status_code=202)
-def complete_session(session_id: str, completion: CompleteSession) -> dict[str, Any]:
+def complete_session(session_id: str, completion: CompleteSession, request: Request) -> dict[str, Any]:
+    authenticate(request)
     row = require_session(session_id)
     manifest = json.loads(row["manifest_json"])
     for name, info in completion.objects.items():
@@ -274,7 +621,48 @@ def complete_session(session_id: str, completion: CompleteSession) -> dict[str, 
             ],
         )
         db.execute("UPDATE sessions SET status = ?, updated_at = ?, completed_at = ? WHERE id = ?", (status, now(), now(), session_id))
+        # Aggregate facts are extracted once, here, so the dashboard never has to
+        # JSON-decode a call's spans to answer a fleet-wide question. A failure
+        # to derive them must not fail the upload: the call itself is intact and
+        # the row is rebuilt by the next backfill pass.
+        try:
+            rebuild_session_metrics(db, session_id)
+        except Exception:  # noqa: BLE001
+            pass
     return {"session_id": session_id, "status": status, "operation_count": len(operations), "duration_ms": manifest.get("duration_ms", 0)}
+
+
+def session_metric_inputs(session_id: str, db: sqlite3.Connection) -> tuple[sqlite3.Row, list[dict[str, Any]], list[dict[str, Any]]]:
+    """The exact inputs the call detail view is built from.
+
+    The aggregate is derived from `group_turns` and the same presentation
+    windows the call page renders, rather than from a parallel reimplementation.
+    That is the only reason a dashboard percentile and the call it links to can
+    be relied on to describe the same event.
+    """
+    row = db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, "Unknown session")
+    operations = [
+        json.loads(item["operation_json"])
+        for item in db.execute(
+            "SELECT operation_json FROM operations WHERE session_id = ? ORDER BY started_at_ms", (session_id,)
+        )
+    ]
+    chunk_events = audio_chunk_events(session_id)
+    attach_presentation_windows(operations, chunk_events)
+    turn_ops = [op for op in operations if op.get("scope", "turn") != "connection"]
+    agent_audio_ms = sorted(
+        event["occurred_at_ms"]
+        for event in chunk_events
+        if event.get("track") == "agent" and isinstance(event.get("occurred_at_ms"), (int, float))
+    )
+    return row, group_turns(turn_ops, agent_audio_ms), operations
+
+
+def rebuild_session_metrics(db: sqlite3.Connection, session_id: str) -> None:
+    row, turns, operations = session_metric_inputs(session_id, db)
+    aggregate.rebuild_session(db, row, turns, operations)
 
 
 @app.get("/v1/sessions")
@@ -583,6 +971,135 @@ def attach_presentation_windows(operations: list[dict[str, Any]], events: list[d
             }
 
 
+@app.get("/v1/dashboard/summary")
+def dashboard_summary(
+    from_ms: int | None = None,
+    to_ms: int | None = None,
+    agent_id: str | None = None,
+    environment: str | None = None,
+    agent_version: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    sdk_language: str | None = None,
+    compare: bool = True,
+) -> dict[str, Any]:
+    """One server-side aggregate for the whole dashboard.
+
+    Deliberately a single request: six panels fetching their own slice would
+    each pick a slightly different moment for "now", and the KPI row would stop
+    matching the chart under it during an incident - exactly when a developer is
+    reading both.
+    """
+    end = to_ms if to_ms is not None else round(datetime.now(UTC).timestamp() * 1000)
+    start = from_ms if from_ms is not None else end - DEFAULT_RANGE_MS
+    if start >= end:
+        raise HTTPException(422, "from_ms must be earlier than to_ms")
+    if end - start > MAX_RANGE_MS:
+        raise HTTPException(422, "Requested range is larger than the supported window")
+    filters = aggregate.Filters(
+        start_ms=start, end_ms=end, agent_id=agent_id, environment=environment,
+        agent_version=agent_version, provider=provider, model=model, sdk_language=sdk_language,
+    )
+    # Read-only on purpose. Deriving metrics or rebuilding rollups here would
+    # make every dashboard view take SQLite's single write lock; that work runs
+    # on the maintenance thread instead, and what it has not caught up on yet is
+    # reported below rather than silently missing.
+    with connect() as db:
+        remaining = aggregate.stale_session_count(db)
+        stale_buckets = aggregate.dirty_bucket_count(db)
+        result = aggregate.summary(db, filters, compare=compare, pending_calls=remaining)
+    result["coverage"]["pending_rollup_buckets"] = stale_buckets
+    result["generated_at"] = now()
+    return result
+
+
+@app.get("/v1/dashboard/calls")
+def dashboard_calls(
+    selector: str = "all",
+    from_ms: int | None = None,
+    to_ms: int | None = None,
+    agent_id: str | None = None,
+    environment: str | None = None,
+    agent_version: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    sdk_language: str | None = None,
+    tool_name: str | None = None,
+    fingerprint: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """The calls behind one dashboard number.
+
+    Every KPI, chart bucket, stage failure rate and tool row links here with the
+    dashboard's own filters attached, so a developer never has to reconstruct
+    "which calls was that?" by hand.
+    """
+    end = to_ms if to_ms is not None else round(datetime.now(UTC).timestamp() * 1000)
+    start = from_ms if from_ms is not None else end - DEFAULT_RANGE_MS
+    filters = aggregate.Filters(
+        start_ms=start, end_ms=end, agent_id=agent_id, environment=environment,
+        agent_version=agent_version, provider=provider, model=model, sdk_language=sdk_language)
+    with connect() as db:
+        return aggregate.calls(db, filters, selector, tool_name=tool_name, fingerprint=fingerprint,
+                               limit=max(1, min(limit, 500)), offset=max(0, offset))
+
+
+@app.get("/v1/dashboard/audit")
+def dashboard_audit(limit: int = 25) -> dict[str, Any]:
+    """Recompute stored turn metrics from the raw operations and report drift.
+
+    The aggregate tables are a cache. This is what proves the cache still says
+    the same thing as the evidence: a definition change, a partial backfill or a
+    re-uploaded call would otherwise leave the dashboard confidently reporting
+    numbers no call can reproduce.
+    """
+    mismatches: list[dict[str, Any]] = []
+    compared = 0
+    with connect() as db:
+        session_ids = [row["id"] for row in db.execute(
+            "SELECT id FROM sessions ORDER BY created_at DESC LIMIT ?", (limit,))]
+        for session_id in session_ids:
+            stored = {
+                row["turn_id"]: row
+                for row in db.execute("SELECT * FROM turn_metrics WHERE session_id = ?", (session_id,))
+            }
+            try:
+                row, turns, _ = session_metric_inputs(session_id, db)
+            except HTTPException:
+                continue
+            started = metrics.epoch_ms(json.loads(row["manifest_json"]).get("started_at"))
+            for turn in turns:
+                compared += 1
+                fresh = metrics.turn_metrics(turn, started)
+                found = stored.get(fresh["turn_id"])
+                if found is None:
+                    mismatches.append({"session_id": session_id, "turn_id": fresh["turn_id"],
+                                       "field": "*", "stored": None, "recomputed": "present"})
+                    continue
+                for column in aggregate.TURN_COLUMNS:
+                    if column in ("session_id", "turn_id"):
+                        continue
+                    if found[column] != fresh.get(column):
+                        mismatches.append({
+                            "session_id": session_id, "turn_id": fresh["turn_id"], "field": column,
+                            "stored": found[column], "recomputed": fresh.get(column),
+                        })
+    return {
+        "sessions_checked": len(session_ids), "turns_compared": compared,
+        "mismatch_count": len(mismatches), "mismatches": mismatches[:100],
+        "consistent": not mismatches,
+    }
+
+
+@app.post("/v1/dashboard/rebuild", status_code=202)
+def dashboard_rebuild() -> dict[str, Any]:
+    """Force a full re-derivation. Used after a measurement definition changes."""
+    with connect() as db:
+        db.execute("UPDATE call_metrics SET metrics_version = -1")
+    return {"rebuilt": backfill_metrics(limit=None)}
+
+
 @app.get("/v1/pricing")
 def get_pricing() -> dict[str, Any]:
     return pricing.load_pricing(ROOT)
@@ -741,9 +1258,16 @@ def group_turns(
                 # reply still playing over the caller. A real reply has to clear
                 # STT finalisation, the model and TTS, so only a strictly later
                 # mark is a wait anyone actually experienced.
+                # A strictly-later mark is necessary but not sufficient: the
+                # floor below rejects spans too short for a real STT-final ->
+                # model -> TTS round trip. Without it, two marks recorded a
+                # millisecond apart are published as a 1 ms reply, which both
+                # drags a fleet percentile down and inflates the denominator of
+                # the audible-lag rate.
                 "time_to_first_audio_ms": (
                     (first_audio - speech_end)
-                    if (first_audio is not None and speech_end is not None and first_audio > speech_end)
+                    if (first_audio is not None and speech_end is not None
+                        and first_audio - speech_end >= MIN_PLAUSIBLE_RESPONSE_MS)
                     else None
                 ),
                 "operations": ops,

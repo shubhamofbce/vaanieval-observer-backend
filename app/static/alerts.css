@@ -1,0 +1,237 @@
+/* Alerts.
+ * ---------------------------------------------------------------------------
+ * The page answers one question - what should I look at first - so it is a
+ * single ranked column, not a grid of equal cards. A grid asks the reader to
+ * compare; a column tells them the order.
+ */
+
+.alerts-main {
+  display: block;
+  overflow: auto;
+  /* The workspace is a grid track. Without this the cards size themselves from
+     their content and push the whole column past the viewport. */
+  min-width: 0;
+  padding: 22px 26px 60px;
+}
+
+.alerts-body { max-width: 1080px; margin: 0 auto; }
+
+.alerts-head { margin: 0 0 20px; }
+
+.alerts-title {
+  margin: 0 0 6px;
+  font: 800 21px/1.2 var(--display, var(--sans));
+  letter-spacing: -0.01em;
+}
+
+.alerts-sub {
+  margin: 0;
+  max-width: 68ch;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+
+.alerts-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 12px;
+  padding: 6px 11px;
+  border-radius: 999px;
+  font: 600 12px/1 var(--sans);
+  border: 1px solid var(--line);
+  background: var(--bg-raised);
+  color: var(--text-dim);
+}
+.alerts-count b { color: var(--text); }
+.alerts-count.is-firing { border-color: rgb(255 138 122 / 38%); color: var(--danger); }
+.alerts-count.is-firing b { color: var(--danger); }
+
+.alerts-section-title {
+  margin: 26px 0 10px;
+  font: 700 11px/1 var(--sans);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+/* One alert. The left edge carries the severity, because a reader scanning a
+   column reads the edge before the text. */
+.alert {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+  padding: 16px 18px;
+  margin-bottom: 12px;
+}
+.alert.is-critical { border-left-color: var(--danger); }
+.alert.is-warning { border-left-color: var(--warn); }
+
+.alert-top {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.alert-label {
+  margin: 0;
+  font: 700 15px/1.3 var(--sans);
+  color: var(--text);
+}
+
+.alert-badge {
+  flex: none;
+  font: 700 10px/1 var(--sans);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 5px 8px;
+  border-radius: 999px;
+}
+.alert-badge.is-critical { color: var(--danger); background: rgb(255 138 122 / 13%); }
+.alert-badge.is-warning { color: var(--warn); background: rgb(246 198 107 / 13%); }
+
+.alert-scope {
+  margin-left: auto;
+  font: 600 12px/1 var(--mono);
+  color: var(--text-dim);
+}
+
+.alert-why {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+
+/* Observed vs threshold, side by side. The comparison is the alert: a number
+   on its own does not tell the reader whether it is bad. */
+.alert-numbers {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.alert-observed {
+  font: 800 22px/1 var(--display, var(--sans));
+  letter-spacing: -0.01em;
+}
+.alert.is-critical .alert-observed { color: var(--danger); }
+.alert.is-warning .alert-observed { color: var(--warn); }
+
+.alert-threshold { font-size: 12.5px; color: var(--text-faint); }
+
+.alert-evidence { margin-top: 14px; border-top: 1px solid var(--line-soft); padding-top: 12px; }
+
+.alert-evidence-title {
+  margin: 0 0 8px;
+  font: 700 10.5px/1 var(--sans);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.alert-calls { display: flex; flex-direction: column; gap: 6px; }
+
+.alert-call {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 11px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-soft);
+  background: var(--bg-raised);
+  color: var(--text);
+  text-decoration: none;
+  font-size: 12.5px;
+  transition: border-color .12s ease, background .12s ease;
+}
+.alert-call:hover { border-color: var(--line-strong); background: var(--bg-hover); }
+.alert-call:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.alert-call-id { font-family: var(--mono); color: var(--text-dim); }
+.alert-call-when { margin-left: auto; color: var(--text-faint); font-size: 12px; }
+.alert-call-metric { font-weight: 700; }
+.alert.is-critical .alert-call-metric { color: var(--danger); }
+.alert.is-warning .alert-call-metric { color: var(--warn); }
+
+.alert-more {
+  display: inline-block;
+  margin-top: 9px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+}
+.alert-more:hover { text-decoration: underline; }
+
+/* Rules that are not firing. Kept visible, and deliberately quiet: a monitoring
+   page that only lists problems cannot tell the reader what is being watched,
+   so a silent fleet looks identical to no monitoring at all. */
+.alert-quiet {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 14px;
+  align-items: center;
+  padding: 11px 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  margin-bottom: 7px;
+}
+.alert-quiet-label { font-size: 13px; font-weight: 600; }
+.alert-quiet-scope { font: 600 12px/1 var(--mono); color: var(--text-faint); }
+.alert-quiet-value { font-size: 12.5px; color: var(--text-dim); }
+.alert-quiet-value b { color: var(--ok); font-weight: 700; }
+.alert-quiet-value.is-unknown b { color: var(--text-faint); }
+
+.alerts-empty {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--text-dim);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-lg);
+}
+
+.alerts-note {
+  margin-top: 26px;
+  padding: 13px 16px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-faint);
+}
+
+@media (width <= 860px) {
+  .alerts-main { padding: 16px 14px 48px; }
+  .alert-scope { margin-left: 0; width: 100%; }
+  .alert-call-when { display: none; }
+}
+
+/* The agents under a finding. Deliberately denser than the evidence rows: they
+   are a ranking to scan, not links to open one at a time. */
+.alert-agents { margin-top: 14px; border-top: 1px solid var(--line-soft); padding-top: 12px; }
+
+.alert-agent {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 7px 11px;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  text-decoration: none;
+  font-size: 12.5px;
+}
+.alert-agent:hover { background: var(--bg-hover); }
+.alert-agent:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.alert-agent-value { font-weight: 700; min-width: 8ch; }
+.alert.is-critical .alert-agent-value { color: var(--danger); }
+.alert.is-warning .alert-agent-value { color: var(--warn); }
+.alert-agent-id { font-family: var(--mono); color: var(--text-dim); }
+.alert-agent-calls { margin-left: auto; color: var(--text-faint); font-size: 12px; }

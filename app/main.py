@@ -25,7 +25,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from app import aggregate, demo, keys, metrics, onboarding, payload, pricing
+from app import aggregate, alerts, demo, keys, metrics, onboarding, payload, pricing
 from app.latency import speech_window
 
 ROOT = Path(os.environ.get("VAANI_DATA_DIR", Path(__file__).resolve().parents[1] / "data"))
@@ -480,6 +480,13 @@ def dashboard_page() -> Response:
     """Fleet-wide view. The call console stays on `/` so existing `#/call/...`
     links, bookmarks and the SDK's printed URLs keep working unchanged."""
     return page(STATIC / "dashboard.html", "/dashboard")
+
+
+@app.get("/alerts")
+def alerts_page() -> Response:
+    """Fleet alerts. Fixed rules, evaluated against the same aggregate the
+    dashboard reads, so every alert is followed by the calls that caused it."""
+    return page(STATIC / "alerts.html", "/alerts")
 
 
 @app.get("/stt-evaluation")
@@ -1204,6 +1211,93 @@ def dashboard_summary(
     result["coverage"]["pending_rollup_buckets"] = stale_buckets
     result["generated_at"] = now()
     return result
+
+
+@app.get("/v1/alerts")
+def alerts_feed(
+    from_ms: int | None = None,
+    to_ms: int | None = None,
+) -> dict[str, Any]:
+    """Every rule, evaluated per agent, worst breach first.
+
+    One request rather than one per agent: the rules compare agents against each
+    other, and four independently-timed summaries would let two agents be
+    measured over different windows and then ranked as if they were not.
+    """
+    end = to_ms if to_ms is not None else wall_clock_ms()
+    start = from_ms if from_ms is not None else end - DEFAULT_RANGE_MS
+    if start >= end:
+        raise HTTPException(422, "from_ms must be earlier than to_ms")
+
+    with connect() as db:
+        agent_ids = [row[0] for row in db.execute(
+            "SELECT DISTINCT agent_id FROM call_metrics "
+            "WHERE started_at_epoch_ms >= ? AND started_at_epoch_ms < ? AND agent_id IS NOT NULL "
+            "ORDER BY agent_id", (start, end))]
+        scopes: list[tuple[str | None, dict[str, Any]]] = []
+        for agent_id in [None, *agent_ids]:
+            filters = aggregate.Filters(start_ms=start, end_ms=end, agent_id=agent_id)
+            scopes.append((agent_id, aggregate.summary(db, filters, compare=False)))
+
+        firing: list[dict[str, Any]] = []
+        quiet: list[dict[str, Any]] = []
+        for agent_id, summary in scopes:
+            for rule in alerts.RULES:
+                result = alerts.evaluate(rule, summary)
+                result["agent_id"] = agent_id
+                result["scope"] = "fleet" if agent_id is None else "agent"
+                if result["state"] == "firing":
+                    # The calls that caused it, so the alert is one click from
+                    # its own evidence rather than from a filter form.
+                    drilldown = aggregate.calls(
+                        db, aggregate.Filters(start_ms=start, end_ms=end, agent_id=agent_id),
+                        result["selector"], limit=3)
+                    result["evidence"] = drilldown["items"]
+                    result["evidence_total"] = drilldown["total"]
+                    if not drilldown["total"]:
+                        # A rate computed over turns can cross its threshold
+                        # while no single call qualifies for the call-level
+                        # drilldown behind it. Publishing that would be an alert
+                        # whose "show me" link opens an empty list — the exact
+                        # thing that makes a monitoring page stop being trusted.
+                        # It is reported as unmeasurable instead of as a breach.
+                        result["state"] = "unknown"
+                        result["severity"] = "none"
+                        result["reason"] = "spread across turns, no single call qualifies"
+                        quiet.append(result)
+                        continue
+                    firing.append(result)
+                else:
+                    quiet.append(result)
+
+    # Fleet-wide breaches lead, then agents by how far past the line they are:
+    # a channel at 60% over threshold is the story, not the one at 2%.
+    firing.sort(key=lambda item: (
+        item["scope"] != "fleet",
+        item["severity"] != "critical",
+        -(item["excess"] or 0),
+    ))
+    # The quiet list is a reference, so it reads in a stable order - fleet, then
+    # agents alphabetically, rules in declaration order - rather than in whatever
+    # order the breaches happened to leave behind.
+    rule_order = {rule.id: index for index, rule in enumerate(alerts.RULES)}
+    quiet.sort(key=lambda item: (
+        item["scope"] != "fleet",
+        item["agent_id"] or "",
+        rule_order.get(item["rule_id"], 99),
+    ))
+    return {
+        "range": {"from_ms": start, "to_ms": end},
+        "agents": agent_ids,
+        "firing": firing,
+        "quiet": quiet,
+        "rules": [
+            {"id": rule.id, "label": rule.label, "question": rule.question,
+             "threshold": rule.threshold, "unit": rule.unit, "severity": rule.severity}
+            for rule in alerts.RULES
+        ],
+        "generated_at": now(),
+    }
 
 
 @app.get("/v1/dashboard/calls")

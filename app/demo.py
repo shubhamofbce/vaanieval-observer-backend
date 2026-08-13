@@ -36,11 +36,13 @@ CONFIG_NAME = "demo.json"
 ALLOWED_PATHS = frozenset({
     "/",
     "/dashboard",
+    "/alerts",
     "/stt-evaluation",
     "/health",
     "/ready",
     "/v1/demo/config",
     "/v1/sessions",
+    "/v1/alerts",
     "/v1/dashboard/summary",
     "/v1/dashboard/calls",
     "/v1/pricing",
@@ -140,7 +142,7 @@ def cache_control(path: str) -> str | None:
         return MEDIA_CACHE
     if path.startswith("/v1/"):
         return API_CACHE
-    if path in {"/", "/dashboard", "/stt-evaluation"}:
+    if path in {"/", "/dashboard", "/alerts", "/stt-evaluation"}:
         return PAGE_CACHE
     return None
 

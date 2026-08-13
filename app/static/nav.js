@@ -43,9 +43,8 @@
     {
       id: 'alerts',
       label: 'Alerts',
-      href: null,
-      hint: 'Coming soon',
-      soon: true,
+      href: '/alerts',
+      hint: 'Rules breaching right now',
       icon: '<path fill="currentColor" d="M10 2a5 5 0 0 0-5 5v3l-1.4 2.3A.75.75 0 0 0 4.25 14h11.5a.75.75 0 0 0 .65-1.7L15 10V7a5 5 0 0 0-5-5Zm0 16a2.5 2.5 0 0 0 2.45-2h-4.9A2.5 2.5 0 0 0 10 18Z"/>',
     },
   ];
@@ -54,6 +53,7 @@
     const path = window.location.pathname;
     if (path.startsWith('/onboarding')) return 'onboarding';
     if (path.startsWith('/dashboard')) return 'dashboard';
+    if (path.startsWith('/alerts')) return 'alerts';
     return 'calls';
   }
 

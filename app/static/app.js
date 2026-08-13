@@ -1060,11 +1060,11 @@ function renderCall(session) {
   const strip = h('div', { class: 'metric-strip' },
     metric('Turns', String(turns.length), turns.length ? `${operations.length} operations` : 'no turn spans captured'),
     metric('Length', duration(manifest.duration_ms) || '—', `${session.recordings?.filter((r) => r.uploaded).length || 0} audio track(s)`),
-    metric('p50', p50 != null ? duration(p50) : '—',
-      responses.length ? `caller stops → first audio, thresholds ${duration(WARN_MS)} / ${duration(SLOW_MS)}` : 'needs turns with a first-audio mark',
+    metric('Typical wait', p50 != null ? duration(p50) : '—',
+      responses.length ? `median (p50) caller stops → first audio, thresholds ${duration(WARN_MS)} / ${duration(SLOW_MS)}` : 'needs turns with a first-audio mark',
       { tone: p50 != null ? latencyTone(p50) : null }),
-    metric('p95', p95 != null ? duration(p95) : '—',
-      responses.length ? `over ${responses.length} turn${responses.length === 1 ? '' : 's'}` : 'needs turns with a first-audio mark',
+    metric('Worst wait', p95 != null ? duration(p95) : '—',
+      responses.length ? `p95 over ${responses.length} turn${responses.length === 1 ? '' : 's'} — 1 in 20 waited at least this long` : 'needs turns with a first-audio mark',
       { tone: p95 != null ? latencyTone(p95) : null }),
     metric('Slowest', slowest ? duration(slowest.time_to_first_audio_ms) : '—',
       slowest ? null : 'no timed turns',
@@ -3157,7 +3157,15 @@ function syncOpFilterControls() {
   for (const button of ui.opSeg?.querySelectorAll('button') || []) {
     button.setAttribute('aria-pressed', String(button.dataset.opType === state.opFilter.type));
   }
-  if (ui.opErrors) ui.opErrors.setAttribute('aria-pressed', String(state.opFilter.errorsOnly));
+  if (ui.opErrors) {
+    ui.opErrors.setAttribute('aria-pressed', String(state.opFilter.errorsOnly));
+    // A call with nothing to filter to should say so before it is clicked. Left
+    // enabled, the control's only possible outcome is an empty list, which reads
+    // as a broken filter rather than as a clean call.
+    const anyFailed = (state.session?.operations || []).some((op) => effectiveStatus(op) === 'error');
+    ui.opErrors.disabled = !anyFailed && !state.opFilter.errorsOnly;
+    ui.opErrors.title = anyFailed ? '' : 'No failed operations in this call';
+  }
   if (ui.opSearch && ui.opSearch.value !== state.opFilter.query) ui.opSearch.value = state.opFilter.query;
 }
 

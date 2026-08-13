@@ -63,6 +63,15 @@
     return el('header', { class: 'demo-bar', role: 'banner' }, brand, note, actions);
   }
 
+  function desktopNote() {
+    return el('p', {
+      class: 'demo-desktop-note',
+      text:
+        'On a phone you are seeing the summary. The call view — waveform, transcript '
+        + 'and trace side by side — is built for a desktop screen.',
+    });
+  }
+
   function intro() {
     // The dashboard opens on a wall of red. Without a sentence of framing a
     // visitor reads it as "this vendor's agents are broken" instead of "this
@@ -92,12 +101,7 @@
         text: 'or click any row in “Calls needing attention”.',
       }),
     );
-    const desktop = el('p', {
-      class: 'demo-desktop-note',
-      text:
-        'On a phone you are seeing the summary. The call view — waveform, transcript '
-        + 'and trace side by side — is built for a desktop screen.',
-    });
+    const desktop = desktopNote();
     return el('section', { class: 'demo-intro' }, heading, body, actions, desktop);
   }
 
@@ -108,6 +112,16 @@
     const filters = document.getElementById('filters');
     if (!filters || !filters.parentNode) return;
     filters.parentNode.insertBefore(intro(), filters);
+  }
+
+  function mountCallDesktopNote() {
+    // A visitor who arrives on a shared call link never passes the dashboard,
+    // so without this the phone warning only reaches the people who did not
+    // need it. Same note, same breakpoint, at the top of the call they opened.
+    const host = document.getElementById('call');
+    if (!host || !host.children.length) return;
+    if (host.querySelector('.demo-desktop-note')) return;
+    host.prepend(desktopNote());
   }
 
   function mountConsoleCta() {
@@ -134,6 +148,7 @@
   function mount() {
     if (!document.querySelector('.demo-bar')) document.body.prepend(bar());
     mountIntro();
+    mountCallDesktopNote();
     mountConsoleCta();
     document.title = document.title.includes('Demo')
       ? document.title
@@ -147,6 +162,7 @@
   // one-shot mount would miss it or lose the CTA on the next call.
   const observer = new MutationObserver(() => {
     mountIntro();
+    mountCallDesktopNote();
     mountConsoleCta();
   });
   if (document.body) observer.observe(document.body, { childList: true, subtree: true });

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Alerts · Vaani Observer</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230d1526'/%3E%3Cg fill='%2359d3ab'%3E%3Crect x='6' y='13' width='3' height='6' rx='1.5'/%3E%3Crect x='12' y='8' width='3' height='16' rx='1.5'/%3E%3Crect x='18' y='11' width='3' height='10' rx='1.5'/%3E%3Crect x='24' y='14' width='3' height='4' rx='1.5'/%3E%3C/g%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/assets/styles.css">
+  <link rel="stylesheet" href="/assets/dashboard.css">
+  <link rel="stylesheet" href="/assets/alerts.css">
+</head>
+<body class="board-page">
+  <a class="skip-link" href="#main">Skip to alerts</a>
+
+  <div class="workspace" data-workspace>
+  <aside class="sidebar" id="sidebar" aria-label="Vaani Observer">
+    <div class="sidebar-head">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 32 32" width="20" height="20"><g fill="currentColor"><rect x="4" y="13" width="3" height="6" rx="1.5"/><rect x="10" y="7" width="3" height="18" rx="1.5"/><rect x="16" y="10" width="3" height="12" rx="1.5"/><rect x="22" y="13" width="3" height="6" rx="1.5"/></g></svg>
+      </span>
+      <b class="brand-name">Vaani Observer</b>
+      <button type="button" class="sidebar-toggle" id="sidebar-toggle" aria-expanded="true" aria-controls="sidebar" title="Collapse the sections rail  ·  n" aria-label="Collapse the sections rail">
+        <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path fill="currentColor" d="M10.03 3.47a.75.75 0 0 1 0 1.06L6.56 8l3.47 3.47a.75.75 0 1 1-1.06 1.06L4.97 8.53a.75.75 0 0 1 0-1.06l4-4a.75.75 0 0 1 1.06 0Z"/></svg>
+      </button>
+    </div>
+    <div data-nav-slot></div>
+    <div class="sidebar-foot">
+      <span class="conn-state" id="conn-state" role="status" aria-live="polite"></span>
+    </div>
+  </aside>
+    <main class="board alerts-main" id="main" tabindex="-1">
+      <div id="alerts-body" class="alerts-body"></div>
+    </main>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+  <script src="/assets/nav.js"></script>
+  <script src="/assets/alerts.js"></script>
+</body>
+</html>

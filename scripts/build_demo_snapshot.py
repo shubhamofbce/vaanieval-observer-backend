@@ -93,6 +93,30 @@ REDACTED = "[redacted for the public demo]"
 # deterministically per call, so a rebuild produces the identical snapshot.
 ENVIRONMENTS = (("production", 0.78), ("staging", 0.22))
 AGENT_VERSIONS = (("2.5.0", 0.55), ("2.4.1", 0.45))
+
+# The published fleet.
+# ---------------------------------------------------------------------------
+# Every captured call is the same India travel assistant, so the agents here are
+# its delivery channels rather than invented products: the transcript a visitor
+# reads is plausible under any of these names, which would not be true if the
+# fleet were padded out with a billing bot or a claims agent.
+#
+# The assignment is not random. Calls are graded by how bad they are and the
+# worst are concentrated in one channel, because an agent filter that spreads
+# failure evenly across four agents answers nothing - the visitor clicks it,
+# sees four identical rows, and learns that the filter works. Concentrated,
+# the same click produces the finding the product exists to deliver: one
+# channel is dragging the fleet down.
+FLAGSHIP_AGENT = "india-travel-agent"
+DEGRADED_AGENT = "india-travel-agent-whatsapp"
+FLEET = (
+    # (agent id, share of calls, share of the *worst* calls it should absorb)
+    (FLAGSHIP_AGENT, 0.40, 0.30),
+    (DEGRADED_AGENT, 0.23, 0.60),
+    ("india-travel-agent-web", 0.24, 0.10),
+    ("trip-cost-estimator", 0.13, 0.00),
+)
+
 # Models the captured spans do not name. Derived from the endpoint the call
 # actually used, so this labels the traffic rather than inventing it.
 ENDPOINT_MODELS = {
@@ -243,8 +267,63 @@ def enrich_operation(op: dict[str, Any]) -> dict[str, Any]:
     return op
 
 
-# ----------------------------------------------------------------- the clock
+def severity(row: sqlite3.Row) -> tuple[float, float]:
+    """How bad a call is, worst first.
 
+    Failures dominate, then how long the caller waited per turn. Duration alone
+    would rank a long healthy conversation as the worst call in the fleet.
+    """
+    turns = max(int(row["turn_count"] or 0), 1)
+    return (float(row["failed_op_count"] or 0), float(row["duration_ms"] or 0) / turns)
+
+
+def assign_agents(ordered: list[sqlite3.Row], featured_id: str) -> dict[str, str]:
+    """Spread the calls over the published fleet, worst calls concentrated.
+
+    Capacities are apportioned by largest remainder so the shares hold exactly
+    at 30 calls and still hold if the call count changes. The worst calls are
+    handed out first, to whichever agent has the most unmet appetite for them,
+    so `DEGRADED_AGENT` ends up visibly worse than the fleet average instead of
+    the four agents converging on the same numbers.
+    """
+    total = len(ordered)
+    exact = {agent: share * total for agent, share, _ in FLEET}
+    caps = {agent: int(value) for agent, value in exact.items()}
+    for agent in sorted(exact, key=lambda a: exact[a] - caps[a], reverse=True):
+        if sum(caps.values()) >= total:
+            break
+        caps[agent] += 1
+
+    worst_first = sorted(ordered, key=severity, reverse=True)
+    # How many calls are treated as "the bad ones" for placement purposes. Every
+    # call with a failure counts, and at least a third of the set, so the
+    # concentration is visible even in a snapshot that happens to be healthy.
+    bad_count = max(sum(1 for row in ordered if row["failed_op_count"] > 0), total // 3)
+    appetite = {agent: bad * bad_count for agent, _, bad in FLEET}
+
+    assigned: dict[str, str] = {}
+    remaining = dict(caps)
+    for index, row in enumerate(worst_first):
+        open_agents = [agent for agent in remaining if remaining[agent] > 0]
+        if index < bad_count and any(appetite[agent] > 0 for agent in open_agents):
+            agent = max(open_agents, key=lambda a: (appetite[a], remaining[a], a))
+            appetite[agent] -= 1
+        else:
+            agent = max(open_agents, key=lambda a: (remaining[a], a))
+        remaining[agent] -= 1
+        assigned[row["id"]] = agent
+
+    # The landing page links to the featured call, so it must open on the agent
+    # the rest of the story is told about. Swapping keeps every capacity intact.
+    if assigned.get(featured_id) != FLAGSHIP_AGENT:
+        displaced = assigned[featured_id]
+        partner = next(sid for sid, agent in assigned.items()
+                       if agent == FLAGSHIP_AGENT and sid != featured_id)
+        assigned[featured_id], assigned[partner] = FLAGSHIP_AGENT, displaced
+    return assigned
+
+
+# ----------------------------------------------------------------- the clock
 def arrange(ordered: list[sqlite3.Row]) -> list[sqlite3.Row]:
     """Spread the failed calls evenly through the publication order.
 
@@ -350,6 +429,7 @@ def build() -> int:
     # Longest calls last: the newest call is the one the landing page links to,
     # and it should be the richest conversation in the set.
     ordered = arrange(sorted(selected, key=lambda row: (row["turn_count"], row["duration_ms"])))
+    agents = assign_agents(ordered, ordered[-1]["id"])
 
     write = sqlite3.connect(target / "vaani.db")
     write.row_factory = sqlite3.Row
@@ -367,6 +447,7 @@ def build() -> int:
         manifest = json.loads(row["manifest_json"])
         manifest = scrub(manifest, findings)
         manifest["started_at"] = started.isoformat().replace("+00:00", "Z")
+        manifest["agent_id"] = agents[session_id]
         metadata = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
         metadata["environment"] = weighted_choice(ENVIRONMENTS, f"env:{session_id}")
         metadata["agent_version"] = weighted_choice(AGENT_VERSIONS, f"ver:{session_id}")

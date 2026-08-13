@@ -23,7 +23,9 @@ class TestAllowlist:
         for path in (
             "/",
             "/dashboard",
+            "/alerts",
             "/stt-evaluation",
+            "/v1/alerts",
             "/ready",
             "/v1/demo/config",
             "/v1/sessions",
@@ -71,6 +73,7 @@ class TestHeaders:
         assert demo.cache_control("/v1/sessions/a/audio/call") == demo.MEDIA_CACHE
         assert demo.cache_control("/v1/sessions") == demo.API_CACHE
         assert demo.cache_control("/dashboard") == demo.PAGE_CACHE
+        assert demo.cache_control("/alerts") == demo.PAGE_CACHE
 
     def test_every_response_is_hardened(self) -> None:
         headers = demo.security_headers("/dashboard")

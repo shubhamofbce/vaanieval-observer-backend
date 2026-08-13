@@ -284,3 +284,10 @@ body :where(a, button, input, select, summary, [tabindex]):focus-visible {
 @media (width <= 860px) {
   .demo-desktop-note { display: block; }
 }
+
+/* The STT workspace carries its own product wordmark in its top bar. Under the
+   demo chrome that stacks two different brand marks in the first 100px, which
+   reads as two products bolted together rather than one. The outer VaaniEval
+   bar is the one that has to stay, so the inner one goes - in demo mode only,
+   since the shipped product has no bar above it. */
+.top .brand { display: none; }

@@ -4,6 +4,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import re
 import socket
 import sqlite3
 import struct
@@ -24,7 +25,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from app import aggregate, keys, metrics, onboarding, payload, pricing
+from app import aggregate, demo, keys, metrics, onboarding, payload, pricing
 from app.latency import speech_window
 
 ROOT = Path(os.environ.get("VAANI_DATA_DIR", Path(__file__).resolve().parents[1] / "data"))
@@ -114,6 +115,25 @@ MAX_RANGE_MS = 180 * 24 * 60 * 60 * 1000
 # operator can flip it without a restart.
 REQUIRE_API_KEY_ENV = "VAANI_REQUIRE_API_KEY"
 
+# The public demo is a fixed snapshot, so "now" is a property of the data rather
+# than of the visitor's clock. Resolved once at import: it must not drift
+# between the KPI row and the chart under it during a single page load.
+DEMO_MODE = demo.enabled()
+DEMO_CONFIG: dict[str, Any] = demo.load_config(ROOT) if DEMO_MODE else {}
+MEDIA_LIMITER = demo.MediaLimiter()
+
+
+def wall_clock_ms() -> int:
+    """The moment the product should treat as "now".
+
+    In the demo this is the newest call in the published snapshot, so a range
+    control still selects calls a year after the snapshot was cut. Everywhere
+    else it is the real clock.
+    """
+    if DEMO_MODE:
+        return int(DEMO_CONFIG["demo_now_ms"])
+    return round(datetime.now(UTC).timestamp() * 1000)
+
 
 def now() -> str:
     return datetime.now(UTC).isoformat()
@@ -185,6 +205,19 @@ def initialize() -> None:
 
 @contextmanager
 def connect():
+    if DEMO_MODE:
+        # Immutable, not merely read-only: SQLite then never takes a lock, never
+        # looks for a WAL or journal, and never writes a hot-journal recovery
+        # into a directory that may not even be writable. A published snapshot
+        # is a file that cannot change, and this is how you say so.
+        db = sqlite3.connect(f"file:{DATABASE}?mode=ro&immutable=1", uri=True, timeout=SQLITE_TIMEOUT_S)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA query_only = ON")
+        try:
+            yield db
+        finally:
+            db.close()
+        return
     db = sqlite3.connect(DATABASE, timeout=SQLITE_TIMEOUT_S)
     db.row_factory = sqlite3.Row
     # WAL lets the dashboard read while a call is being ingested. Under the
@@ -238,10 +271,51 @@ app.mount("/assets", StaticFiles(directory=STATIC), name="assets")
 
 
 @app.middleware("http")
+async def demo_gate(request: Request, call_next):
+    """The public demo's entire attack surface, in one place.
+
+    An allowlist rather than a verb block: the risk is not that someone sends a
+    POST today, it is that a read-shaped endpoint added next month becomes
+    public without anyone deciding that it should.
+    """
+    if not DEMO_MODE:
+        return await call_next(request)
+    if not demo.is_allowed(request.method, request.url.path):
+        return Response(
+            json.dumps({"detail": "This is a read-only public demo."}),
+            status_code=404,
+            media_type="application/json",
+            headers=demo.security_headers(request.url.path),
+        )
+    if demo.is_media(request.url.path) and not MEDIA_LIMITER.allow(
+        demo.client_key(request), time.monotonic()
+    ):
+        headers = demo.security_headers(request.url.path)
+        headers["Retry-After"] = "30"
+        # No caching of a refusal: the next request from this visitor, a few
+        # seconds later, is meant to succeed.
+        headers["Cache-Control"] = "no-store"
+        return Response(
+            json.dumps({"detail": "Too many audio requests. Please slow down."}),
+            status_code=429,
+            media_type="application/json",
+            headers=headers,
+        )
+    response = await call_next(request)
+    for name, value in demo.security_headers(request.url.path).items():
+        response.headers[name] = value
+    return response
+
+
+@app.middleware("http")
 async def no_store_assets(request: Request, call_next):
     """The console is served from disk on localhost; a cached bundle just hands
     the reviewer a stale UI after an upgrade."""
     response = await call_next(request)
+    if DEMO_MODE:
+        # The demo is a fixed artifact behind a CDN; `no-store` there would make
+        # every visitor re-download the console.
+        return response
     if request.url.path.startswith("/assets") or request.url.path == "/":
         response.headers["Cache-Control"] = "no-store"
     return response
@@ -249,6 +323,12 @@ async def no_store_assets(request: Request, call_next):
 
 @app.on_event("startup")
 def startup() -> None:
+    if DEMO_MODE:
+        # No schema creation, no backfill, no rollup rebuild, no facet pruning
+        # and no maintenance lease. Every one of those writes, and the snapshot
+        # is opened immutable: the correct behaviour is to serve what was
+        # published, exactly as it was published.
+        return
     initialize()
     backfill_metrics(limit=BACKFILL_STARTUP_LIMIT)
     # A metrics-version bump can retire facet values (canonicalising providers
@@ -334,32 +414,145 @@ def backfill_metrics(limit: int | None = None) -> int:
         )
 
 
+def asset_version() -> str:
+    """A short stamp that changes whenever a static file changes.
+
+    The demo serves `/assets/` with a one-year immutable cache, which is right
+    for a fixed artifact and wrong without a version in the URL: a visitor who
+    saw an earlier build would keep their copy of the stylesheet for a year and
+    never see a correction. Stamping the references makes the long cache safe,
+    because a changed file is a changed URL.
+    """
+    digest = hashlib.sha256()
+    for file in sorted(STATIC.rglob("*")):
+        if file.is_file():
+            stat = file.stat()
+            digest.update(file.name.encode())
+            digest.update(str(stat.st_mtime_ns).encode())
+            digest.update(str(stat.st_size).encode())
+    return digest.hexdigest()[:12]
+
+
+ASSET_VERSION = asset_version() if DEMO_MODE else ""
+ASSET_REF = re.compile(r'(?P<attr>src|href)="(?P<url>/assets/[^"?]+)"')
+
+
+def page(path: Path, route: str) -> Response:
+    """Serve a console page, wearing the demo skin when the demo is on.
+
+    The demo's frozen clock has to be known before the first render, not one
+    fetch later: a dashboard that paints "2 minutes ago" from the real wall
+    clock and then corrects itself to a 2026 sample window has already told the
+    visitor the data is fake. Injecting the config into the document removes
+    the round trip, and the injection is confined to demo mode so the shipped
+    product serves the same static files it always did.
+    """
+    if not DEMO_MODE:
+        return FileResponse(path)
+    html = path.read_text(encoding="utf-8")
+    config = json.dumps({**DEMO_CONFIG, "demo": True})
+    injection = (
+        f"<script>window.__VAANI_DEMO__={config};</script>\n"
+        '<link rel="preconnect" href="https://fonts.googleapis.com">\n'
+        '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n'
+        '<link rel="stylesheet" href="https://fonts.googleapis.com/css2'
+        "?family=Inter:wght@400;500;600;700&family=Sora:wght@600;700;800&display=swap"
+        '">\n'
+        '<link rel="icon" href="/assets/vaanieval-logo.jpg">\n'
+        '<link rel="stylesheet" href="/assets/demo.css">\n'
+        '<script defer src="/assets/demo.js"></script>\n'
+    )
+    html = html.replace("</head>", f"{injection}</head>", 1)
+    html = ASSET_REF.sub(
+        lambda m: f'{m["attr"]}="{m["url"]}?v={ASSET_VERSION}"', html
+    )
+    return Response(html, media_type="text/html; charset=utf-8",
+                    headers=demo.security_headers(route))
+
+
 @app.get("/")
-def console() -> FileResponse:
-    return FileResponse(STATIC / "index.html")
+def console() -> Response:
+    return page(STATIC / "index.html", "/")
 
 
 @app.get("/dashboard")
-def dashboard_page() -> FileResponse:
+def dashboard_page() -> Response:
     """Fleet-wide view. The call console stays on `/` so existing `#/call/...`
     links, bookmarks and the SDK's printed URLs keep working unchanged."""
-    return FileResponse(STATIC / "dashboard.html")
+    return page(STATIC / "dashboard.html", "/dashboard")
 
 
 @app.get("/stt-evaluation")
-def stt_evaluation() -> FileResponse:
+def stt_evaluation() -> Response:
     """The full per-call STT comparison workspace.
 
     It deliberately lives beside the existing call console: a reviewer first
     uses the fast operational view, then opens this focused, decision-heavy
     surface only when they choose a challenger comparison.
     """
-    return FileResponse(STT_EVALUATION)
+    return page(STT_EVALUATION, "/stt-evaluation")
 
 
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/ready")
+def ready() -> dict[str, Any]:
+    """Readiness for the public demo: is there actually a dataset to serve?
+
+    A container that boots with an empty disk mount would otherwise pass a
+    liveness check and serve an empty dashboard to visitors. This fails
+    instead, so the platform holds traffic on the previous release.
+    """
+    if not DEMO_MODE:
+        return {"status": "ok", "demo": False}
+    problems: list[str] = []
+    if not DATABASE.is_file():
+        problems.append("database missing")
+    calls = 0
+    if not problems:
+        try:
+            with connect() as db:
+                calls = db.execute("SELECT COUNT(*) FROM sessions WHERE status = 'ready'").fetchone()[0]
+        except sqlite3.Error as error:
+            problems.append(f"database unreadable: {error}")
+    if calls == 0 and not problems:
+        problems.append("snapshot contains no ready calls")
+    missing = [name for name in DEMO_CONFIG.get("media_probe", []) if not (OBJECTS / name).is_file()]
+    if missing:
+        problems.append(f"missing media: {', '.join(missing[:3])}")
+    if problems:
+        raise HTTPException(503, "; ".join(problems))
+    return {"status": "ok", "demo": True, "calls": calls,
+            "demo_now_ms": DEMO_CONFIG.get("demo_now_ms"),
+            "snapshot": DEMO_CONFIG.get("snapshot_id")}
+
+
+@app.get("/v1/demo/config")
+def demo_config() -> dict[str, Any]:
+    """What the browser needs to render the demo honestly.
+
+    The frozen clock has to reach the client: the dashboard computes its own
+    range windows, and a client using the real `Date.now()` against a fixed
+    dataset would ask for a week that contains no calls.
+    """
+    if not DEMO_MODE:
+        return {"demo": False}
+    return {
+        "demo": True,
+        "demo_now_ms": DEMO_CONFIG["demo_now_ms"],
+        "window_label": DEMO_CONFIG.get("window_label", ""),
+        "call_count": DEMO_CONFIG.get("call_count", 0),
+        "snapshot_id": DEMO_CONFIG.get("snapshot_id", ""),
+        # The console is the demo's strongest artifact and a visitor who only
+        # sees the dashboard never reaches it, so the chrome needs somewhere
+        # concrete to point them.
+        "featured_session_id": DEMO_CONFIG.get("featured_session_id", ""),
+        "site_url": DEMO_CONFIG.get("site_url", "https://www.vaanieval.com"),
+        "booking_url": DEMO_CONFIG.get("booking_url", "https://calendar.app.google/5cNH8hB13LoC39Qk7"),
+    }
 
 
 def require_api_key() -> bool:
@@ -990,7 +1183,7 @@ def dashboard_summary(
     matching the chart under it during an incident - exactly when a developer is
     reading both.
     """
-    end = to_ms if to_ms is not None else round(datetime.now(UTC).timestamp() * 1000)
+    end = to_ms if to_ms is not None else wall_clock_ms()
     start = from_ms if from_ms is not None else end - DEFAULT_RANGE_MS
     if start >= end:
         raise HTTPException(422, "from_ms must be earlier than to_ms")
@@ -1035,7 +1228,7 @@ def dashboard_calls(
     dashboard's own filters attached, so a developer never has to reconstruct
     "which calls was that?" by hand.
     """
-    end = to_ms if to_ms is not None else round(datetime.now(UTC).timestamp() * 1000)
+    end = to_ms if to_ms is not None else wall_clock_ms()
     start = from_ms if from_ms is not None else end - DEFAULT_RANGE_MS
     filters = aggregate.Filters(
         start_ms=start, end_ms=end, agent_id=agent_id, environment=environment,
@@ -1276,6 +1469,25 @@ def group_turns(
     return sorted(ordered, key=lambda item: item["started_at_ms"])
 
 
+PRERENDERED_DIR = "preview"
+
+
+def prerendered_wav(session_id: str, track: str) -> Path | None:
+    """The published WAV for this track, if the snapshot builder made one.
+
+    The on-demand path decodes the raw PCM package and assembles a call-clock
+    WAV in memory on every request - tens of megabytes per listener, per seek.
+    That is the right trade for a single reviewer on a laptop and the wrong one
+    for a public page, where a handful of concurrent visitors scrubbing a
+    waveform would spend the whole CPU budget rendering audio that never
+    changes. In the demo the render is done once, at build time.
+    """
+    if not DEMO_MODE:
+        return None
+    path = OBJECTS / session_id / PRERENDERED_DIR / f"{track}.wav"
+    return path if path.is_file() else None
+
+
 @app.get("/v1/sessions/{session_id}/audio/{track}")
 def get_audio(
     session_id: str,
@@ -1293,7 +1505,8 @@ def get_audio(
     virtual_stereo_channel = (
         track in {"caller", "agent"} and "call" in manifest.get("audio", {})
     )
-    if track != "mixed" and not path.is_file() and not virtual_stereo_channel:
+    published = prerendered_wav(session_id, track)
+    if published is None and track != "mixed" and not path.is_file() and not virtual_stereo_channel:
         raise HTTPException(404, "Audio track not uploaded")
     if preview is None:
         if track == "mixed":
@@ -1302,7 +1515,9 @@ def get_audio(
             if virtual_stereo_channel:
                 raise HTTPException(400, "Stereo channels are available only as WAV previews")
         return FileResponse(path, media_type="application/octet-stream", filename=path.name)
-    wav = timeline_wav(directory, manifest, track)
+    if published is not None and from_ms is None and to_ms is None:
+        return published_wav_response(published, request, f"{track}.wav")
+    wav = read_bytes_or_render(published, directory, manifest, track)
     name = f"{track}.wav"
     if from_ms is not None or to_ms is not None:
         # A reviewer sharing evidence wants the eight seconds that went wrong,
@@ -1326,6 +1541,36 @@ def get_audio(
         headers["Content-Range"] = f"bytes {start}-{end}/{total}"
     headers["Content-Length"] = str(end - start + 1)
     return Response(wav[start : end + 1], status_code=status, media_type="audio/wav", headers=headers)
+
+
+def read_bytes_or_render(published: Path | None, directory: Path, manifest: dict[str, Any], track: str) -> bytes:
+    """Prefer the published render; fall back to building one on demand."""
+    if published is not None:
+        return published.read_bytes()
+    return timeline_wav(directory, manifest, track)
+
+
+def published_wav_response(path: Path, request: Request, name: str) -> Response:
+    """Stream a published WAV straight off disk, honouring Range.
+
+    Streamed rather than read whole: a 37 MB call played by several visitors at
+    once should cost the process a 64 KB buffer each, not 37 MB each. Safari
+    will not play media at all unless ranges are answered, so the 206 path is
+    not optional.
+    """
+    total = path.stat().st_size
+    start, end = parse_range(request.headers.get("range"), total)
+    headers = {
+        "Content-Disposition": f'inline; filename="{name}"',
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(end - start + 1),
+    }
+    status = 200
+    if (start, end) != (0, total - 1):
+        status = 206
+        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+    return StreamingResponse(read_wav_range(b"", path, start, end), status_code=status,
+                             media_type="audio/wav", headers=headers)
 
 
 def clip_wav(wav: bytes, from_ms: int | None, to_ms: int | None) -> bytes:
@@ -1353,6 +1598,48 @@ PEAK_SCALE = 1000
 MAX_PEAK_BUCKETS = 4000
 
 
+PEAKS_PUBLISHED_BUCKETS = MAX_PEAK_BUCKETS
+
+
+def downsample_peaks(source: dict[str, Any], buckets: int) -> dict[str, Any]:
+    """Derive a coarser envelope from a published fine one.
+
+    The waveform asks for one bucket per few pixels, so the bucket count is a
+    function of window width and zoom - a continuum, not a fixed set that could
+    be pre-rendered. Publishing one high-resolution envelope per track and
+    reducing it here answers every zoom level from a few kilobytes of JSON
+    instead of re-reading tens of megabytes of PCM. Taking the maximum of the
+    covered source buckets preserves transients, so a click or a clipped
+    syllable does not vanish as the reviewer zooms out.
+    """
+    available = int(source.get("buckets") or 0)
+    if buckets >= available:
+        return source
+    reduced = []
+    for channel in source.get("channels", []):
+        peaks = channel.get("peaks") or []
+        output = []
+        for bucket in range(buckets):
+            start = bucket * available // buckets
+            end = max(start + 1, (bucket + 1) * available // buckets)
+            window = peaks[start:end]
+            output.append(max(window) if window else 0)
+        reduced.append({**channel, "peaks": output})
+    return {**source, "buckets": buckets, "channels": reduced}
+
+
+def published_peaks(session_id: str, track: str) -> dict[str, Any] | None:
+    if not DEMO_MODE:
+        return None
+    path = OBJECTS / session_id / PRERENDERED_DIR / f"{track}.peaks.json"
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
 @app.get("/v1/sessions/{session_id}/audio/{track}/peaks")
 def get_audio_peaks(
     session_id: str,
@@ -1368,6 +1655,9 @@ def get_audio_peaks(
     recording it describes never changes.
     """
     buckets = max(32, min(MAX_PEAK_BUCKETS, buckets))
+    fine = published_peaks(session_id, track)
+    if fine is not None:
+        return downsample_peaks(fine, buckets)
     row = require_session(session_id)
     directory = safe_session_dir(session_id)
     manifest = json.loads(row["manifest_json"])
@@ -1717,7 +2007,17 @@ def recordings(session_id: str, manifest: dict[str, Any]) -> list[dict[str, Any]
     result = []
     for track, metadata in manifest.get("audio", {}).items():
         path = safe_session_dir(session_id) / track_file(manifest, track)
-        result.append({"track": track, "uploaded": path.is_file(), "size_bytes": path.stat().st_size if path.is_file() else 0, **metadata})
+        uploaded, size = path.is_file(), path.stat().st_size if path.is_file() else 0
+        if not uploaded:
+            # The demo snapshot ships the published render instead of the raw
+            # PCM package - the same audio, minus a second copy of it. The
+            # recording is still present and still playable, so reporting it as
+            # missing would hide the player from the one page the visitor came
+            # to see.
+            published = prerendered_wav(session_id, track)
+            if published is not None:
+                uploaded, size = True, published.stat().st_size
+        result.append({"track": track, "uploaded": uploaded, "size_bytes": size, **metadata})
     return result
 
 

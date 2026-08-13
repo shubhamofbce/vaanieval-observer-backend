@@ -7,6 +7,14 @@
  * so a page cannot mislabel itself.
  */
 (function () {
+  /* The demo publishes a fixed sample window, so "now" is the snapshot's clock,
+   * not the visitor's. Every relative timestamp in both surfaces reads this,
+   * because a call list that says "in 4 months" is a bug report waiting to be
+   * filed. Outside the demo it is `Date.now` with no behaviour change. */
+  const demo = window.__VAANI_DEMO__ || null;
+  window.vaaniNow = () => (demo && demo.demo_now_ms ? demo.demo_now_ms : Date.now());
+  window.vaaniDate = () => new Date(window.vaaniNow());
+
   const SECTIONS = [
     {
       id: 'onboarding',
@@ -14,6 +22,9 @@
       href: '/onboarding',
       hint: 'Install an SDK and send your first call',
       icon: '<path fill="currentColor" d="M10 2.2a.75.75 0 0 1 .53.22l3.5 3.5a.75.75 0 0 1 0 1.06l-6.4 6.4a.75.75 0 0 1-.36.2l-3.2.8a.75.75 0 0 1-.91-.91l.8-3.2a.75.75 0 0 1 .2-.36l6.4-6.4a.75.75 0 0 1 .53-.22Zm-6.25 14.3a.75.75 0 0 1 .75-.75h11a.75.75 0 0 1 0 1.5h-11a.75.75 0 0 1-.75-.75Z"/>',
+      // Onboarding issues API keys. The demo serves no writes, so the entry
+      // would lead to a 404: it is removed rather than left to fail.
+      hideInDemo: true,
     },
     {
       id: 'dashboard',
@@ -51,7 +62,7 @@
     const nav = document.createElement('nav');
     nav.className = 'sidenav';
     nav.setAttribute('aria-label', 'Sections');
-    nav.innerHTML = SECTIONS.map((section) => {
+    nav.innerHTML = SECTIONS.filter((section) => !(demo && section.hideInDemo)).map((section) => {
       const isActive = section.id === active;
       const icon = `<svg viewBox="0 0 20 20" width="17" height="17" aria-hidden="true">${section.icon}</svg>`;
       const body = `${icon}<span class="sidenav-label">${section.label}</span>${

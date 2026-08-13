@@ -137,7 +137,7 @@ function parseDate(value) {
 function relativeTime(value) {
   const date = parseDate(value);
   if (!date) return 'unknown time';
-  const seconds = Math.round((Date.now() - date.getTime()) / 1000);
+  const seconds = Math.round((window.vaaniNow() - date.getTime()) / 1000);
   if (Math.abs(seconds) < 45) return 'just now';
   const units = [['minute', 60], ['hour', 3600], ['day', 86400], ['week', 604800], ['month', 2629800], ['year', 31557600]];
   let [unit, size] = units[0];
@@ -156,7 +156,7 @@ function dayLabel(value) {
   const date = parseDate(value);
   if (!date) return 'Unknown date';
   const start = (input) => new Date(input.getFullYear(), input.getMonth(), input.getDate()).getTime();
-  const days = Math.round((start(new Date()) - start(date)) / 86400000);
+  const days = Math.round((start(window.vaaniDate()) - start(date)) / 86400000);
   if (days === 0) return 'Today';
   if (days === 1) return 'Yesterday';
   return date.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: days > 300 ? 'numeric' : undefined });
@@ -625,7 +625,7 @@ async function loadSessions({ keepSelection = true, reload = false } = {}) {
     // An overlapping refresh must not let the older response win.
     if (token !== listToken) return;
     state.sessions = sessions;
-    $('#conn-state').textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    $('#conn-state').textContent = `Updated ${window.vaaniDate().toLocaleTimeString()}`;
     $('#conn-state').dataset.state = 'ok';
     renderRail();
     const requested = readLocation();
@@ -2940,6 +2940,11 @@ function buildChallengerControl(session, comparisonUrl) {
       trigger.textContent = 'View comparison';
       trigger.onclick = () => { window.location.href = comparisonUrl; };
       stateText.textContent = job.status === 'completed' ? `${label} complete` : `${label} ready with limited results`;
+    } else if (window.__VAANI_DEMO__) {
+      // The demo serves a fixed snapshot and cannot start a new evaluation.
+      // Calls that already carry one keep the "View comparison" button above;
+      // the rest show nothing rather than a button that would 404.
+      control.remove();
     } else if (job.status === 'failed') {
       trigger.textContent = 'Retry comparison';
       trigger.onclick = openChooser;

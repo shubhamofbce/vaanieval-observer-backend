@@ -1,0 +1,286 @@
+/* The public demo's own chrome.
+ *
+ * This file loads only when VAANI_DEMO_MODE is on, so nothing here can change
+ * what a customer's own deployment looks like. It carries two jobs: say plainly
+ * that this is sample data on a fixed date, and keep a visitor who arrived from
+ * vaanieval.com inside the same brand — same typeface, same green, same mark,
+ * and a way back.
+ */
+
+:root {
+  /* Matches the landing header exactly. The two are seen seconds apart, and a
+     22px difference in header height is the kind of mismatch that reads as
+     "different product" without the visitor being able to say why. */
+  --demo-bar-h: 74px;
+  /* The landing page's own button treatment, so the CTA a visitor clicked on
+     the marketing site is visually the same control here. */
+  --demo-cta: linear-gradient(180deg, var(--accent-2), var(--accent));
+}
+
+body {
+  font-family: 'Inter', var(--sans);
+  padding-top: var(--demo-bar-h);
+}
+
+/* Headings match the landing page's display face. Body copy stays Inter: the
+   console is dense, and Sora at 12px is harder to scan than it is handsome. */
+:where(h1, h2, h3, .brand-name, .demo-word) {
+  font-family: 'Sora', 'Manrope', var(--sans);
+  letter-spacing: -0.01em;
+}
+
+.demo-bar {
+  position: fixed;
+  inset: 0 0 auto;
+  z-index: 60;
+  height: var(--demo-bar-h);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  /* Deliberately not the landing page's centred 1200px inset: the console
+     below is full-bleed, so centring only the bar would leave the mark
+     floating away from the app's own left edge. Matching the height, the mark
+     and the type is what carries the brand here; matching the gutter would
+     break the alignment it is meant to create. */
+  padding: 0 16px;
+  background: rgb(5 16 15 / 82%);
+  backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--line);
+}
+
+.demo-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  text-decoration: none;
+  color: var(--text);
+  flex: none;
+}
+
+.demo-logo {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: #000;
+  overflow: hidden;
+  flex: none;
+}
+
+/* The source mark is a square logo with its own padding baked in; the landing
+   header scales it up inside the clip so the glyph, not the margin, fills the
+   tile. Matching that transform is what makes the two headers read as one. */
+.demo-logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scale(1.75);
+  display: block;
+}
+
+.demo-word { font-size: 19px; font-weight: 800; letter-spacing: -0.015em; }
+.demo-word span { color: var(--accent); }
+
+.demo-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* Must be allowed to collapse: it is the only element in the bar that can
+     give up width, and without an explicit shrink the CTA is pushed past the
+     right edge on any viewport narrower than the full sentence. */
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.demo-tag {
+  flex: none;
+  font: 600 10.5px/1 var(--sans);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: rgb(55 224 184 / 12%);
+  border: 1px solid rgb(55 224 184 / 34%);
+  border-radius: 999px;
+  padding: 5px 9px;
+}
+
+.demo-note-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.demo-actions { margin-left: auto; display: flex; align-items: center; gap: 9px; flex: none; }
+
+.demo-link {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-decoration: none;
+  padding: 8px 10px;
+  border-radius: 9px;
+}
+
+.demo-link:hover { color: var(--text); background: var(--bg-hover); }
+
+.demo-cta {
+  font-size: 12.5px;
+  font-weight: 750;
+  color: var(--accent-ink);
+  text-decoration: none;
+  padding: 9px 14px;
+  border-radius: 11px;
+  background: var(--demo-cta);
+  box-shadow: 0 10px 30px rgb(55 224 184 / 22%);
+  white-space: nowrap;
+}
+
+.demo-cta:hover { filter: brightness(1.06); }
+
+.demo-bar :where(a):focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 2px;
+}
+
+/* The two app shells size themselves against the viewport, so the bar has to
+   be taken out of their height rather than laid over their content. */
+body { height: 100dvh; }
+.workspace, .shell { max-height: calc(100dvh - var(--demo-bar-h)); }
+
+/* Controls that would write to an immutable snapshot. They are removed, not
+   disabled: a greyed-out button in a demo reads as a product that is broken,
+   where an absent one reads as a product that is scoped. */
+[data-demo-hidden] { display: none !important; }
+
+@media (width <= 860px) {
+  .demo-note-text, .demo-link { display: none; }
+  /* The tag and the CTA compete for the same row on a phone, and the CTA is
+     the one that must survive intact. */
+  .demo-tag { display: none; }
+  .demo-word { font-size: 17px; }
+  .demo-cta { padding: 8px 12px; font-size: 12.5px; }
+  .demo-bar { gap: 10px; padding: 0 12px; }
+  .demo-actions { margin-left: auto; }
+}
+
+/* Orientation band on the dashboard.
+   -------------------------------------------------------------------------
+   The KPI row opens red, because the sample agent really was slow and really
+   did fail. Without a sentence of framing the visitor attributes the red to
+   the product rather than to the agent it is measuring, so this states the
+   reading and points at the evidence. It never restates or softens a number. */
+.demo-intro {
+  grid-column: 1 / -1;
+  margin: 0 0 14px;
+  padding: 16px 20px;
+  border: 1px solid rgb(55 224 184 / 22%);
+  border-left: 3px solid var(--accent);
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgb(55 224 184 / 7%), rgb(55 224 184 / 2%)),
+    var(--surface, #0a1a18);
+}
+
+.demo-intro-title {
+  margin: 0 0 6px;
+  font-family: var(--demo-display, "Sora", system-ui, sans-serif);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--ink, #eef6f3);
+}
+
+.demo-intro-text {
+  margin: 0;
+  max-width: 92ch;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--muted, #9db4b0);
+}
+
+.demo-intro-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  margin-top: 12px;
+}
+
+.demo-intro-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 10px;
+  background: var(--demo-cta, #37e0b8);
+  color: var(--accent-ink, #04211c);
+  font-size: 13px;
+  font-weight: 750;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.demo-intro-cta:hover { filter: brightness(1.06); }
+
+.demo-intro-hint {
+  font-size: 12.5px;
+  color: var(--muted, #9db4b0);
+}
+
+/* Closing prompt on a call, at the point where the visitor has just seen the
+   proof: the waveform, the transcript and the trace that explains the flag. */
+.demo-close-cta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 18px;
+  margin: 18px 0 8px;
+  padding: 16px 20px;
+  border: 1px solid rgb(55 224 184 / 20%);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgb(55 224 184 / 6%), transparent);
+}
+
+.demo-close-text {
+  font-size: 13.5px;
+  color: var(--ink, #eef6f3);
+}
+
+@media (width <= 860px) {
+  .demo-intro { padding: 14px 16px; }
+  .demo-intro-title { font-size: 15px; }
+  .demo-close-cta { flex-direction: column; align-items: flex-start; }
+}
+
+/* Keyboard focus.
+   -------------------------------------------------------------------------
+   Some controls in the console suppress the UA outline, which is survivable
+   for a daily user who knows the layout and not for a first-time visitor
+   tabbing through a public page. Scoped to :focus-visible so pointer users
+   never see a ring they did not ask for. */
+.demo-bar :where(a, button):focus-visible,
+body :where(a, button, input, select, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent-2, #6ff2d6);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Small screens.
+   -------------------------------------------------------------------------
+   The console is a working instrument: a waveform, a transcript and a trace
+   read side by side. It degrades honestly on a phone rather than pretending,
+   so the visitor is told where the full thing lives instead of concluding the
+   product is cramped. */
+.demo-desktop-note {
+  display: none;
+  margin: 0 0 12px;
+  padding: 11px 14px;
+  border: 1px solid rgb(55 224 184 / 20%);
+  border-radius: 12px;
+  background: rgb(55 224 184 / 6%);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted, #9db4b0);
+}
+
+@media (width <= 860px) {
+  .demo-desktop-note { display: block; }
+}

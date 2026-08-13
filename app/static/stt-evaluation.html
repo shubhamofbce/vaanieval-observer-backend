@@ -15,31 +15,31 @@
    ============================================================ */
 :root{
   /* surfaces, dark -> light */
-  --bg:#0a1020;
-  --panel:#121d31;
-  --raised:#16243c;
-  --inset:#1b2b47;
-  --line:#33507c;
-  --line-soft:#24395c;
+  --bg:#05100f;
+  --panel:#0d211f;
+  --raised:#102927;
+  --inset:#16342f;
+  --line:rgba(150,220,205,.26);
+  --line-soft:rgba(150,220,205,.14);
 
   /* text */
-  --text:#f0f5fc;
-  --muted:#c2d2e6;
-  --faint:#a3b8d3;
+  --text:#eef6f3;
+  --muted:#b6cdc8;
+  --faint:#9db4b0;
 
   /* status accents (all >= 4.5:1 on --bg, --panel, --raised, --inset) */
-  --blue:#8ccbff;
-  --green:#69e6b4;
-  --amber:#ffc978;
-  --red:#ff9ba3;
-  --purple:#c7b2ff;
+  --blue:#6ff2d6;
+  --green:#4fe0a8;
+  --amber:#f6c66b;
+  --red:#ff8a7a;
+  --purple:#8fb9ff;
 
   /* status surfaces */
-  --green-bg:#0f2c22; --green-line:#2f7f5f;
+  --green-bg:#0d2b22; --green-line:#2f8f6c;
   --amber-bg:#2e2413; --amber-line:#8a6a29;
   --red-bg:#2f1519;  --red-line:#8d4149;
-  --blue-bg:#12253e; --blue-line:#31598a;
-  --purple-bg:#221a44; --purple-line:#5b47a3;
+  --blue-bg:#0d2f2a; --blue-line:#2a7f70;
+  --purple-bg:#1e1b3c; --purple-line:#5b47a3;
 
   --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
   --sans:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
@@ -73,10 +73,10 @@ button,select{cursor:pointer}
 /* ============ TOP BAR ============ */
 .top{
   flex:0 0 auto;min-height:54px;padding:0 18px;display:flex;align-items:center;gap:16px;
-  border-bottom:1px solid var(--line-soft);background:#0d1728;
+  border-bottom:1px solid var(--line-soft);background:#0a1a18;
 }
 .brand{display:flex;align-items:center;gap:9px;font-size:14px;font-weight:750;letter-spacing:.2px;white-space:nowrap}
-.mark{display:grid;place-items:center;width:26px;height:26px;border-radius:8px;background:linear-gradient(140deg,#3d7ede,#8659e8);font-size:14px;color:#fff}
+.mark{display:grid;place-items:center;width:26px;height:26px;border-radius:8px;background:linear-gradient(140deg,#37e0b8,#6ff2d6);font-size:14px;color:#04211c}
 .callpick{display:flex;align-items:center;gap:8px}
 .callpick select{min-height:32px;padding:5px 9px;border:1px solid var(--line);border-radius:8px;background:var(--inset);font-size:12.5px}
 .runctx{display:flex;align-items:center;gap:10px;margin-left:auto;flex-wrap:wrap;justify-content:flex-end}
@@ -128,7 +128,7 @@ button,select{cursor:pointer}
 
 /* head-to-head strip inside a scorecard: production | challenger | difference */
 .vs{display:flex;border:1px solid var(--line-soft);border-radius:8px;overflow:hidden;font-size:11px}
-.vs > span{flex:1 1 0;min-width:0;padding:4px 7px;display:flex;flex-direction:column;gap:1px;background:#0d1a2c}
+.vs > span{flex:1 1 0;min-width:0;padding:4px 7px;display:flex;flex-direction:column;gap:1px;background:#102927}
 .vs > span + span{border-left:1px solid var(--line-soft)}
 .vs i{font-style:normal;font-size:11px;font-weight:700;letter-spacing:0;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .vs .p i{color:#7fb2e8} .vs .c i{color:#b3a2ee}
@@ -160,7 +160,7 @@ button,select{cursor:pointer}
 /* cost panel */
 .cost-inputs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
 .cost-inputs label{display:grid;gap:4px;color:var(--faint);font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.55px}
-.cost-inputs input{width:100%;min-height:34px;padding:6px 9px;border:1px solid var(--line);border-radius:8px;background:#0d1a2c;color:var(--text);font:700 13px var(--mono);font-variant-numeric:tabular-nums}
+.cost-inputs input{width:100%;min-height:34px;padding:6px 9px;border:1px solid var(--line);border-radius:8px;background:#102927;color:var(--text);font:700 13px var(--mono);font-variant-numeric:tabular-nums}
 .cost-inputs input:focus{border-color:var(--blue);outline:0}
 @media(max-width:500px){.cost-inputs{grid-template-columns:1fr}}
 .cost .big{font-size:31px;font-weight:770;letter-spacing:-1px;color:var(--green);line-height:1.05;font-variant-numeric:tabular-nums}
@@ -238,13 +238,13 @@ button,select{cursor:pointer}
 .arrow{color:#8fb6e0;font-size:14px}
 
 /* ============ TABS ============ */
-.tabs{flex:0 0 auto;display:flex;gap:5px;margin:14px 18px 0;padding:4px;border:1px solid var(--line-soft);border-radius:11px;background:#0d1728;width:max-content;max-width:calc(100% - 36px);overflow:auto}
+.tabs{flex:0 0 auto;display:flex;gap:5px;margin:14px 18px 0;padding:4px;border:1px solid var(--line-soft);border-radius:11px;background:#0a1a18;width:max-content;max-width:calc(100% - 36px);overflow:auto}
 .tab{display:flex;align-items:center;gap:8px;border:0;border-radius:8px;padding:8px 15px;background:transparent;color:var(--muted);font-size:13px;font-weight:650;white-space:nowrap}
 .tab .dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto}
 .tab .dot.warn{background:var(--amber)} .tab .dot.bad{background:var(--red)} .tab .dot.good{background:var(--green)}
 .tab .dot.neutral{background:#8ba4c4}
 .tab:hover{color:var(--text);background:#16253c}
-.tab[aria-selected="true"]{background:#20395c;color:#fff;box-shadow:inset 0 0 0 1px #3a5f92}
+.tab[aria-selected="true"]{background:#12332e;color:#fff;box-shadow:inset 0 0 0 1px #1d5a4c}
 .tab small{color:var(--faint);font-weight:550;font-size:11.5px}
 .tab[aria-selected="true"] small{color:#b7cde8}
 
@@ -484,7 +484,7 @@ mark.ins{background:#352663;color:#ded1ff;border-radius:4px;padding:1px 4px;font
 .transport{display:flex;align-items:center;gap:7px}
 .tbtn{display:grid;place-items:center;width:34px;height:34px;border:1px solid var(--line);border-radius:9px;background:var(--inset);color:var(--muted);font-size:13px}
 .tbtn:hover{border-color:var(--blue);color:var(--blue);background:#1d3050}
-.tbtn.main{width:42px;height:42px;background:#20395c;border-color:#3a5f92;color:#fff;font-size:15px}
+.tbtn.main{width:42px;height:42px;background:#12332e;border-color:#1d5a4c;color:#fff;font-size:15px}
 .clock{font-family:var(--mono);font-size:12.5px;color:var(--faint);white-space:nowrap}
 .clock b{display:block;color:var(--text);font-size:15px}
 .track{position:relative;height:46px;border:1px solid var(--line-soft);border-radius:9px;background:#0b1526;overflow:hidden;cursor:pointer}
@@ -509,7 +509,7 @@ mark.ins{background:#352663;color:#ded1ff;border-radius:4px;padding:1px 4px;font
 .scriptbody{overflow:auto;padding:8px 10px}
 .line{display:grid;grid-template-columns:106px 1fr 1fr 132px;gap:11px;align-items:start;padding:9px 7px;border-radius:10px;border:1px solid transparent;cursor:pointer}
 .line:hover{background:#172740}
-.line[aria-pressed="true"]{background:#1b3157;border-color:#3a5f92}
+.line[aria-pressed="true"]{background:#1b3157;border-color:#1d5a4c}
 .line[aria-pressed="true"] .stamp b{color:var(--green)}
 .stamp{font-family:var(--mono);font-size:11.2px;color:var(--faint)}
 .stamp b{display:block;font-family:var(--sans);font-size:12.5px;color:var(--text);margin-bottom:1px}
@@ -524,7 +524,7 @@ mark.ins{background:#352663;color:#ded1ff;border-radius:4px;padding:1px 4px;font
 /* ============ GLOSSARY DRAWER ============ */
 .drawer{position:fixed;inset:0;z-index:90;display:none;background:#04080fd0}
 .drawer.open{display:block}
-.drawer .sheet{position:absolute;top:0;right:0;bottom:0;width:min(920px,96vw);display:flex;flex-direction:column;background:#0d1728;border-left:1px solid var(--line-soft);box-shadow:var(--shadow)}
+.drawer .sheet{position:absolute;top:0;right:0;bottom:0;width:min(920px,96vw);display:flex;flex-direction:column;background:#0a1a18;border-left:1px solid var(--line-soft);box-shadow:var(--shadow)}
 .drawer header{display:flex;align-items:center;gap:11px;padding:14px 18px;border-bottom:1px solid var(--line-soft);flex-wrap:wrap}
 .drawer header h2{font-size:15.5px;font-weight:730}
 .drawer .filter{margin-left:auto;display:flex;gap:9px;align-items:center}
@@ -581,7 +581,7 @@ mark.ins{background:#352663;color:#ded1ff;border-radius:4px;padding:1px 4px;font
 .sc .head .t{font-size:11.5px;letter-spacing:0}
 .modal{position:fixed;inset:0;z-index:95;display:none;background:#04080fd0}
 .modal.open{display:flex;align-items:center;justify-content:center;padding:24px}
-.modal .box{width:min(440px,94vw);max-height:min(560px,88vh);display:flex;flex-direction:column;background:#0d1728;border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}
+.modal .box{width:min(440px,94vw);max-height:min(560px,88vh);display:flex;flex-direction:column;background:#0a1a18;border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}
 .modal .box > header{display:flex;align-items:flex-start;gap:10px;padding:14px 16px 11px;border-bottom:1px solid var(--line-soft)}
 .modal .box > header h2{font-size:14px;font-weight:730;line-height:1.35}
 .modal .box > header .s{display:block;color:var(--faint);font-size:11.5px;font-weight:600;margin-top:2px}
@@ -655,7 +655,7 @@ mark.ins{background:#352663;color:#ded1ff;border-radius:4px;padding:1px 4px;font
     <button class="btn" id="hiddenChip" type="button" title="Some metrics are hidden from this dashboard"><span class="badge warn" id="hiddenCount" style="padding:1px 7px">0</span> hidden · restore</button>
     <button class="btn" id="summaryToggle" type="button" aria-expanded="true" aria-controls="summaryPanel">Collapse summary</button>
     <button class="btn" id="guideToggle" type="button" aria-pressed="true">How to read this</button>
-    <span class="mockflag">Mockup · dummy data</span>
+    <span class="mockflag">Illustrative comparison · sample data</span>
   </div>
 </header>
 

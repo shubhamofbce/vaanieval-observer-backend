@@ -12,3 +12,9 @@ data/
 # Never commit provider keys.
 .env
 .env.*
+
+# Public demo build artifacts. `vendor/` is 11 MB of platform-specific wheels
+# unpacked for the Azure deploy, and `demo-data/` is the generated snapshot;
+# both are reproducible from scripts/build_demo_snapshot.py and pip.
+vendor/
+demo-data/

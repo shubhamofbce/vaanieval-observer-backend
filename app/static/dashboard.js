@@ -157,7 +157,7 @@
 
   function activeParams() {
     const params = new URLSearchParams();
-    const to = Date.now();
+    const to = window.vaaniNow();
     params.set('from_ms', String(to - rangeMs()));
     params.set('to_ms', String(to));
     Object.entries(state.filters).forEach(([key, value]) => {
@@ -172,8 +172,8 @@
   function frozenParams() {
     const params = new URLSearchParams();
     const range = (state.data && state.data.range) || {};
-    params.set('from_ms', String(range.from_ms != null ? range.from_ms : Date.now() - rangeMs()));
-    params.set('to_ms', String(range.to_ms != null ? range.to_ms : Date.now()));
+    params.set('from_ms', String(range.from_ms != null ? range.from_ms : window.vaaniNow() - rangeMs()));
+    params.set('to_ms', String(range.to_ms != null ? range.to_ms : window.vaaniNow()));
     Object.entries(state.filters).forEach(([key, value]) => {
       if (value) params.set(key, value);
     });
@@ -197,7 +197,9 @@
 
   function sampleLabel(n, noun) {
     if (n == null) return '';
-    return `n=${count(n)}${noun ? ` ${noun}` : ''}`;
+    // "n=75 turns" is statistician's shorthand that a buyer reads past. The
+    // number is the useful part, so say what it counts in words.
+    return `${count(n)}${noun ? ` ${noun}` : ''} measured`;
   }
 
   /* A delta the server refused to compute is shown as the refusal, not hidden.
@@ -213,7 +215,9 @@
       const tip = reason === 'below_minimum_sample'
         ? `Needs ${count(change && change.minimum)} samples in both periods; had ${count(change && change.count)} now and ${count(change && change.previous_count)} before.`
         : reasonText(reason);
-      const label = reason === 'below_minimum_sample' ? 'baseline too small' : 'trend unavailable';
+      const label = reason === 'below_minimum_sample'
+        ? 'not enough history to compare'
+        : 'trend unavailable';
       return `<span class="delta none" title="${esc(tip)}">${esc(label)}</span>`;
     }
     const ratio = change.ratio != null ? change.ratio : null;
@@ -389,9 +393,9 @@
 
     const p50 = ms(latency.p50);
     cards.push(kpiTile({
-      label: 'Response P50',
+      label: 'Typical reply wait',
       tone: latency.available && latency.p50_confident ? latencyTone(latency.p50) : '',
-      hint: 'Caller stops speaking to the first audible byte of the agent\u2019s reply, measured per turn with the same function the call view uses.',
+      hint: 'The median turn (P50). Caller stops speaking to the first audible byte of the agent\u2019s reply, measured per turn with the same function the call view uses.',
       value: latency.available && latency.p50_confident ? p50.text : null,
       unit: p50.unit,
       unavailable: !latency.available
@@ -403,8 +407,8 @@
 
     const p95 = ms(latency.p95);
     cards.push(kpiTile({
-      label: 'Response P95',
-      hint: 'The tail your callers actually complain about. Needs 20 measured turns to report and 100 to be stable; below that the value moves on a single slow turn.',
+      label: 'Worst-case reply wait',
+      hint: 'The 95th percentile (P95) \u2014 the tail your callers actually complain about. Needs 20 measured turns to report and 100 to be stable; below that the value moves on a single slow turn.',
       value: latency.available && latency.p95_confident ? p95.text : null,
       unit: p95.unit,
       unavailable: !latency.available
@@ -414,7 +418,7 @@
       selector: 'slowest',
       foot: [
         sampleLabel(latency.count, 'turns'),
-        latency.p95_confident && !latency.p95_stable ? '<span class="delta none" title="Under 100 samples this percentile moves on one slow turn.">unstable</span>' : '',
+        latency.p95_confident && !latency.p95_stable ? '<span class="delta none" title="Under 100 samples this percentile moves on one slow turn.">still a small sample</span>' : '',
         deltaChip(latency.change_p95),
       ].filter(Boolean).join(' · '),
     }));
@@ -656,11 +660,19 @@
 
   function statChip(opts) {
     const clickable = !!opts.selector;
-    return `<button type="button" class="stat-chip${opts.tone ? ` ${opts.tone}` : ''}" data-static="${!clickable}"
-      ${clickable ? `data-selector="${esc(opts.selector)}" data-title="${esc(opts.title || opts.label)}"` : 'tabindex="-1" aria-disabled="true"'}
-      title="${esc(opts.hint || '')}">
-      <span>${esc(opts.label)}</span><b>${opts.value}</b>
-    </button>`;
+    const body = `<span>${esc(opts.label)}</span><b>${opts.value}</b>`;
+    const tone = opts.tone ? ` ${opts.tone}` : '';
+    const hint = esc(opts.hint || '');
+    // A chip with nothing to drill into is a readout, not a control. Rendering
+    // it as a button gave it the affordance of one, so a visitor clicked it and
+    // nothing happened - which reads as a broken product rather than as a
+    // figure that simply has no detail behind it.
+    if (!clickable) {
+      return `<span class="stat-chip${tone}" data-static="true" title="${hint}">${body}</span>`;
+    }
+    return `<button type="button" class="stat-chip${tone}" data-static="false"
+      data-selector="${esc(opts.selector)}" data-title="${esc(opts.title || opts.label)}"
+      title="${hint}">${body}</button>`;
   }
 
   function renderStages(data) {
@@ -1018,7 +1030,7 @@
   // The console header shows "Updated HH:MM:SS"; the dashboard says the same
   // thing in the same slot so the two pages read as one product.
   function freshnessText(generatedAt) {
-    const at = generatedAt ? new Date(generatedAt) : new Date();
+    const at = generatedAt ? new Date(generatedAt) : window.vaaniDate();
     if (Number.isNaN(at.getTime())) return '';
     return `Updated ${at.toLocaleTimeString()}`;
   }

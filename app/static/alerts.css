@@ -235,3 +235,11 @@
 .alert.is-warning .alert-agent-value { color: var(--warn); }
 .alert-agent-id { font-family: var(--mono); color: var(--text-dim); }
 .alert-agent-calls { margin-left: auto; color: var(--text-faint); font-size: 12px; }
+
+.alert-agent-missing {
+  margin: 8px 0 0;
+  padding: 0 11px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-faint);
+}

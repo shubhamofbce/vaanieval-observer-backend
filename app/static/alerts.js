@@ -58,11 +58,15 @@
     return `/#/call/${encodeURIComponent(sessionId)}${suffix}`;
   }
 
-  function dashboardHref(alert) {
-    const params = new URLSearchParams();
+  function dashboardHref(alert, { drilldown = true } = {}) {
+    // The link promises a specific set of calls, so it has to arrive narrowed
+    // to that set: same window, same agent, and the drill-down the alert
+    // counted already open. Landing on a bare dashboard would leave the reader
+    // to reconstruct which calls the number referred to.
+    const params = new URLSearchParams({ range: '7d' });
     if (alert.agent_id) params.set('agent_id', alert.agent_id);
-    const query = params.toString();
-    return `/dashboard${query ? `?${query}` : ''}`;
+    if (drilldown) params.set('drilldown', alert.selector);
+    return `/dashboard?${params.toString()}`;
   }
 
   /* One finding, one card.
@@ -93,6 +97,16 @@
       (a.head.severity !== 'critical') - (b.head.severity !== 'critical')
       || (b.head.excess || 0) - (a.head.excess || 0)
     ));
+  }
+
+  /* Agents whose calls are in the evidence but which have no per-agent row.
+     Without a word of explanation this reads as the page contradicting itself:
+     a channel named in every linked call, absent from the list of channels
+     breaching the rule. */
+  function missing(item) {
+    const listed = new Set(item.agents.map((entry) => entry.agent_id));
+    const seen = (item.head.evidence || []).map((call) => call.agent_id).filter(Boolean);
+    return [...new Set(seen)].filter((id) => !listed.has(id));
   }
 
   function agentRow(alert) {
@@ -133,6 +147,8 @@
               ? 'Also breaching on its own numbers'
               : shown.length === 1 ? 'The agent breaching it' : 'Agents breaching it, worst first'}</p>
             ${shown.map(agentRow).join('')}
+            ${missing(item).map((id) => `<p class="alert-agent-missing">${esc(id)} is not listed
+              here — too few measured turns for a number of its own, so it appears under Holding.</p>`).join('')}
           </div>` : ''}
         <div class="alert-evidence">
           <p class="alert-evidence-title">${alert.scope === 'fleet'

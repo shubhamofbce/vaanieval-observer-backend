@@ -1052,6 +1052,11 @@
         $('#conn-state').title = payload.generated_at || '';
         renderFilters();
         renderBody();
+        if (state.pendingDrilldown) {
+          const selector = state.pendingDrilldown;
+          state.pendingDrilldown = null;
+          openDrawer({ selector });
+        }
       })
       .catch((err) => {
         if (id !== state.reqId) return;
@@ -1074,6 +1079,11 @@
       const value = params.get(f.key);
       if (value) state.filters[f.key] = value;
     });
+    // An alert links here saying "see all 14 calls". Landing on an unfiltered
+    // dashboard would make the reader re-derive which 14, so the drill-down the
+    // alert was counting is opened for them. Applied once, on first load only,
+    // so changing a filter afterwards does not keep reopening it.
+    state.pendingDrilldown = params.get('drilldown') || null;
   }
 
   function writeUrl() {

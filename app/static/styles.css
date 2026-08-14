@@ -29,6 +29,9 @@
   --ok: #4fe0a8;
   --warn: #f6c66b;
   --danger: #ff8a7a;
+  /* The one non-teal hue in the console, used only where a message is shown as
+     it would appear in Slack. Kept as a token so it cannot spread by copy. */
+  --channel-slack: #8f7ce8;
 
   /* The stage colours stay mutually distinct on the darker green ground: TTS
      keeps the brand teal because it is the stage the accent already marks,

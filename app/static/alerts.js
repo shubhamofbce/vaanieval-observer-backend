@@ -198,9 +198,19 @@
         <div class="alerts-empty">Nothing is breaching. Every rule below is inside its threshold.</div>`}
       <h2 class="alerts-section-title">Holding</h2>
       ${quiet.map(quietRow).join('')}
-      <p class="alerts-note">These rules ship as a fixed set for the public demo, so nothing here
-        can be edited or acknowledged. In a deployment you own, rules are yours: thresholds per
-        agent, per environment, and delivery to the place your team already watches.</p>`;
+      <p class="alerts-note">These four rules ship with the demo and cannot be edited or acknowledged
+        here. <a href="#your-rules">Write your own below</a> — same data, your thresholds, your
+        channel — or take the whole thing into a deployment you own.</p>`;
+  }
+
+  /* The agents the fleet actually has. Taken from the alert payload rather than
+     fetched again: the server already evaluated every rule per agent, so this
+     list cannot drift from the one the rules above were measured against. */
+  function agentIds(data) {
+    const ids = (data.firing || []).concat(data.quiet || [])
+      .map((entry) => entry.agent_id)
+      .filter(Boolean);
+    return [...new Set(ids)].sort();
   }
 
   function failed(error) {
@@ -214,6 +224,9 @@
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return response.json();
     })
-    .then(render)
+    .then((data) => {
+      render(data);
+      if (window.vaaniMonitors) window.vaaniMonitors.mount(agentIds(data));
+    })
     .catch(failed);
 }());

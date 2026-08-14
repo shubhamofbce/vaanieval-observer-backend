@@ -119,3 +119,36 @@ class TestShape:
     def test_rule_ids_are_unique(self) -> None:
         ids = [each.id for each in alerts.RULES]
         assert len(ids) == len(set(ids))
+
+
+class TestBuilderStaysInStepWithTheServer:
+    """The rule builder on /alerts evaluates in the browser.
+
+    That is a deliberate trade - the demo takes no writes, so a visitor's rule
+    cannot be evaluated server-side - and it buys one specific risk: the client
+    can drift from the judgement the server publishes six inches further up the
+    same page. A visitor who scopes a rule to an agent the Holding list calls
+    "not measurable", and is shown a confident percentage instead, has caught
+    the product contradicting itself. These tests pin the two gates where that
+    would happen.
+    """
+
+    def source(self) -> str:
+        from pathlib import Path
+        return (Path(__file__).resolve().parents[1] / "app/static/monitors.js").read_text()
+
+    def test_minimum_sample_matches_the_server(self) -> None:
+        import re
+        found = re.search(r"MINIMUM_CALLS\s*=\s*(\d+)", self.source())
+        assert found, "the builder must declare the sample floor it enforces"
+        assert int(found.group(1)) == alerts.MINIMUM_CALLS
+
+    def test_audible_lag_keeps_the_eligible_turn_gate(self) -> None:
+        """`_read_lag` withholds a number under ten measured turns."""
+        assert "Number(block.eligible || 0) < 10" in self.source()
+
+    def test_the_page_loads_the_builder(self) -> None:
+        from pathlib import Path
+        html = (Path(__file__).resolve().parents[1] / "app/static/alerts.html").read_text()
+        assert "/assets/monitors.js" in html
+        assert 'id="monitors"' in html

@@ -243,3 +243,289 @@
   line-height: 1.55;
   color: var(--text-faint);
 }
+
+/* ---------------------------------------------------------------- rule builder
+ * A form is where a demo usually gives itself away: dropdowns that accept
+ * anything and confirm nothing. This one is built as four numbered steps, each
+ * one a decision, with the rule read back in English underneath and checked
+ * against the real sample as you type. That is the difference between a form
+ * and a monitor.
+ */
+
+.mon-intro {
+  margin: 0 0 16px;
+  max-width: 72ch;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+.mon-intro b { color: var(--text); font-weight: 650; }
+
+.mon-form {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+  overflow: hidden;
+}
+
+.mon-step {
+  border: 0;
+  border-top: 1px solid var(--line-soft);
+  margin: 0;
+  padding: 16px 18px 18px;
+}
+.mon-step:first-child { border-top: 0; }
+
+.mon-step legend {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0;
+  margin-bottom: 13px;
+  font: 700 13px/1 var(--sans);
+  color: var(--text);
+}
+
+.mon-step-n {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font: 700 11px/1 var(--mono);
+}
+
+.mon-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 14px;
+  align-items: flex-end;
+}
+
+.mon-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+/* Only the caption. The threshold wrapper is a span too, and picking up the
+   uppercase here turned its unit into a shouted "MS". */
+.mon-field > span:first-child {
+  font: 600 9.5px/1 var(--sans);
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.mon-field.is-off { opacity: .45; }
+.mon-grow { flex: 1 1 260px; }
+
+.mon-field select,
+.mon-field input[type="text"],
+.mon-field input[type="number"] {
+  min-width: 150px;
+  padding: 7px 9px;
+  font-size: 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  color: var(--text);
+}
+.mon-field input[type="text"] { width: 100%; }
+.mon-field select:disabled { color: var(--text-faint); cursor: not-allowed; }
+.mon-field select:focus-visible,
+.mon-field input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Unit inside the box, the way a real threshold field reads. Without it the
+   number is ambiguous the moment the metric changes: 25 could be percent or
+   milliseconds, and the two are three orders of magnitude apart. */
+.mon-threshold { position: relative; display: inline-flex; align-items: center; }
+.mon-threshold input { width: 150px; padding-right: 40px; }
+.mon-threshold b {
+  position: absolute;
+  right: 10px;
+  font: 600 11.5px/1 var(--mono);
+  color: var(--text-faint);
+  pointer-events: none;
+}
+
+.mon-help {
+  margin: 11px 0 0;
+  max-width: 70ch;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-faint);
+}
+
+.mon-channels { display: flex; gap: 8px; }
+
+.mon-channel {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--text-dim);
+  transition: border-color .12s ease, color .12s ease, background .12s ease;
+}
+.mon-channel input { position: absolute; opacity: 0; width: 0; height: 0; }
+.mon-channel:hover { border-color: var(--line-strong); color: var(--text); }
+.mon-channel.is-on { border-color: var(--accent); color: var(--text); background: var(--accent-soft); }
+.mon-channel:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* The live verdict. The whole point of the section: a threshold you can see the
+   consequence of before you commit to it. */
+.mon-live {
+  margin-top: 14px;
+  padding: 10px 13px;
+  border: 1px solid var(--line-soft);
+  border-left: 3px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.mon-live.is-alerting { border-left-color: var(--danger); color: var(--danger); font-weight: 650; }
+.mon-live.is-ok { border-left-color: var(--ok); color: var(--ok); }
+.mon-live.is-nodata { border-left-color: var(--warn); color: var(--text-dim); }
+
+.mon-sentence {
+  margin: 14px 0 0;
+  padding: 11px 13px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--text);
+}
+
+.mon-error {
+  margin: 11px 0 0;
+  font-size: 12.5px;
+  color: var(--danger);
+}
+
+.mon-actions { display: flex; gap: 9px; margin-top: 14px; }
+
+/* --------------------------------------------------------------- the preview */
+
+.mon-preview { margin-top: 14px; }
+
+.mon-preview-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  padding: 14px 16px;
+}
+.mon-preview-card.is-slack { border-left: 3px solid var(--channel-slack); }
+.mon-preview-card.is-email { border-left: 3px solid var(--accent); }
+
+.mon-preview-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.mon-preview-where {
+  font: 600 11.5px/1 var(--mono);
+  color: var(--text-dim);
+}
+.mon-preview-head .btn { margin-left: auto; }
+
+.mon-preview-title { margin: 0 0 6px; font: 700 14px/1.35 var(--sans); }
+.mon-preview-body { margin: 0; font-size: 13px; line-height: 1.55; color: var(--text-dim); }
+.mon-preview-link { margin: 8px 0 0; font: 600 12.5px/1 var(--mono); color: var(--accent); }
+.mon-preview-note {
+  margin: 12px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-faint);
+}
+
+/* ----------------------------------------------------------------- your rules */
+
+.mon-list-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin: 26px 0 10px;
+}
+.mon-list-title {
+  margin: 0;
+  font: 700 11px/1 var(--sans);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.mon-count { margin-left: auto; font-size: 12px; color: var(--text-faint); }
+
+.mon-rule {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  padding: 14px 16px;
+  margin-bottom: 10px;
+}
+.mon-rule.is-alerting { border-left-color: var(--danger); }
+.mon-rule.is-muted { border-left-color: var(--line); }
+.mon-rule.is-muted .mon-rule-name { color: var(--text-dim); }
+
+.mon-rule-top { display: flex; align-items: baseline; flex-wrap: wrap; gap: 10px; }
+.mon-rule-name { margin: 0; font: 700 14px/1.35 var(--sans); }
+.mon-rule-sev { margin-left: auto; font: 600 11.5px/1 var(--mono); color: var(--text-faint); }
+
+.mon-state {
+  flex: none;
+  font: 700 10px/1 var(--sans);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  padding: 5px 8px;
+  border-radius: 999px;
+  color: var(--text-faint);
+  background: var(--bg-inset);
+}
+.mon-state.is-alerting { color: var(--danger); background: rgb(255 138 122 / 13%); }
+.mon-state.is-ok { color: var(--ok); background: rgb(79 224 168 / 12%); }
+
+.mon-rule-sentence { margin: 9px 0 0; font-size: 13px; line-height: 1.55; color: var(--text-dim); }
+.mon-rule-reading { margin: 7px 0 0; font-size: 12.5px; color: var(--text-faint); }
+
+.mon-rule-actions {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  padding-top: 11px;
+  border-top: 1px solid var(--line-soft);
+}
+.mon-link { font-size: 12.5px; font-weight: 600; color: var(--accent); text-decoration: none; margin-right: auto; }
+.mon-link:hover { text-decoration: underline; }
+
+.mon-empty {
+  padding: 22px 20px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-lg);
+  color: var(--text-dim);
+}
+.mon-empty p { margin: 0; font-size: 13px; line-height: 1.6; max-width: 64ch; }
+.mon-empty b { color: var(--text); }
+
+@media (width <= 900px) {
+  .mon-row { flex-direction: column; align-items: stretch; }
+  .mon-field select, .mon-field input, .mon-threshold input { width: 100%; min-width: 0; }
+}
+
+/* Marks a rule the demo seeded rather than one the visitor wrote. Without it a
+   first-time visitor would read two strangers' rules as their own. */
+.mon-tag {
+  flex: none;
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font: 600 10px/1.3 var(--sans);
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.mon-link.is-off { color: var(--text-faint); cursor: default; }

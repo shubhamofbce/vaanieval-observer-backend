@@ -12,10 +12,12 @@
  *    a frame of the wrong theme on every load, which on a dark-preferring
  *    visitor is a white flash straight into the eyes.
  *
- * 2. The button reflects *state*, not action: it is a pressed/unpressed switch
- *    labelled "Dark", not a button that says "Switch to light". A control that
- *    renames itself as you use it cannot be read at a glance, and screen reader
- *    users get the state from aria-pressed rather than from re-read copy.
+ * 2. The control is a switch, so it reports *state*, not an action: knob left
+ *    is light, knob right is dark, and both icons stay on the track the whole
+ *    time. A control that renames itself as you use it cannot be read at a
+ *    glance, and there is no honest resting label for two states anyway.
+ *    `role="switch"` plus `aria-checked` gives assistive tech the same reading
+ *    the knob position gives the eye.
  */
 (function () {
   const KEY = 'vaani.theme';
@@ -38,15 +40,12 @@
     if (meta) meta.setAttribute('content', theme);
     document.querySelectorAll('[data-theme-toggle]').forEach((btn) => {
       const dark = theme === 'dark';
-      /* An action button, not a state badge: the icon and the word both name
-         the theme the visitor gets by clicking, so a sun never sits next to
-         the word "Dark". */
+      /* State, not action: the knob's side names the theme you are in. */
       btn.setAttribute('data-mode', theme);
       btn.removeAttribute('aria-pressed');
-      const label = btn.querySelector('.theme-toggle-label');
-      if (label) label.textContent = dark ? 'Light' : 'Dark';
-      btn.setAttribute('aria-label', dark ? 'Switch to light theme' : 'Switch to dark theme');
-      btn.title = (dark ? 'Switch to light theme' : 'Switch to dark theme') + '  ·  d';
+      btn.setAttribute('aria-checked', dark ? 'true' : 'false');
+      btn.setAttribute('aria-label', 'Dark theme');
+      btn.title = 'Dark theme  ·  d';
     });
     window.dispatchEvent(new CustomEvent('vaani:themechange', { detail: { theme } }));
   }
@@ -62,16 +61,19 @@
   function button() {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'theme-toggle';
+    btn.className = 'theme-switch';
     btn.id = 'theme-toggle';
     btn.setAttribute('data-theme-toggle', '');
+    btn.setAttribute('role', 'switch');
     btn.setAttribute('data-mode', 'light');
-    /* Both icons ship and CSS shows the relevant one, so toggling never waits
-       on a re-render and the control cannot flicker between glyphs. */
+    /* Both icons ship and sit above the knob, so toggling never waits on a
+       re-render and the control cannot flicker between glyphs. */
     btn.innerHTML =
-      `<svg class="theme-icon theme-icon--sun" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">${ICON_SUN}</svg>` +
-      `<svg class="theme-icon theme-icon--moon" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">${ICON_MOON}</svg>` +
-      '<span class="theme-toggle-label">Dark</span>';
+      '<span class="theme-switch-track" aria-hidden="true">' +
+      '<span class="theme-switch-knob"></span>' +
+      `<svg class="theme-switch-icon theme-switch-icon--sun" viewBox="0 0 16 16" width="12" height="12">${ICON_SUN}</svg>` +
+      `<svg class="theme-switch-icon theme-switch-icon--moon" viewBox="0 0 16 16" width="12" height="12">${ICON_MOON}</svg>` +
+      '</span>';
     btn.addEventListener('click', () => {
       set(root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
     });

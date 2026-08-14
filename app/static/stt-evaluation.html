@@ -695,28 +695,48 @@ mark.ins{background:var(--purple-bg);color:var(--purple);border-radius:4px;paddi
   .pop{width:min(392px,94vw)}
 }
 
-/* ---------------------------------------------------------- theme toggle */
-/* The shared toggle (injected by theme.js into the demo bar's .demo-actions)
+/* ---------------------------------------------------------- theme switch */
+/* The shared switch (injected by theme.js into the demo bar's .demo-actions)
    normally styles itself from styles.css, which this standalone page does not
-   load — so its rules are mirrored here, mapped onto this page's tokens. It
-   reads as a small bordered pill with an icon plus the word the click delivers
-   ("Dark" in light mode, "Light" in dark mode). */
-.theme-toggle {
-  display: inline-flex; align-items: center; gap: 6px;
-  height: 30px; padding: 0 10px;
-  border: 1px solid var(--line); border-radius: 8px;
-  background: transparent; color: var(--muted);
-  font: 500 12px/1 var(--sans); cursor: pointer;
-  transition: background .15s ease, color .15s ease, border-color .15s ease;
+   load — so its rules are mirrored here, mapped onto this page's tokens. Knob
+   left is light, knob right is dark, and both icons stay on the track. */
+.theme-switch {
+  display: inline-flex; align-items: center;
+  padding: 0; border: 0; background: none; cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
 }
-.theme-toggle:hover { background: var(--hover); color: var(--text); border-color: var(--line-strong); }
-.theme-toggle:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
-.theme-icon { flex: none; }
-/* The icon and the label both name the theme a click delivers. */
-.theme-icon--sun { display: none; }
-.theme-toggle[data-mode="dark"] .theme-icon--sun { display: block; }
-.theme-toggle[data-mode="dark"] .theme-icon--moon { display: none; }
-@media (max-width: 900px) { .theme-toggle-label { display: none; } .theme-toggle { padding: 0 8px; } }
+.theme-switch-track {
+  position: relative; display: block;
+  width: 48px; height: 26px; border-radius: 999px;
+  /* A tint of the line colour, which inverts with the theme, rather than a
+     fixed surface token that would leave the knob invisible in dark. */
+  border: 1px solid var(--line); background: var(--line-soft);
+  transition: border-color .15s ease, background .15s ease;
+}
+.theme-switch:hover .theme-switch-track { border-color: var(--line-strong); }
+.theme-switch:focus-visible { outline: none; }
+.theme-switch:focus-visible .theme-switch-track { outline: 2px solid var(--blue); outline-offset: 2px; }
+.theme-switch-knob {
+  position: absolute; top: 2px; left: 2px; width: 20px; height: 20px; border-radius: 50%;
+  /* Light in both themes, so the icon under it always inks against a light
+     disc rather than against the theme. */
+  background: var(--switch-knob, #ffffff);
+  box-shadow: 0 1px 2px rgb(15 27 42 / 30%), 0 0 0 1px rgb(15 27 42 / 8%);
+  transition: transform .22s cubic-bezier(.32, .72, 0, 1);
+}
+[data-theme="dark"] .theme-switch-knob { --switch-knob: #dbe5f4; }
+.theme-switch[data-mode="dark"] .theme-switch-knob { transform: translateX(22px); }
+.theme-switch-icon {
+  position: absolute; top: 50%; margin-top: -6px;
+  color: var(--muted); opacity: .5;
+  transition: color .15s ease, opacity .15s ease;
+}
+.theme-switch-icon--sun { left: 7px; }
+.theme-switch-icon--moon { left: 29px; }
+/* The active icon is the one the knob has arrived under. */
+.theme-switch[data-mode="light"] .theme-switch-icon--sun,
+.theme-switch[data-mode="dark"] .theme-switch-icon--moon { color: #0f1b2a; opacity: 1; }
+@media (prefers-reduced-motion: reduce) { .theme-switch-knob { transition: none; } }
 </style>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>

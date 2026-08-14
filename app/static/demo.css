@@ -108,6 +108,9 @@ body {
 .demo-note-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .demo-actions { margin-left: auto; display: flex; align-items: center; gap: 9px; flex: none; }
+/* The switch is a setting, not one of the bar's actions, so it gets room to
+   sit apart from the links and the booking button beside it. */
+.demo-actions .theme-switch { margin-right: 7px; }
 
 .demo-link {
   font-size: 12.5px;

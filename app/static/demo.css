@@ -160,54 +160,130 @@ body { height: 100dvh; }
   .demo-actions { margin-left: auto; }
 }
 
-/* Orientation band on the dashboard.
+/* Orientation control and dialog.
    -------------------------------------------------------------------------
-   The KPI row opens red, because the sample agent really was slow and really
-   did fail. Without a sentence of framing the visitor attributes the red to
-   the product rather than to the agent it is measuring, so this states the
-   reading and points at the evidence. It never restates or softens a number. */
-.demo-intro {
-  grid-column: 1 / -1;
-  margin: 0 0 14px;
-  padding: 16px 20px;
-  border: 1px solid rgb(55 224 184 / 22%);
-  border-left: 3px solid var(--accent);
-  border-radius: 14px;
+   The framing that used to sit in a band above the KPIs now opens from the
+   header. The trigger is sized as a quiet tertiary control so it never
+   competes with "Book a demo", and carries an unread dot until it is opened
+   once, which is what points a first-time visitor at it without spending any
+   of the page on the sentence. */
+.demo-guide-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 11px 7px 8px;
+  border: 1px solid rgb(55 224 184 / 26%);
+  border-radius: 999px;
+  background: rgb(55 224 184 / 8%);
+  color: var(--text, #eef6f3);
+  font: 600 12.5px/1 var(--sans, system-ui, sans-serif);
+  cursor: pointer;
+}
+
+.demo-guide-btn:hover { background: rgb(55 224 184 / 15%); border-color: rgb(55 224 184 / 44%); }
+
+.demo-guide-icon {
+  display: grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: rgb(55 224 184 / 22%);
+  color: var(--accent, #37e0b8);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.demo-guide-btn.is-new::after {
+  content: "";
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent, #37e0b8);
+  box-shadow: 0 0 0 3px rgb(55 224 184 / 22%);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .demo-guide-btn.is-new::after { animation: demo-guide-pulse 2.4s ease-in-out infinite; }
+}
+
+@keyframes demo-guide-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgb(55 224 184 / 22%); }
+  50% { box-shadow: 0 0 0 6px rgb(55 224 184 / 6%); }
+}
+
+.demo-guide-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(2 10 9 / 66%);
+  backdrop-filter: blur(2px);
+}
+
+.demo-guide-card {
+  position: relative;
+  width: min(560px, 100%);
+  padding: 24px 26px;
+  border: 1px solid rgb(55 224 184 / 24%);
+  border-radius: 18px;
   background:
     linear-gradient(180deg, rgb(55 224 184 / 7%), rgb(55 224 184 / 2%)),
     var(--surface, #0a1a18);
+  box-shadow: 0 30px 80px rgb(0 0 0 / 55%);
 }
 
-.demo-intro-title {
-  margin: 0 0 6px;
+.demo-guide-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted, #9db4b0);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.demo-guide-close:hover { background: var(--bg-hover, rgb(255 255 255 / 6%)); color: var(--ink, #eef6f3); }
+
+.demo-guide-title {
+  margin: 0 34px 10px 0;
   font-family: var(--demo-display, "Sora", system-ui, sans-serif);
-  font-size: 16px;
+  font-size: 18px;
   font-weight: 700;
   letter-spacing: -0.01em;
   color: var(--ink, #eef6f3);
 }
 
-.demo-intro-text {
+.demo-guide-text {
   margin: 0;
-  max-width: 92ch;
   font-size: 13.5px;
-  line-height: 1.6;
+  line-height: 1.65;
   color: var(--muted, #9db4b0);
 }
 
-.demo-intro-actions {
+.demo-guide-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 10px 14px;
-  margin-top: 12px;
+  margin-top: 18px;
 }
 
-.demo-intro-cta {
+.demo-guide-cta {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 14px;
+  padding: 9px 15px;
   border-radius: 10px;
   background: var(--demo-cta, #37e0b8);
   color: var(--accent-ink, #04211c);
@@ -217,9 +293,9 @@ body { height: 100dvh; }
   white-space: nowrap;
 }
 
-.demo-intro-cta:hover { filter: brightness(1.06); }
+.demo-guide-cta:hover { filter: brightness(1.06); }
 
-.demo-intro-hint {
+.demo-guide-hint {
   font-size: 12.5px;
   color: var(--muted, #9db4b0);
 }
@@ -245,9 +321,13 @@ body { height: 100dvh; }
 }
 
 @media (width <= 860px) {
-  .demo-intro { padding: 14px 16px; }
-  .demo-intro-title { font-size: 15px; }
   .demo-close-cta { flex-direction: column; align-items: flex-start; }
+  /* The label would push the booking CTA off the bar, so the trigger keeps
+     only its icon — the same affordance every help control collapses to. */
+  .demo-guide-label { display: none; }
+  .demo-guide-btn { padding: 7px; }
+  .demo-guide-card { padding: 20px; }
+  .demo-guide-title { font-size: 16px; }
 }
 
 /* Keyboard focus.

@@ -151,4 +151,4 @@ class TestBuilderStaysInStepWithTheServer:
         from pathlib import Path
         html = (Path(__file__).resolve().parents[1] / "app/static/alerts.html").read_text()
         assert "/assets/monitors.js" in html
-        assert 'id="monitors"' in html
+        assert 'id="alerts-body"' in html

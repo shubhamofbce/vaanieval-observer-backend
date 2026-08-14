@@ -1,531 +1,664 @@
-/* Alerts.
+/* Alerts console.
  * ---------------------------------------------------------------------------
- * The page answers one question - what should I look at first - so it is a
- * single ranked column, not a grid of equal cards. A grid asks the reader to
- * compare; a column tells them the order.
+ * The page answers three questions and holds them in one viewport: what is
+ * wrong now, what is being watched, and how do I add a watch of my own.
+ *
+ * The first version stacked those three as a document - firing cards, then a
+ * holding list, then a four-step form - which ran to about four screens. A
+ * monitoring page you have to scroll to see the state of is not a monitoring
+ * page; the reader loses the count the moment it leaves the viewport. So the
+ * shell is fixed furniture and only the rule table scrolls, the way every
+ * console the audience already uses behaves.
+ *
+ * One row per rule, not per rule-and-scope. The server evaluates each rule for
+ * the fleet and again for every agent, so four rules arrive as twenty entries;
+ * rendered flat that is twenty problems on a page that has four. The row
+ * carries the fleet verdict and opens to the per-agent breakdown and the
+ * recordings underneath it.
+ *
+ * Composing a rule is a task, not a view, so it lives in a drawer over the
+ * table rather than below it. The list a visitor is comparing against stays on
+ * screen, and the page keeps one job per surface.
  */
 
+.alerts-shell { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+
 .alerts-main {
-  display: block;
-  overflow: auto;
-  /* The workspace is a grid track. Without this the cards size themselves from
-     their content and push the whole column past the viewport. */
+  display: flex;
+  flex-direction: column;
+  /* The workspace is a flex row; without this the table's widest row sets the
+     pane width and pushes the column past the viewport. */
   min-width: 0;
-  padding: 22px 26px 60px;
+  /* Only .ac-scroll scrolls. Two nested scrollports would put a second bar
+     behind the first and let the header drift off screen. */
+  overflow: hidden;
 }
 
-.alerts-body { max-width: 1080px; margin: 0 auto; }
+.ac {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
 
-.alerts-head { margin: 0 0 20px; }
+/* ------------------------------------------------------------------ header */
 
-.alerts-title {
-  margin: 0 0 6px;
-  font: 800 21px/1.2 var(--display, var(--sans));
+.ac-head {
+  flex: none;
+  padding: 15px 22px 12px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.ac-head-row { display: flex; align-items: flex-start; gap: 16px; }
+
+.ac-title {
+  margin: 0;
+  font: 800 20px/1.15 var(--display, var(--sans));
   letter-spacing: -0.01em;
 }
 
-.alerts-sub {
-  margin: 0;
-  max-width: 68ch;
-  font-size: 13.5px;
-  line-height: 1.55;
+.ac-sub {
+  margin: 5px 0 0;
+  max-width: 74ch;
+  font-size: 12.5px;
+  line-height: 1.5;
   color: var(--text-dim);
 }
 
-.alerts-count {
+.ac-head-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex: none; }
+
+/* ------------------------------------------------------------------- chips */
+/* The counts and the filter are the same control. A count that cannot be
+   clicked makes the reader scan the table for the two rows it refers to. */
+
+.ac-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  padding: 9px 22px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-raised);
+}
+
+.ac-chip {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  margin-top: 12px;
-  padding: 6px 11px;
+  padding: 5px 11px 5px 9px;
   border-radius: 999px;
-  font: 600 12px/1 var(--sans);
   border: 1px solid var(--line);
-  background: var(--bg-raised);
+  background: var(--bg-inset);
+  color: var(--text-dim);
+  font: 600 12px/1 var(--sans);
+  cursor: pointer;
+  transition: border-color .12s ease, color .12s ease, background .12s ease;
+}
+.ac-chip:hover { border-color: var(--line-strong); color: var(--text); }
+.ac-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ac-chip b { font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+.ac-chip[aria-pressed="true"] {
+  border-color: var(--line-strong);
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.ac-chip .ac-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); flex: none; }
+.ac-chip.is-alerting .ac-dot { background: var(--danger); }
+.ac-chip.is-ok .ac-dot { background: var(--ok); }
+.ac-chip.is-nodata .ac-dot { background: var(--text-faint); }
+.ac-chip.is-muted .ac-dot { background: var(--line-strong); }
+.ac-chip.is-alerting[aria-pressed="true"] { border-color: rgb(255 138 122 / 45%); }
+.ac-chip.is-alerting b { color: var(--danger); }
+
+.ac-chips { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+
+/* The demo's one load-bearing promise. It sits on the bar rather than in the
+   footnotes, because a visitor typing a real Slack channel deserves to have
+   read it first. */
+.ac-bar-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-left: auto;
+  padding: 5px 11px 5px 9px;
+  border: 1px solid var(--accent-soft);
+  border-radius: 999px;
+  background: rgb(55 224 184 / 7%);
+  font: 500 11.5px/1 var(--sans);
   color: var(--text-dim);
 }
-.alerts-count b { color: var(--text); }
-.alerts-count.is-firing { border-color: rgb(255 138 122 / 38%); color: var(--danger); }
-.alerts-count.is-firing b { color: var(--danger); }
+.ac-bar-note .ac-dot { background: var(--accent); box-shadow: 0 0 0 3px rgb(55 224 184 / 15%); }
 
-.alerts-section-title {
-  margin: 26px 0 10px;
-  font: 700 11px/1 var(--sans);
+/* ------------------------------------------------------------------- table */
+
+.ac-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 22px 14px;
+  scrollbar-gutter: stable;
+}
+
+.ac-table { max-width: 1500px; margin: 0 auto; }
+
+.ac-group {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 9px 0 5px;
+  font: 700 10.5px/1 var(--sans);
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--text-faint);
 }
+.ac-group::after { content: ''; flex: 1; height: 1px; background: var(--line-soft); }
+.ac-group:first-child { margin-top: 12px; }
 
-/* One alert. The left edge carries the severity, because a reader scanning a
-   column reads the edge before the text. */
-.alert {
-  border: 1px solid var(--line);
-  border-left: 3px solid var(--line-strong);
-  border-radius: var(--radius-lg);
-  background: var(--bg-panel);
-  padding: 16px 18px;
-  margin-bottom: 12px;
-}
-.alert.is-critical { border-left-color: var(--danger); }
-.alert.is-warning { border-left-color: var(--warn); }
-
-.alert-top {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-
-.alert-label {
-  margin: 0;
-  font: 700 15px/1.3 var(--sans);
-  color: var(--text);
-}
-
-.alert-badge {
-  flex: none;
-  font: 700 10px/1 var(--sans);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  padding: 5px 8px;
-  border-radius: 999px;
-}
-.alert-badge.is-critical { color: var(--danger); background: rgb(255 138 122 / 13%); }
-.alert-badge.is-warning { color: var(--warn); background: rgb(246 198 107 / 13%); }
-
-.alert-scope {
-  margin-left: auto;
-  font: 600 12px/1 var(--mono);
-  color: var(--text-dim);
-}
-
-.alert-why {
-  margin: 8px 0 0;
-  font-size: 13px;
-  line-height: 1.55;
-  color: var(--text-dim);
-}
-
-/* Observed vs threshold, side by side. The comparison is the alert: a number
-   on its own does not tell the reader whether it is bad. */
-.alert-numbers {
-  display: flex;
+.ac-thead,
+.ac-row-main {
+  display: grid;
+  grid-template-columns: 92px minmax(190px, 1fr) 150px 236px 138px 22px;
   align-items: center;
   gap: 14px;
-  margin-top: 12px;
-  flex-wrap: wrap;
 }
 
-.alert-observed {
-  font: 800 22px/1 var(--display, var(--sans));
-  letter-spacing: -0.01em;
-}
-.alert.is-critical .alert-observed { color: var(--danger); }
-.alert.is-warning .alert-observed { color: var(--warn); }
-
-.alert-threshold { font-size: 12.5px; color: var(--text-faint); }
-
-.alert-evidence { margin-top: 14px; border-top: 1px solid var(--line-soft); padding-top: 12px; }
-
-.alert-evidence-title {
-  margin: 0 0 8px;
-  font: 700 10.5px/1 var(--sans);
+.ac-thead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 0 12px 5px;
+  background: var(--bg);
+  font: 700 10px/1 var(--sans);
   letter-spacing: 0.09em;
   text-transform: uppercase;
   color: var(--text-faint);
 }
 
-.alert-calls { display: flex; flex-direction: column; gap: 6px; }
-
-.alert-call {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 9px 11px;
-  border-radius: var(--radius);
+.ac-row {
   border: 1px solid var(--line-soft);
+  border-left: 3px solid transparent;
+  border-radius: var(--radius);
   background: var(--bg-raised);
-  color: var(--text);
-  text-decoration: none;
-  font-size: 12.5px;
+  margin-bottom: 4px;
   transition: border-color .12s ease, background .12s ease;
 }
-.alert-call:hover { border-color: var(--line-strong); background: var(--bg-hover); }
-.alert-call:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ac-row.is-alerting { border-left-color: var(--danger); background: var(--bg-panel); }
+.ac-row.is-alerting.is-warning { border-left-color: var(--warn); }
+.ac-row.is-muted { border-left-color: var(--line-strong); }
+.ac-row:hover { border-color: var(--line); }
+.ac-row.is-open { border-color: var(--line-strong); background: var(--bg-panel); }
 
-.alert-call-id { font-family: var(--mono); color: var(--text-dim); }
-.alert-call-when { margin-left: auto; color: var(--text-faint); font-size: 12px; }
-.alert-call-metric { font-weight: 700; }
-.alert.is-critical .alert-call-metric { color: var(--danger); }
-.alert.is-warning .alert-call-metric { color: var(--warn); }
-
-.alert-more {
-  display: inline-block;
-  margin-top: 9px;
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--accent);
-  text-decoration: none;
-}
-.alert-more:hover { text-decoration: underline; }
-
-/* Rules that are not firing. Kept visible, and deliberately quiet: a monitoring
-   page that only lists problems cannot tell the reader what is being watched,
-   so a silent fleet looks identical to no monitoring at all. */
-.alert-quiet {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 4px 14px;
-  align-items: center;
-  padding: 11px 14px;
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius);
-  background: var(--bg-raised);
-  margin-bottom: 7px;
-}
-.alert-quiet-label { font-size: 13px; font-weight: 600; }
-.alert-quiet-scope { font: 600 12px/1 var(--mono); color: var(--text-faint); }
-.alert-quiet-value { font-size: 12.5px; color: var(--text-dim); }
-.alert-quiet-value b { color: var(--ok); font-weight: 700; }
-.alert-quiet-value.is-unknown b { color: var(--text-faint); }
-
-.alerts-empty {
-  padding: 40px 20px;
-  text-align: center;
-  color: var(--text-dim);
-  border: 1px dashed var(--line);
-  border-radius: var(--radius-lg);
-}
-
-.alerts-note {
-  margin-top: 26px;
-  padding: 13px 16px;
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius);
-  background: var(--bg-raised);
-  font-size: 12.5px;
-  line-height: 1.6;
-  color: var(--text-faint);
-}
-
-@media (width <= 860px) {
-  .alerts-main { padding: 16px 14px 48px; }
-  .alert-scope { margin-left: 0; width: 100%; }
-  .alert-call-when { display: none; }
-}
-
-/* The agents under a finding. Deliberately denser than the evidence rows: they
-   are a ranking to scan, not links to open one at a time. */
-.alert-agents { margin-top: 14px; border-top: 1px solid var(--line-soft); padding-top: 12px; }
-
-.alert-agent {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  padding: 7px 11px;
-  border-radius: var(--radius-sm);
-  color: var(--text);
-  text-decoration: none;
-  font-size: 12.5px;
-}
-.alert-agent:hover { background: var(--bg-hover); }
-.alert-agent:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.alert-agent-value { font-weight: 700; min-width: 8ch; }
-.alert.is-critical .alert-agent-value { color: var(--danger); }
-.alert.is-warning .alert-agent-value { color: var(--warn); }
-.alert-agent-id { font-family: var(--mono); color: var(--text-dim); }
-.alert-agent-calls { margin-left: auto; color: var(--text-faint); font-size: 12px; }
-
-.alert-agent-missing {
-  margin: 8px 0 0;
-  padding: 0 11px;
-  font-size: 12px;
-  line-height: 1.55;
-  color: var(--text-faint);
-}
-
-/* ---------------------------------------------------------------- rule builder
- * A form is where a demo usually gives itself away: dropdowns that accept
- * anything and confirm nothing. This one is built as four numbered steps, each
- * one a decision, with the rule read back in English underneath and checked
- * against the real sample as you type. That is the difference between a form
- * and a monitor.
- */
-
-.mon-intro {
-  margin: 0 0 16px;
-  max-width: 72ch;
-  font-size: 13.5px;
-  line-height: 1.6;
-  color: var(--text-dim);
-}
-.mon-intro b { color: var(--text); font-weight: 650; }
-
-.mon-form {
-  border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
-  background: var(--bg-panel);
-  overflow: hidden;
-}
-
-.mon-step {
+.ac-row-main {
+  width: 100%;
+  padding: 8px 12px;
   border: 0;
-  border-top: 1px solid var(--line-soft);
-  margin: 0;
-  padding: 16px 18px 18px;
-}
-.mon-step:first-child { border-top: 0; }
-
-.mon-step legend {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 0;
-  margin-bottom: 13px;
-  font: 700 13px/1 var(--sans);
-  color: var(--text);
-}
-
-.mon-step-n {
-  display: grid;
-  place-items: center;
-  width: 20px;
-  height: 20px;
-  border-radius: 999px;
-  background: var(--accent-soft);
-  color: var(--accent);
-  font: 700 11px/1 var(--mono);
-}
-
-.mon-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px 14px;
-  align-items: flex-end;
-}
-
-.mon-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
-/* Only the caption. The threshold wrapper is a span too, and picking up the
-   uppercase here turned its unit into a shouted "MS". */
-.mon-field > span:first-child {
-  font: 600 9.5px/1 var(--sans);
-  letter-spacing: .07em;
-  text-transform: uppercase;
-  color: var(--text-faint);
-}
-.mon-field.is-off { opacity: .45; }
-.mon-grow { flex: 1 1 260px; }
-
-.mon-field select,
-.mon-field input[type="text"],
-.mon-field input[type="number"] {
-  min-width: 150px;
-  padding: 7px 9px;
-  font-size: 13px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--bg-inset);
-  color: var(--text);
-}
-.mon-field input[type="text"] { width: 100%; }
-.mon-field select:disabled { color: var(--text-faint); cursor: not-allowed; }
-.mon-field select:focus-visible,
-.mon-field input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-
-/* Unit inside the box, the way a real threshold field reads. Without it the
-   number is ambiguous the moment the metric changes: 25 could be percent or
-   milliseconds, and the two are three orders of magnitude apart. */
-.mon-threshold { position: relative; display: inline-flex; align-items: center; }
-.mon-threshold input { width: 150px; padding-right: 40px; }
-.mon-threshold b {
-  position: absolute;
-  right: 10px;
-  font: 600 11.5px/1 var(--mono);
-  color: var(--text-faint);
-  pointer-events: none;
-}
-
-.mon-help {
-  margin: 11px 0 0;
-  max-width: 70ch;
-  font-size: 12.5px;
-  line-height: 1.55;
-  color: var(--text-faint);
-}
-
-.mon-channels { display: flex; gap: 8px; }
-
-.mon-channel {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 7px 13px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--bg-inset);
-  font-size: 13px;
+  background: none;
+  color: inherit;
+  text-align: left;
+  font: inherit;
   cursor: pointer;
-  color: var(--text-dim);
-  transition: border-color .12s ease, color .12s ease, background .12s ease;
 }
-.mon-channel input { position: absolute; opacity: 0; width: 0; height: 0; }
-.mon-channel:hover { border-color: var(--line-strong); color: var(--text); }
-.mon-channel.is-on { border-color: var(--accent); color: var(--text); background: var(--accent-soft); }
-.mon-channel:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ac-row-main:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: var(--radius); }
 
-/* The live verdict. The whole point of the section: a threshold you can see the
-   consequence of before you commit to it. */
-.mon-live {
-  margin-top: 14px;
-  padding: 10px 13px;
-  border: 1px solid var(--line-soft);
-  border-left: 3px solid var(--line-strong);
-  border-radius: var(--radius-sm);
-  background: var(--bg-inset);
-  font-size: 14px;
-  line-height: 1.5;
-  color: var(--text-dim);
-}
-.mon-live.is-alerting { border-left-color: var(--danger); color: var(--danger); font-weight: 650; }
-.mon-live.is-ok { border-left-color: var(--ok); color: var(--ok); }
-.mon-live.is-nodata { border-left-color: var(--warn); color: var(--text-dim); }
-
-.mon-sentence {
-  margin: 14px 0 0;
-  padding: 11px 13px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-inset);
-  font-size: 13.5px;
-  line-height: 1.55;
-  color: var(--text);
-}
-
-.mon-error {
-  margin: 11px 0 0;
-  font-size: 12.5px;
-  color: var(--danger);
-}
-
-.mon-actions { display: flex; gap: 9px; margin-top: 14px; }
-
-/* --------------------------------------------------------------- the preview */
-
-.mon-preview { margin-top: 14px; }
-
-.mon-preview-card {
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--bg-panel);
-  padding: 14px 16px;
-}
-.mon-preview-card.is-slack { border-left: 3px solid var(--channel-slack); }
-.mon-preview-card.is-email { border-left: 3px solid var(--accent); }
-
-.mon-preview-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-.mon-preview-where {
-  font: 600 11.5px/1 var(--mono);
-  color: var(--text-dim);
-}
-.mon-preview-head .btn { margin-left: auto; }
-
-.mon-preview-title { margin: 0 0 6px; font: 700 14px/1.35 var(--sans); }
-.mon-preview-body { margin: 0; font-size: 13px; line-height: 1.55; color: var(--text-dim); }
-.mon-preview-link { margin: 8px 0 0; font: 600 12.5px/1 var(--mono); color: var(--accent); }
-.mon-preview-note {
-  margin: 12px 0 0;
-  padding-top: 10px;
-  border-top: 1px solid var(--line-soft);
-  font-size: 12px;
-  line-height: 1.55;
-  color: var(--text-faint);
-}
-
-/* ----------------------------------------------------------------- your rules */
-
-.mon-list-head {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  margin: 26px 0 10px;
-}
-.mon-list-title {
-  margin: 0;
-  font: 700 11px/1 var(--sans);
-  letter-spacing: .1em;
-  text-transform: uppercase;
-  color: var(--text-faint);
-}
-.mon-count { margin-left: auto; font-size: 12px; color: var(--text-faint); }
-
-.mon-rule {
-  border: 1px solid var(--line);
-  border-left: 3px solid var(--line-strong);
-  border-radius: var(--radius-lg);
-  background: var(--bg-raised);
-  padding: 14px 16px;
-  margin-bottom: 10px;
-}
-.mon-rule.is-alerting { border-left-color: var(--danger); }
-.mon-rule.is-muted { border-left-color: var(--line); }
-.mon-rule.is-muted .mon-rule-name { color: var(--text-dim); }
-
-.mon-rule-top { display: flex; align-items: baseline; flex-wrap: wrap; gap: 10px; }
-.mon-rule-name { margin: 0; font: 700 14px/1.35 var(--sans); }
-.mon-rule-sev { margin-left: auto; font: 600 11.5px/1 var(--mono); color: var(--text-faint); }
-
-.mon-state {
-  flex: none;
-  font: 700 10px/1 var(--sans);
-  letter-spacing: .08em;
+.ac-state {
+  justify-self: start;
+  font: 700 9.5px/1 var(--sans);
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   padding: 5px 8px;
   border-radius: 999px;
+  border: 1px solid transparent;
+}
+.ac-state.is-alerting { color: var(--danger); background: rgb(255 138 122 / 14%); border-color: rgb(255 138 122 / 30%); }
+.ac-state.is-warning { color: var(--warn); background: rgb(246 198 107 / 13%); border-color: rgb(246 198 107 / 28%); }
+.ac-state.is-ok { color: var(--ok); background: rgb(79 224 168 / 12%); border-color: rgb(79 224 168 / 24%); }
+.ac-state.is-nodata { color: var(--text-faint); background: var(--bg-inset); border-color: var(--line); }
+.ac-state.is-muted { color: var(--text-faint); background: var(--bg-inset); border-color: var(--line); }
+
+.ac-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font: 650 13.5px/1.35 var(--sans);
+  color: var(--text);
+}
+.ac-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.ac-tag {
+  flex: none;
+  font: 700 9px/1 var(--sans);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  padding: 3px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
   color: var(--text-faint);
   background: var(--bg-inset);
 }
-.mon-state.is-alerting { color: var(--danger); background: rgb(255 138 122 / 13%); }
-.mon-state.is-ok { color: var(--ok); background: rgb(79 224 168 / 12%); }
+.ac-tag.is-yours { color: var(--accent); border-color: var(--accent-soft); background: rgb(55 224 184 / 9%); }
 
-.mon-rule-sentence { margin: 9px 0 0; font-size: 13px; line-height: 1.55; color: var(--text-dim); }
-.mon-rule-reading { margin: 7px 0 0; font-size: 12.5px; color: var(--text-faint); }
+.ac-scope,
+.ac-notify {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  font: 500 11px/1.35 var(--sans);
+  color: var(--text-faint);
+  overflow: hidden;
+}
+.ac-scope b,
+.ac-notify b {
+  font: 600 12.5px/1.3 var(--mono);
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ac-notify.is-none b { font-family: var(--sans); color: var(--text-faint); }
 
-.mon-rule-actions {
+/* Observed against threshold. The pair is the alert - a number alone does not
+   tell the reader whether it is bad - so the reading leads and the line it
+   crossed sits under it, quiet, where it never truncates the number. */
+.ac-reading {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--text-faint);
+  overflow: hidden;
+}
+.ac-reading b {
+  font: 700 14px/1.15 var(--sans);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ac-row.is-alerting .ac-reading b { color: var(--danger); }
+.ac-row.is-alerting.is-warning .ac-reading b { color: var(--warn); }
+.ac-reading.is-nodata { font-style: normal; color: var(--text-faint); }
+
+.ac-chev {
+  justify-self: end;
+  color: var(--line-strong);
+  transition: transform .15s ease, color .12s ease;
+  display: inline-flex;
+}
+.ac-row:hover .ac-chev,
+.ac-row-main:focus-visible .ac-chev { color: var(--accent); transform: translateX(2px); }
+.ac-row.is-open .ac-chev,
+.ac-row.is-open:hover .ac-chev { transform: rotate(90deg); color: var(--accent); }
+
+/* ------------------------------------------------------------------ detail */
+
+.ac-detail {
+  padding: 2px 14px 14px 15px;
+  border-top: 1px solid var(--line-soft);
+  margin: 0 -1px;
+}
+
+.ac-detail-why {
+  margin: 12px 0 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  max-width: 80ch;
+}
+
+.ac-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(280px, 1.15fr);
+  gap: 18px;
+  margin-top: 12px;
+  align-items: start;
+}
+
+.ac-panel-title {
+  margin: 0 0 7px;
+  font: 700 10px/1 var(--sans);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.ac-agents { display: flex; flex-direction: column; gap: 5px; }
+
+.ac-agent {
+  display: grid;
+  grid-template-columns: 126px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-soft);
+  background: var(--bg-inset);
+  color: var(--text);
+  text-decoration: none;
+  font-size: 12px;
+  transition: border-color .12s ease, background .12s ease;
+}
+.ac-agent:hover { border-color: var(--line-strong); background: var(--bg-hover); }
+.ac-agent:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ac-agent-value { font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.25; }
+.ac-agent.is-breaching .ac-agent-value { color: var(--danger); }
+.ac-agent.is-warning .ac-agent-value { color: var(--warn); }
+.ac-agent.is-unknown .ac-agent-value { color: var(--text-faint); font-weight: 600; }
+.ac-agent-id { font-family: var(--mono); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ac-agent-calls { color: var(--text-faint); font-size: 11.5px; white-space: nowrap; }
+
+.ac-calls { display: flex; flex-direction: column; gap: 5px; }
+
+.ac-call {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 11px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-soft);
+  background: var(--bg-inset);
+  color: var(--text);
+  text-decoration: none;
+  font-size: 12px;
+  transition: border-color .12s ease, background .12s ease;
+}
+.ac-call:hover { border-color: var(--line-strong); background: var(--bg-hover); }
+.ac-call:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ac-call-metric { font-weight: 700; font-variant-numeric: tabular-nums; }
+.ac-row.is-alerting .ac-call-metric { color: var(--danger); }
+.ac-row.is-alerting.is-warning .ac-call-metric { color: var(--warn); }
+.ac-call-id { font-family: var(--mono); color: var(--text-dim); }
+.ac-call-agent { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ac-call-when { margin-left: auto; color: var(--text-faint); white-space: nowrap; }
+
+.ac-detail-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   flex-wrap: wrap;
   margin-top: 12px;
   padding-top: 11px;
   border-top: 1px solid var(--line-soft);
 }
-.mon-link { font-size: 12.5px; font-weight: 600; color: var(--accent); text-decoration: none; margin-right: auto; }
-.mon-link:hover { text-decoration: underline; }
 
-.mon-empty {
-  padding: 22px 20px;
+.ac-link {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+}
+.ac-link:hover { text-decoration: underline; }
+.ac-link.is-off { color: var(--text-faint); font-weight: 500; }
+.ac-detail-foot .btn { margin-left: 0; }
+.ac-detail-foot .ac-spacer { flex: 1; }
+
+.ac-note {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-faint);
+  max-width: 78ch;
+}
+.ac-note b { color: var(--text-dim); font-weight: 650; }
+
+.ac-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 30px 18px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 12.5px;
   border: 1px dashed var(--line);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius);
+}
+.ac-empty p { margin: 0; }
+.ac-empty b { color: var(--text); }
+.ac-empty .ac-note { display: block; margin-top: 5px; }
+
+/* The alert as it would land. This is the part a visitor is buying, and the
+   part where the demo has to be unambiguous, so the note is inside the card
+   rather than beside it. */
+.ac-preview {
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  padding: 11px 13px;
+}
+.ac-preview.is-slack { border-left-color: var(--channel-slack); }
+.ac-preview.is-email { border-left-color: var(--accent); }
+.ac-preview-where {
+  font: 600 11px/1 var(--mono);
+  color: var(--text-faint);
+  display: block;
+  margin-bottom: 7px;
+}
+.ac-preview-title { margin: 0; font: 700 13px/1.35 var(--sans); }
+.ac-preview-body { margin: 5px 0 0; font-size: 12.5px; line-height: 1.5; color: var(--text-dim); }
+.ac-preview-note { margin: 8px 0 0; font-size: 11.5px; line-height: 1.45; color: var(--text-faint); }
+
+/* ------------------------------------------------------------------ drawer */
+
+.ac-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgb(0 0 0 / 52%);
+  backdrop-filter: blur(2px);
+  animation: ac-fade .16s ease;
+}
+@keyframes ac-fade { from { opacity: 0; } }
+
+.ac-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  height: 100%;
+  width: min(540px, 100%);
+  z-index: 61;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--line-strong);
+  box-shadow: var(--shadow);
+  transform: translateX(100%);
+  transition: transform .22s cubic-bezier(.32, .72, 0, 1);
+}
+.ac-drawer.is-open { transform: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .ac-drawer { transition: none; }
+  .ac-scrim { animation: none; }
+  .ac-chev { transition: none; }
+}
+
+.ac-drawer-head {
+  flex: none;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 15px 18px 13px;
+  border-bottom: 1px solid var(--line);
+}
+.ac-drawer-title { margin: 0; font: 700 15px/1.25 var(--sans); }
+.ac-drawer-sub { margin: 4px 0 0; font-size: 12px; line-height: 1.5; color: var(--text-dim); }
+.ac-drawer-close { margin-left: auto; flex: none; }
+
+.ac-drawer-body { flex: 1; min-height: 0; overflow: auto; padding: 14px 18px 18px; }
+
+.ac-drawer-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-raised);
+}
+.ac-drawer-foot .ac-spacer { flex: 1; }
+
+/* ------------------------------------------------------------------- form */
+
+.mon-step { border: 0; margin: 0 0 16px; padding: 0; }
+.mon-step:last-of-type { margin-bottom: 0; }
+
+.mon-step legend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  margin-bottom: 9px;
+  font: 700 11px/1 var(--sans);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   color: var(--text-dim);
 }
-.mon-empty p { margin: 0; font-size: 13px; line-height: 1.6; max-width: 64ch; }
-.mon-empty b { color: var(--text); }
 
-@media (width <= 900px) {
-  .mon-row { flex-direction: column; align-items: stretch; }
-  .mon-field select, .mon-field input, .mon-threshold input { width: 100%; min-width: 0; }
+.mon-step-n {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font: 700 10px/1 var(--sans);
+  letter-spacing: 0;
 }
 
-/* Marks a rule the demo seeded rather than one the visitor wrote. Without it a
-   first-time visitor would read two strangers' rules as their own. */
-.mon-tag {
-  flex: none;
-  padding: 3px 7px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  font: 600 10px/1.3 var(--sans);
-  letter-spacing: .05em;
+.mon-row { display: grid; grid-template-columns: 1fr 1fr; gap: 9px 10px; }
+.mon-row.is-triple { grid-template-columns: 1fr 1fr; }
+
+.mon-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.mon-field > span:first-child {
+  font: 600 9.5px/1 var(--sans);
+  letter-spacing: 0.07em;
   text-transform: uppercase;
   color: var(--text-faint);
 }
+.mon-field.is-wide { grid-column: 1 / -1; }
+.mon-field.is-off { opacity: .45; }
 
-.mon-link.is-off { color: var(--text-faint); cursor: default; }
+.mon-field select,
+.mon-field input[type="text"],
+.mon-field input[type="number"] {
+  width: 100%;
+  padding: 7px 9px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-strong);
+  background: var(--bg-inset);
+  color: var(--text);
+  font: 500 13px/1.2 var(--sans);
+}
+.mon-field select:focus-visible,
+.mon-field input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.mon-field input::placeholder { color: var(--text-faint); }
+
+.mon-threshold { position: relative; display: block; }
+.mon-threshold input { padding-right: 38px; }
+.mon-threshold b {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  font: 600 11px/1 var(--mono);
+  color: var(--text-faint);
+  pointer-events: none;
+}
+
+.mon-help { margin: 7px 0 0; font-size: 11.5px; line-height: 1.5; color: var(--text-faint); }
+
+.mon-channels { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.mon-channel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 7px 9px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-strong);
+  background: var(--bg-inset);
+  color: var(--text-dim);
+  font: 600 12.5px/1 var(--sans);
+  cursor: pointer;
+  transition: border-color .12s ease, color .12s ease, background .12s ease;
+}
+.mon-channel input { position: absolute; opacity: 0; width: 0; height: 0; }
+.mon-channel:hover { color: var(--text); border-color: var(--line-strong); }
+.mon-channel.is-on { color: var(--text); background: var(--bg-hover); }
+.mon-channel.is-on:has(input[value="slack"]) { border-color: var(--channel-slack); }
+.mon-channel.is-on:has(input[value="email"]) { border-color: var(--accent); }
+.mon-channel:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* The threshold checked against the real sample, live. A number typed into a
+   box means nothing until you know whether the traffic clears it, and guessing
+   is how teams end up with a rule that never fires or never stops. */
+.mon-live {
+  margin-top: 10px;
+  padding: 9px 11px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line-strong);
+  background: var(--bg-inset);
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+.mon-live.is-alerting { border-left-color: var(--danger); color: var(--danger); font-weight: 650; }
+.mon-live.is-ok { border-left-color: var(--ok); color: var(--text); }
+.mon-live.is-nodata { border-left-color: var(--text-faint); }
+
+/* The rule read back as English. A row of dropdowns can be filled in correctly
+   and still not mean what the author thought; reading it as a sentence is the
+   only way to catch that. */
+.mon-sentence {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  border: 1px solid var(--line-soft);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.mon-error { margin: 9px 0 0; font-size: 12px; color: var(--danger); }
+
+.ac-drawer-foot .mon-foot-note { font-size: 11.5px; color: var(--text-faint); line-height: 1.4; }
+
+/* ------------------------------------------------------------- narrow view */
+
+@media (width <= 1180px) {
+  .ac-thead,
+  .ac-row-main { grid-template-columns: 92px minmax(180px, 1fr) 150px 170px 24px; }
+  .ac-notify, .ac-th-notify { display: none; }
+}
+
+@media (width <= 900px) {
+  .ac-head, .ac-bar, .ac-scroll { padding-left: 14px; padding-right: 14px; }
+  .ac-head-row { flex-wrap: wrap; }
+  .ac-head-actions { margin-left: 0; width: 100%; }
+  .ac-thead { display: none; }
+  .ac-notify { display: flex; }
+  .ac-row-main {
+    grid-template-columns: auto 1fr auto;
+    grid-template-areas: 'state name name' 'reading reading reading' 'scope notify chev';
+    gap: 7px 10px;
+  }
+  .ac-notify { grid-area: notify; align-items: flex-end; text-align: right; }
+  .ac-state { grid-area: state; }
+  .ac-name { grid-area: name; }
+  .ac-reading { grid-area: reading; white-space: normal; }
+  .ac-scope { grid-area: scope; }
+  .ac-chev { grid-area: chev; }
+  .ac-detail-grid { grid-template-columns: 1fr; }
+  .mon-row, .mon-row.is-triple { grid-template-columns: 1fr; }
+}

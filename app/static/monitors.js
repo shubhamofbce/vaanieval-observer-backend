@@ -1,9 +1,14 @@
 /* Alert rules a visitor writes themselves.
  *
- * The four rules above this section are fixed, and a monitoring page you cannot
- * touch is a screenshot. So this section is the other half: pick a signal, put a
+ * The four rules the server ships are fixed, and a monitoring page you cannot
+ * touch is a screenshot. So this module is the other half: pick a signal, put a
  * line under it, say where the message goes. It is the flow an engineer already
  * knows from Datadog, kept to the four decisions that matter.
+ *
+ * It owns the rules, their evaluation and the compose drawer. It does not own
+ * the table: a visitor's rule and a shipped rule are the same kind of thing to
+ * the person reading the page, so both are drawn as rows by alerts.js and this
+ * module hands it the pieces.
  *
  * Two constraints shaped it.
  *
@@ -196,8 +201,8 @@
     const busiest = agentList.find((id) => id === 'india-travel-agent') || '';
     return [
       {
-        id: 'seed-wait', example: true, name: 'Worst-case reply wait over 8s',
-        metric: 'reply_wait', statistic: 'p95', comparator: 'above', threshold: 8000,
+        id: 'seed-wait', example: true, name: 'Transcription slower than 1.2s',
+        metric: 'stt_final', statistic: 'p95', comparator: 'above', threshold: 1200,
         window: '7d', scope: '', severity: 'critical',
         channel: 'slack', destination: '#voice-oncall', muted: false,
       },
@@ -219,9 +224,9 @@
     }
   }
 
-  function save(rules) {
+  function persist(list) {
     try {
-      localStorage.setItem(STORE_KEY, JSON.stringify(rules));
+      localStorage.setItem(STORE_KEY, JSON.stringify(list));
       return true;
     } catch (error) {
       // Private browsing, or a full quota. Better to say so than to show a rule
@@ -262,12 +267,223 @@
     return { state: breaching ? 'alerting' : 'ok', value, calls };
   }
 
+  function verdictFor(rule) {
+    return summaryFor(rule.window, rule.scope)
+      .then((summary) => judge(rule, summary))
+      .catch(() => ({ state: 'no_data', reason: 'could not read the sample data' }));
+  }
+
   function drilldownHref(rule) {
     const metric = metricById(rule.metric);
     const params = new URLSearchParams({ range: rule.window });
     if (rule.scope) params.set('agent_id', rule.scope);
     params.set('drilldown', metric.selector);
     return `/dashboard?${params.toString()}`;
+  }
+
+  /* ------------------------------------------------------------- row pieces */
+  /* alerts.js draws the row; this decides what it says, because the wording has
+     to stay tied to the metric definitions above. */
+
+  function row(rule, verdict) {
+    const metric = metricById(rule.metric);
+    const reading = verdict.state === 'no_data'
+      ? `<span class="ac-reading is-nodata">No reading — ${esc(verdict.reason || 'not measurable')}</span>`
+      : `<span class="ac-reading"><b>${esc(formatValue(metric, verdict.value))}</b>`
+        + `threshold ${rule.comparator === 'below' ? 'under' : 'over'} ${esc(thresholdLabel(metric, rule.threshold))}</span>`;
+    return {
+      id: rule.id,
+      source: 'yours',
+      state: rule.muted ? 'muted' : verdict.state,
+      severity: rule.severity,
+      name: rule.name,
+      tag: rule.example ? 'Example' : 'Yours',
+      scope: rule.scope || 'All agents',
+      scopeHtml: rule.scope
+        ? `<span class="ac-scope"><b>${esc(rule.scope)}</b>one agent</span>`
+        : '<span class="ac-scope"><b>All agents</b>nothing excluded</span>',
+      readingHtml: reading,
+      notifyHtml: `<span class="ac-notify"><b>${esc(rule.destination)}</b>`
+        + `${rule.channel === 'slack' ? 'Slack' : 'Email'}</span>`,
+    };
+  }
+
+  /* The alert as it would land, in the words the channel would carry. This is
+     the part a visitor is actually buying, and the part where the demo has to
+     be unambiguous, so the disclaimer sits inside the card. */
+  function previewHtml(rule, verdict) {
+    const metric = metricById(rule.metric);
+    const value = verdict.state === 'no_data' ? 'no reading yet' : formatValue(metric, verdict.value);
+    const title = `${rule.severity === 'critical' ? '[CRITICAL]' : '[WARNING]'} ${rule.name}`;
+    const body = `${metric.label}${metric.stats ? ` (${rule.statistic})` : ''} is ${value} for `
+      + `${rule.scope || 'all agents'} over ${windowById(rule.window).label}, `
+      + `${rule.comparator === 'below' ? 'under' : 'over'} the ${thresholdLabel(metric, rule.threshold)} threshold.`;
+    return `
+      <div class="ac-preview is-${esc(rule.channel)}">
+        <span class="ac-preview-where">${rule.channel === 'slack'
+          ? `Slack · ${esc(rule.destination)}`
+          : `Email · to ${esc(rule.destination)}`}</span>
+        <p class="ac-preview-title">${esc(title)}</p>
+        <p class="ac-preview-body">${esc(body)}</p>
+        <p class="ac-preview-note">This is a demo dashboard. No alert was sent, and no address or
+          channel you type here leaves your browser.</p>
+      </div>`;
+  }
+
+  function detailHtml(rule, verdict) {
+    const metric = metricById(rule.metric);
+    const link = verdict.state === 'no_data'
+      ? '<span class="ac-link is-off">No eligible calls to open</span>'
+      : `<a class="ac-link" href="${esc(drilldownHref(rule))}">${metric.byStage
+        ? 'See the slowest calls in this window \u2192'
+        : 'See these calls \u2192'}</a>`;
+    return `
+      <p class="ac-detail-why">${esc(sentence(rule))}</p>
+      <div class="ac-detail-grid">
+        <div>
+          <p class="ac-panel-title">Per agent, worst first</p>
+          <div class="ac-agents" data-agents="${esc(rule.id)}">
+            <p class="ac-note">Reading each agent&#8230;</p>
+          </div>
+        </div>
+        <div>
+          <p class="ac-panel-title">${metricById(rule.metric).byStage
+            ? 'The slowest calls in this window'
+            : 'The calls behind this number'}</p>
+          <div class="ac-calls" data-calls="${esc(rule.id)}">
+            <p class="ac-note">Looking for the worst calls&#8230;</p>
+          </div>
+        </div>
+      </div>
+      <p class="ac-note">${esc(metric.help)} This rule lives in <b>this browser only</b>, and nothing
+        is ever delivered. Below ${MINIMUM_CALLS} measured calls it reports No data rather than guess.</p>
+      <div data-preview="${esc(rule.id)}"></div>
+      <div class="ac-detail-foot">
+        ${link}
+        <span class="ac-spacer"></span>
+        <button type="button" class="btn tiny" data-act="test">Preview the message</button>
+        <button type="button" class="btn tiny" data-act="mute">${rule.muted ? 'Unmute' : 'Mute'}</button>
+        <button type="button" class="btn tiny" data-act="delete">Delete</button>
+      </div>`;
+  }
+
+  /* A rule a visitor wrote has to answer the same two questions a built-in one
+     does - which agent, and which calls - or the builder looks like a toy next
+     to the rules that shipped. Both answers arrive after the row is already on
+     screen, because each is a separate read of the sample. */
+
+  function agentRowHtml(rule, agentId, verdict) {
+    const metric = metricById(rule.metric);
+    const firing = verdict.state === 'alerting';
+    const tone = firing ? (rule.severity === 'critical' ? ' is-breaching' : ' is-warning')
+      : (verdict.state === 'no_data' ? ' is-unknown' : '');
+    const value = verdict.state === 'no_data' ? 'no reading' : formatValue(metric, verdict.value);
+    const note = verdict.state === 'no_data'
+      ? esc(verdict.reason || 'not measurable')
+      : `${verdict.calls} call${verdict.calls === 1 ? '' : 's'}`;
+    const href = `/dashboard?${new URLSearchParams({
+      range: rule.window, agent_id: agentId, drilldown: metric.selector,
+    }).toString()}`;
+    return `
+      <a class="ac-agent${tone}" href="${esc(href)}">
+        <span class="ac-agent-value">${esc(value)}</span>
+        <span class="ac-agent-id">${esc(agentId)}</span>
+        <span class="ac-agent-calls">${note}</span>
+      </a>`;
+  }
+
+  function callMetric(rule, call) {
+    if (rule.metric === 'error_rate') {
+      return `${call.failed_op_count || 0} failure${call.failed_op_count === 1 ? '' : 's'}`;
+    }
+    if (rule.metric === 'unmeasured') {
+      const n = call.missing_final_turns || 0;
+      return n ? `${n} turn${n === 1 ? '' : 's'} untimed` : 'no timings';
+    }
+    if (rule.metric === 'audible_lag') {
+      const n = call.audible_lag_turns || 0;
+      return `${n} slow turn${n === 1 ? '' : 's'}`;
+    }
+    if (!call.max_response_latency_ms) return '\u2014';
+    const worst = `${(call.max_response_latency_ms / 1000).toFixed(1)}s`;
+    // The number is the whole reply, not the stage. Labelling it says so in the
+    // one place a reader would otherwise assume it was the stage's own timing.
+    return metricById(rule.metric).byStage ? `reply ${worst}` : worst;
+  }
+
+  function hydrate(rule, node) {
+    const agentSlot = node.querySelector(`[data-agents="${CSS.escape(rule.id)}"]`);
+    const callSlot = node.querySelector(`[data-calls="${CSS.escape(rule.id)}"]`);
+    const metric = metricById(rule.metric);
+    // A scoped rule watches one agent. Showing the rest as if they were covered
+    // would misstate what the rule does.
+    const watched = rule.scope ? [rule.scope] : agents;
+
+    if (agentSlot) {
+      Promise.all(watched.map((agentId) => summaryFor(rule.window, agentId)
+        .then((summary) => ({ agentId, verdict: judge(rule, summary) }))
+        .catch(() => ({ agentId, verdict: { state: 'no_data', reason: 'could not read' } }))))
+        .then((results) => {
+          // "Worst" is whichever direction the rule watches. Sorting a
+          // below-threshold rule high-first would put its healthiest agent on top.
+          const worst = (a, b) => (rule.comparator === 'below'
+            ? (a.verdict.value || 0) - (b.verdict.value || 0)
+            : (b.verdict.value || 0) - (a.verdict.value || 0));
+          results.sort((a, b) => (
+            (a.verdict.state !== 'alerting') - (b.verdict.state !== 'alerting')
+            || worst(a, b)
+          ));
+          agentSlot.innerHTML = results.map((r) => agentRowHtml(rule, r.agentId, r.verdict)).join('')
+            + (rule.scope
+              ? '<p class="ac-note">Scoped to one agent — the others are not watched by this rule.</p>'
+              : '');
+        });
+    }
+
+    if (!callSlot) return;
+    // The call rankings the sample offers are all "most of this", so a rule
+    // watching for a number falling below a floor has no matching list. Naming
+    // the gap is better than handing over the slowest calls and hoping.
+    if (rule.comparator === 'below') {
+      callSlot.innerHTML = `<p class="ac-note">This sample ranks calls by the worst of a signal, so it
+        cannot list the calls that pushed ${esc(metric.label.toLowerCase())} <b>below</b> your floor.
+        The dashboard link opens the same window unranked.</p>`;
+      return;
+    }
+    const to = window.vaaniNow();
+    const params = new URLSearchParams({
+      selector: metric.selector,
+      from_ms: String(to - windowById(rule.window).ms),
+      to_ms: String(to),
+      limit: '4',
+    });
+    if (rule.scope) params.set('agent_id', rule.scope);
+    fetch(`/v1/dashboard/calls?${params.toString()}`)
+      .then((response) => (response.ok ? response.json() : Promise.reject(response.status)))
+      .then((data) => {
+        const items = data.items || [];
+        if (!items.length) {
+          callSlot.innerHTML = '<p class="ac-note">No calls in this window match the signal.</p>';
+          return;
+        }
+        callSlot.innerHTML = items.slice(0, 4).map((call) => `
+          <a class="ac-call" href="/#/call/${encodeURIComponent(call.session_id)}${
+            call.focus_turn_id ? `/turn/${encodeURIComponent(call.focus_turn_id)}` : ''}">
+            <span class="ac-call-metric">${esc(callMetric(rule, call))}</span>
+            <span class="ac-call-id">${esc(String(call.session_id).slice(0, 8))}</span>
+            <span class="ac-call-agent">${esc(call.agent_id || '')}</span>
+            <span class="ac-call-when"></span>
+          </a>`).join('')
+          + (metric.byStage
+            ? `<p class="ac-note">The sample ranks calls by their slowest reply, not by
+               ${esc(metric.label.toLowerCase())} on its own, so these are the slowest calls in the
+               window rather than the calls that made this stage slow. Each figure is the whole
+               reply.</p>`
+            : '');
+      })
+      .catch(() => {
+        callSlot.innerHTML = '<p class="ac-note">Could not load the calls behind this number.</p>';
+      });
   }
 
   /* ------------------------------------------------------------------- form */
@@ -286,6 +502,8 @@
   };
 
   let agents = [];
+  let rules = [];
+  let notify = () => {};
 
   function options(list, selected) {
     return list.map((item) => (
@@ -310,7 +528,7 @@
         <fieldset class="mon-step">
           <legend><span class="mon-step-n">1</span> Pick the signal</legend>
           <div class="mon-row">
-            <label class="mon-field">
+            <label class="mon-field is-wide">
               <span>Metric</span>
               <select id="mon-metric">${metricOptions(draft.metric)}</select>
             </label>
@@ -368,9 +586,11 @@
             </label>
           </div>
           <div class="mon-live" id="mon-live" aria-live="polite">Checking this threshold against the sample data…</div>
-          <p class="mon-help">Priority travels with the message so the receiving channel can route it.
-            It changes nothing else here, and the window is evaluated against the published sample,
-            not a live clock.</p>
+          <p class="mon-help">The window is measured against the published sample, not a live clock.
+            Priority travels with the message so the receiving channel can route it.
+            Under ${MINIMUM_CALLS} measured calls the rule reports <b>No data</b> instead of guessing —
+            the same floor the built-in rules use. Recovery notices and re-notify cadence exist in the
+            product but are not modelled on this frozen sample.</p>
         </fieldset>
 
         <fieldset class="mon-step">
@@ -391,21 +611,19 @@
                 </label>
               </div>
             </div>
-            <label class="mon-field mon-grow">
+            <label class="mon-field">
               <span id="mon-dest-label">${draft.channel === 'slack' ? 'Slack channel' : 'Email address'}</span>
               <input id="mon-destination" type="text" value="${esc(draft.destination)}"
                 placeholder="${draft.channel === 'slack' ? '#voice-oncall' : 'oncall@yourteam.com'}"
                 autocomplete="off" spellcheck="false">
             </label>
           </div>
-          <p class="mon-help">Nothing is delivered from this demo. Saving a rule shows you the message
-            that would have been sent, and keeps the rule in this browser only.</p>
         </fieldset>
 
         <fieldset class="mon-step">
-          <legend><span class="mon-step-n">4</span> Name it and save</legend>
+          <legend><span class="mon-step-n">4</span> Name it</legend>
           <div class="mon-row">
-            <label class="mon-field mon-grow">
+            <label class="mon-field is-wide">
               <span>Rule name</span>
               <input id="mon-name" type="text" value="${esc(draft.name)}" autocomplete="off"
                 placeholder="${esc(suggestedName(draft))}">
@@ -413,85 +631,11 @@
           </div>
           <p class="mon-sentence" id="mon-sentence">${esc(sentence(draft))}</p>
           <p class="mon-error" id="mon-error" role="alert" hidden></p>
-          <div class="mon-actions">
-            <button type="submit" class="btn primary" id="mon-save">Save rule</button>
-            <button type="button" class="btn ghost" id="mon-reset">Reset</button>
-          </div>
         </fieldset>
       </form>`;
   }
 
-  /* ------------------------------------------------------------------- list */
-
-  function stateChip(verdict) {
-    if (verdict.state === 'alerting') return '<span class="mon-state is-alerting">Alerting</span>';
-    if (verdict.state === 'ok') return '<span class="mon-state is-ok">OK</span>';
-    return '<span class="mon-state is-nodata">No data</span>';
-  }
-
-  function ruleCard(rule, verdict) {
-    const metric = metricById(rule.metric);
-    const reading = verdict.state === 'no_data'
-      ? `Nothing to measure — ${esc(verdict.reason)}`
-      : `Sample window: ${esc(formatValue(metric, verdict.value))} across ${verdict.calls} call${verdict.calls === 1 ? '' : 's'}
-         · alerts ${rule.comparator === 'below' ? 'under' : 'over'} ${esc(thresholdLabel(metric, rule.threshold))}`;
-    return `
-      <article class="mon-rule${rule.muted ? ' is-muted' : ''}${verdict.state === 'alerting' && !rule.muted ? ' is-alerting' : ''}"
-        data-id="${esc(rule.id)}">
-        <div class="mon-rule-top">
-          ${rule.muted ? '<span class="mon-state is-muted">Muted</span>' : stateChip(verdict)}
-          <h3 class="mon-rule-name">${esc(rule.name)}</h3>
-          ${rule.example ? '<span class="mon-tag">Example</span>' : ''}
-          <span class="mon-rule-sev">${rule.severity === 'critical' ? 'Critical' : 'Warning'}</span>
-        </div>
-        <p class="mon-rule-sentence">${esc(sentence(rule))}</p>
-        <p class="mon-rule-reading">${reading}</p>
-        <div class="mon-rule-actions">
-          ${verdict.state === 'no_data'
-            ? '<span class="mon-link is-off">No eligible calls to open</span>'
-            : `<a class="mon-link" href="${esc(drilldownHref(rule))}">${metric.byStage
-              ? 'See the slowest calls in this window \u2192'
-              : 'See these calls \u2192'}</a>`}
-          <button type="button" class="btn tiny" data-act="test">Preview the message</button>
-          <button type="button" class="btn tiny" data-act="mute">${rule.muted ? 'Unmute' : 'Mute'}</button>
-          <button type="button" class="btn tiny" data-act="delete">Delete</button>
-        </div>
-      </article>`;
-  }
-
-  /* What the alert would look like where it lands. This is the part a visitor is
-     actually buying, and it is also where the demo has to be unambiguous: the
-     preview says in its own words that it was not sent. */
-  function preview(rule, verdict) {
-    const metric = metricById(rule.metric);
-    const value = verdict.state === 'no_data' ? 'no reading yet' : formatValue(metric, verdict.value);
-    const title = `${rule.severity === 'critical' ? '[CRITICAL]' : '[WARNING]'} ${rule.name}`;
-    const body = `${metric.label}${metric.stats ? ` (${rule.statistic})` : ''} is ${value} for `
-      + `${rule.scope || 'all agents'} over ${windowById(rule.window).label}, `
-      + `${rule.comparator === 'below' ? 'under' : 'over'} the ${thresholdLabel(metric, rule.threshold)} threshold.`;
-    const wrap = document.getElementById('mon-preview');
-    wrap.innerHTML = `
-      <div class="mon-preview-card is-${esc(rule.channel)}">
-        <div class="mon-preview-head">
-          <span class="mon-preview-where">${rule.channel === 'slack'
-            ? `Slack · ${esc(rule.destination)}`
-            : `Email · to ${esc(rule.destination)}`}</span>
-          <button type="button" class="btn tiny ghost" id="mon-preview-close">Close</button>
-        </div>
-        <p class="mon-preview-title">${esc(title)}</p>
-        <p class="mon-preview-body">${esc(body)}</p>
-        <p class="mon-preview-link">vaanieval.com/dashboard → the calls behind it</p>
-        <p class="mon-preview-note">This is a demo dashboard. No alert was sent, and no address or
-          channel you type here leaves your browser.</p>
-      </div>`;
-    wrap.hidden = false;
-    document.getElementById('mon-preview-close').addEventListener('click', () => { wrap.hidden = true; });
-    wrap.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-  }
-
-  /* ------------------------------------------------------------------- wiring */
-
-  let rules = [];
+  /* ------------------------------------------------------------------ wiring */
 
   function el(id) { return document.getElementById(id); }
 
@@ -539,11 +683,12 @@
   }
 
   /* The threshold checked against the real sample, live. A number typed into a
-     box means nothing until you know whether today's traffic clears it, and
-     guessing is how teams end up with a rule that never fires or never stops. */
+     box means nothing until you know whether the traffic clears it, and guessing
+     is how teams end up with a rule that never fires or never stops. */
   function syncLive() {
     const metric = metricById(draft.metric);
     const target = el('mon-live');
+    if (!target) return;
     if (!Number.isFinite(draft.threshold) || draft.threshold < 0) {
       target.className = 'mon-live';
       target.textContent = 'Enter a threshold to see how it would behave on the sample data.';
@@ -581,51 +726,8 @@
     return null;
   }
 
-  function renderList() {
-    const wrap = el('mon-list');
-    if (!rules.length) {
-      wrap.innerHTML = `
-        <div class="mon-empty">
-          <p><b>No rules of your own yet.</b> Build one above — it is evaluated against the same
-            sample calls the dashboard reports on, so you will see straight away whether it
-            would be alerting.</p>
-        </div>`;
-      el('mon-count').textContent = '';
-      return;
-    }
-    el('mon-count').textContent = `${rules.length} rule${rules.length === 1 ? '' : 's'} in this browser`;    // Render the cards first with whatever is known, then fill each reading in
-    // as its window resolves: a list that waits for four fetches before showing
-    // anything reads as broken.
-    wrap.innerHTML = rules.map((rule) => ruleCard(rule, { state: 'no_data', reason: 'reading…' })).join('');
-    rules.forEach((rule) => {
-      summaryFor(rule.window, rule.scope)
-        .then((summary) => judge(rule, summary))
-        .catch(() => ({ state: 'no_data', reason: 'could not read the sample data' }))
-        .then((verdict) => {
-          const card = wrap.querySelector(`[data-id="${CSS.escape(rule.id)}"]`);
-          if (!card) return;
-          card.outerHTML = ruleCard(rule, verdict);
-          rule._verdict = verdict;
-        });
-    });
-  }
-
-  function commit() {
-    if (!save(rules)) {
-      const error = el('mon-error');
-      error.hidden = false;
-      error.textContent = 'This browser will not let the demo store the rule (private mode?). It is still shown below for this visit.';
-    }
-    renderList();
-  }
-
-  function toast(message) {
-    const node = document.getElementById('toast');
-    if (!node) return;
-    node.textContent = message;
-    node.hidden = false;
-    clearTimeout(toast._t);
-    toast._t = setTimeout(() => { node.hidden = true; }, 5200);
+  function commit(message) {
+    notify({ rules, saved: persist(rules), message });
   }
 
   function bindForm() {
@@ -663,93 +765,158 @@
       if (event.target.id === 'mon-threshold') syncLive();
     });
 
-    form.addEventListener('submit', (event) => {
-      event.preventDefault();
-      readDraft();
-      const problem = validate();
-      const error = el('mon-error');
-      error.hidden = !problem;
-      error.textContent = problem || '';
-      if (problem) {
-        (problem.startsWith('Give') ? el('mon-threshold') : el('mon-destination')).focus();
-        return;
-      }
-      const rule = Object.assign({}, draft, {
-        id: `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
-        name: draft.name || suggestedName(draft),
-        muted: false,
-      });
-      rules = [rule].concat(rules);
-      commit();
-      toast('Saved in this browser. This is a demo dashboard — no alert is ever sent.');
-      summaryFor(rule.window, rule.scope)
-        .then((summary) => preview(rule, judge(rule, summary)))
-        .catch(() => preview(rule, { state: 'no_data', reason: 'no reading', calls: 0 }));
-    });
+    form.addEventListener('submit', (event) => { event.preventDefault(); submit(); });
+  }
 
-    el('mon-reset').addEventListener('click', () => {
-      form.reset();
-      readDraft();
-      const metric = metricById(draft.metric);
-      unitOf = metric.unit;
-      syncMetric(metric, { resetThreshold: false });
-      syncChannel();
-      syncSentence();
-      syncLive();
-      el('mon-error').hidden = true;
+  function submit() {
+    readDraft();
+    const problem = validate();
+    const error = el('mon-error');
+    error.hidden = !problem;
+    error.textContent = problem || '';
+    if (problem) {
+      (problem.startsWith('Give') ? el('mon-threshold') : el('mon-destination')).focus();
+      return;
+    }
+    const rule = Object.assign({}, draft, {
+      id: `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      name: draft.name || suggestedName(draft),
+      muted: false,
+    });
+    rules = [rule].concat(rules);
+    close();
+    commit({
+      text: 'Saved in this browser. This is a demo dashboard — no alert is ever sent.',
+      open: rule.id,
     });
   }
 
-  function bindList() {
-    el('mon-list').addEventListener('click', (event) => {
-      const button = event.target.closest('button[data-act]');
-      if (!button) return;
-      const id = button.closest('[data-id]').dataset.id;
-      const rule = rules.find((entry) => entry.id === id);
-      if (!rule) return;
-      if (button.dataset.act === 'delete') {
-        rules = rules.filter((entry) => entry.id !== id);
-        commit();
-        toast('Rule deleted.');
-        return;
-      }
-      if (button.dataset.act === 'mute') {
-        rule.muted = !rule.muted;
-        commit();
-        return;
-      }
-      summaryFor(rule.window, rule.scope)
-        .then((summary) => preview(rule, judge(rule, summary)))
-        .catch(() => preview(rule, { state: 'no_data', reason: 'no reading', calls: 0 }));
-    });
-  }
+  /* ------------------------------------------------------------------ drawer */
+  /* Composing a rule is a task, not a view. In a panel over the table the list
+     the visitor is comparing against stays on screen, and the page they came to
+     read does not turn into a form. */
 
-  function mount(facetAgents) {
-    agents = facetAgents;
-    const stored = load();
-    rules = (stored || seeds(facetAgents)).filter((rule) => known(rule.metric));
-    const host = document.getElementById('monitors');
-    if (!host) return;
-    host.innerHTML = `
-      <h2 class="alerts-section-title" id="your-rules">Your own alert rules</h2>
-      <p class="mon-intro">The four rules above ship with the demo. These are yours: pick a signal, put a
-        line under it, choose where the message lands. Rules are checked against the same sample
-        calls, and stay in this browser — <b>nothing is ever sent, and no address you type leaves
-        this page</b>.</p>
-      ${formHtml()}
-      <div class="mon-preview" id="mon-preview" hidden></div>
-      <div class="mon-list-head">
-        <h3 class="mon-list-title">Rules you have set up</h3>
-        <span class="mon-count" id="mon-count"></span>
+  let opener = null;
+
+  function drawerHtml() {
+    return `
+      <div class="ac-drawer-head">
+        <div>
+          <h2 class="ac-drawer-title" id="ac-drawer-title">New alert rule</h2>
+          <p class="ac-drawer-sub">Checked against the same sample calls the dashboard reports on.
+            Rules stay in this browser, and nothing is ever delivered.</p>
+        </div>
+        <button type="button" class="btn tiny ghost ac-drawer-close" id="mon-close">Close</button>
       </div>
-      <div class="mon-list" id="mon-list"></div>`;
+      <div class="ac-drawer-body">${formHtml()}</div>
+      <div class="ac-drawer-foot">
+        <span class="mon-foot-note">Nothing is sent — you see the message instead.</span>
+        <span class="ac-spacer"></span>
+        <button type="button" class="btn" id="mon-cancel">Cancel</button>
+        <button type="submit" class="btn primary" id="mon-save" form="mon-form">Save rule</button>
+      </div>`;
+  }
+
+  function onKey(event) {
+    if (event.key === 'Escape') { event.stopPropagation(); close(); return; }
+    if (event.key !== 'Tab') return;
+    // A panel over a scrim has to hold focus, or the next Tab walks into the
+    // table behind it and the reader is typing into something they cannot see.
+    const drawer = el('ac-drawer');
+    if (!drawer) return;
+    const focusable = [...drawer.querySelectorAll('button, select, input, a[href]')]
+      .filter((node) => !node.disabled && node.offsetParent !== null);
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  }
+
+  function open(trigger) {
+    if (el('ac-drawer')) return;
+    opener = trigger || document.activeElement;
+    const scrim = document.createElement('div');
+    scrim.className = 'ac-scrim';
+    scrim.id = 'ac-scrim';
+    scrim.addEventListener('click', () => close());
+    const drawer = document.createElement('aside');
+    drawer.className = 'ac-drawer';
+    drawer.id = 'ac-drawer';
+    drawer.setAttribute('role', 'dialog');
+    drawer.setAttribute('aria-modal', 'true');
+    drawer.setAttribute('aria-labelledby', 'ac-drawer-title');
+    drawer.innerHTML = drawerHtml();
+    document.body.append(scrim, drawer);
+    // A dialog that only *claims* to be modal still lets a screen reader walk
+    // the table behind it.
+    document.querySelectorAll('body > .workspace, body > .demo-banner, body > .toast')
+      .forEach((node) => node.setAttribute('inert', ''));
+    requestAnimationFrame(() => drawer.classList.add('is-open'));
     bindForm();
-    bindList();
     syncChannel();
     syncSentence();
     syncLive();
-    renderList();
+    el('mon-close').addEventListener('click', () => close());
+    el('mon-cancel').addEventListener('click', () => close());
+    document.addEventListener('keydown', onKey, true);
+    el('mon-metric').focus();
   }
 
-  window.vaaniMonitors = { mount };
+  function close() {
+    const drawer = el('ac-drawer');
+    const scrim = el('ac-scrim');
+    document.querySelectorAll('[inert]').forEach((node) => node.removeAttribute('inert'));
+    document.removeEventListener('keydown', onKey, true);
+    if (scrim) scrim.remove();
+    if (!drawer) return;
+    drawer.classList.remove('is-open');
+    const done = () => { if (drawer.isConnected) drawer.remove(); };
+    drawer.addEventListener('transitionend', done, { once: true });
+    setTimeout(done, 340);
+    if (opener && document.contains(opener)) opener.focus();
+    opener = null;
+  }
+
+  /* -------------------------------------------------------------- public API */
+
+  function configure(agentList, onChange) {
+    agents = agentList;
+    notify = onChange || notify;
+    const stored = load();
+    // An unknown metric id is a rule saved by an older build. Reinterpreting it
+    // as the first metric would silently change what the rule watches.
+    rules = (stored || seeds(agentList)).filter((rule) => known(rule.metric));
+    return rules;
+  }
+
+  function act(id, action) {
+    const rule = rules.find((entry) => entry.id === id);
+    if (!rule) return null;
+    if (action === 'delete') {
+      rules = rules.filter((entry) => entry.id !== id);
+      commit({ text: 'Rule deleted.' });
+      return 'deleted';
+    }
+    if (action === 'mute') {
+      rule.muted = !rule.muted;
+      commit({ text: rule.muted ? 'Muted. It stays in the list and stops alerting.' : 'Unmuted.' });
+      return 'muted';
+    }
+    return null;
+  }
+
+  window.vaaniMonitors = {
+    configure,
+    list: () => rules,
+    ruleById: (id) => rules.find((entry) => entry.id === id),
+    verdictFor,
+    row,
+    detailHtml,
+    hydrate,
+    previewHtml,
+    act,
+    open,
+    close,
+  };
 }());

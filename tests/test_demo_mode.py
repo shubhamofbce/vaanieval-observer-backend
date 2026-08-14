@@ -9,7 +9,11 @@ not the wiring that applies it.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from app import demo
+
+STATIC = Path(__file__).resolve().parent.parent / "app" / "static"
 
 
 class TestAllowlist:
@@ -104,6 +108,21 @@ class TestHeaders:
         assert "object-src 'none'" in csp
         assert "form-action 'none'" in csp
         assert "media-src 'self' blob:;" in csp
+
+    def test_attribution_persists_without_a_measurement_id(self) -> None:
+        """A demo link shared on its own is often first contact with the
+        product, and the marketing site never sees that visit. The console has
+        to record the source itself, or the visitor arrives at vaanieval.com
+        later as untracked direct traffic. That is first-party and loads
+        nothing, so it must not be gated on GA being configured."""
+        source = (STATIC / "analytics.js").read_text(encoding="utf-8")
+        # The GA gate exists, but attribution is resolved before it.
+        gate = source.index("if (!GA_ID) return;")
+        assert source.index("const { attr, via } = attribution();") < gate
+        assert source.index("function persist(") < gate
+        # And the cookie contract matches the site's exactly.
+        assert "'va_attr_first', fromUrl, 365" in source
+        assert "'va_attr_last', fromUrl, 90" in source
 
 
 class TestMediaLimiter:

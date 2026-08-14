@@ -19,14 +19,20 @@
  *    ones that separate "bounced off the dashboard" from "listened to a call",
  *    because that is the difference a shared link is being judged on.
  *
- * Loading is entirely conditional on a measurement id being configured, so an
- * unconfigured deployment ships no third-party script and sets no cookie.
+ * Loading GA is entirely conditional on a measurement id being configured, so
+ * an unconfigured deployment ships no third-party script.
+ *
+ * Persisting attribution is NOT conditional on it. A demo link shared directly
+ * — in a forum post, a DM, a talk — is often the visitor's first contact with
+ * the product, and the marketing site never sees that visit. Writing the
+ * first-party attribution cookie here is what lets the site recognise the
+ * source later, when the same person comes back to read or to book. It sets a
+ * first-party cookie on our own domain and loads nothing, so it neither needs
+ * nor gets a CSP concession.
  */
 (function () {
-  const config = window.__VAANI_DEMO__;
-  if (!config || !config.ga_id) return;
-
-  const GA_ID = config.ga_id;
+  const config = window.__VAANI_DEMO__ || {};
+  const GA_ID = config.ga_id || '';
 
   /* One cookie domain for both hosts. Without this the console writes its own
      _ga on demo.vaanieval.com and the two surfaces never join up. */
@@ -43,22 +49,69 @@
     try { return JSON.parse(decodeURIComponent(hit.slice(name.length + 1))); } catch { return null; }
   }
 
+  /* Same name, format and lifetimes as site/lib/attribution.ts. The two must
+     agree exactly: whichever host the visitor reaches first writes the cookie,
+     and the other reads it. */
+  function writeCookie(name, value, days) {
+    const domain = registrableDomain();
+    const expires = new Date(Date.now() + days * 864e5).toUTCString();
+    document.cookie = name + '=' + encodeURIComponent(JSON.stringify(value))
+      + '; expires=' + expires + '; path=/; samesite=lax'
+      + (domain ? '; domain=.' + domain : '')
+      + (location.protocol === 'https:' ? '; secure' : '');
+  }
+
+  function taggedFromUrl() {
+    const q = new URLSearchParams(location.search);
+    const pick = (...keys) => {
+      for (const k of keys) { const v = (q.get(k) || '').trim(); if (v) return v.slice(0, 120); }
+      return undefined;
+    };
+    const attr = {
+      source: pick('utm_source'),
+      medium: pick('utm_medium'),
+      campaign: pick('utm_campaign'),
+      content: pick('utm_content'),
+      term: pick('utm_term'),
+      ref: pick('ref', 'via'),
+      gclid: pick('gclid'),
+      fbclid: pick('fbclid'),
+      li_fat_id: pick('li_fat_id'),
+    };
+    if (!Object.values(attr).some(Boolean)) return null;
+    attr.landing = '/demo' + location.pathname;
+    attr.ts = new Date().toISOString();
+    return attr;
+  }
+
+  /* A demo link shared on its own is frequently first contact, and the site
+     never sees that visit. Persist it here so the source is still known when
+     the visitor later lands on vaanieval.com to read or to book. First touch is
+     written once and never overwritten; last touch tracks the most recent
+     tagged visit. An untagged visit writes nothing. */
+  function persist(fromUrl) {
+    if (!fromUrl) return;
+    try {
+      if (!readCookie('va_attr_first')) writeCookie('va_attr_first', fromUrl, 365);
+      writeCookie('va_attr_last', fromUrl, 90);
+    } catch (_) { /* cookies disabled; measurement is never worth an exception */ }
+  }
+
   /* The link the site built wins over the stored cookie: it describes this
      specific click, while the cookie describes the visitor's history. */
   function attribution() {
-    const q = new URLSearchParams(location.search);
-    const fromUrl = {
-      source: q.get('utm_source') || undefined,
-      medium: q.get('utm_medium') || undefined,
-      campaign: q.get('utm_campaign') || undefined,
-      content: q.get('utm_content') || undefined,
-      ref: q.get('ref') || undefined,
-    };
-    if (Object.values(fromUrl).some(Boolean)) return { attr: fromUrl, via: 'link' };
+    const fromUrl = taggedFromUrl();
+    persist(fromUrl);
+    if (fromUrl) return { attr: fromUrl, via: 'link' };
     const cookie = readCookie('va_attr_last') || readCookie('va_attr_first');
     if (cookie) return { attr: cookie, via: 'cookie' };
     return { attr: {}, via: 'direct' };
   }
+
+  /* Attribution is first-party and loads nothing, so it runs regardless. GA
+     does not: without a measurement id there is no third-party script. */
+  const { attr, via } = attribution();
+  if (!GA_ID) return;
 
   window.dataLayer = window.dataLayer || [];
   function gtag() { window.dataLayer.push(arguments); }
@@ -68,8 +121,6 @@
   script.async = true;
   script.src = 'https://www.googletagmanager.com/gtag/js?id=' + encodeURIComponent(GA_ID);
   document.head.appendChild(script);
-
-  const { attr, via } = attribution();
 
   gtag('js', new Date());
   gtag('config', GA_ID, {

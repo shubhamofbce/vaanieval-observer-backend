@@ -11,21 +11,21 @@
   /* Matches the landing header exactly. The two are seen seconds apart, and a
      22px difference in header height is the kind of mismatch that reads as
      "different product" without the visitor being able to say why. */
-  --demo-bar-h: 74px;
+  --demo-bar-h: 58px;
   /* The landing page's own button treatment, so the CTA a visitor clicked on
      the marketing site is visually the same control here. */
   --demo-cta: linear-gradient(180deg, var(--accent-2), var(--accent));
 }
 
 body {
-  font-family: 'Inter', var(--sans);
+  font-family: var(--sans);
   padding-top: var(--demo-bar-h);
 }
 
-/* Headings match the landing page's display face. Body copy stays Inter: the
-   console is dense, and Sora at 12px is harder to scan than it is handsome. */
+/* One face across both surfaces. Clinic carries hierarchy with weight and
+   size rather than a second display family, so headings stay in --sans. */
 :where(h1, h2, h3, .brand-name, .demo-word) {
-  font-family: 'Sora', 'Manrope', var(--sans);
+  font-family: var(--sans);
   letter-spacing: -0.01em;
 }
 
@@ -43,7 +43,7 @@ body {
      and the type is what carries the brand here; matching the gutter would
      break the alignment it is meant to create. */
   padding: 0 16px;
-  background: rgb(5 16 15 / 82%);
+  background: var(--float-bg-soft);
   backdrop-filter: blur(16px);
   border-bottom: 1px solid var(--line);
 }
@@ -58,10 +58,10 @@ body {
 }
 
 .demo-logo {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  background: #000;
+  width: 27px;
+  height: 27px;
+  border-radius: 7px;
+  background: var(--scrim-solid);
   overflow: hidden;
   flex: none;
 }
@@ -77,7 +77,7 @@ body {
   display: block;
 }
 
-.demo-word { font-size: 19px; font-weight: 800; letter-spacing: -0.015em; }
+.demo-word { font-size: 17px; font-weight: 800; letter-spacing: -0.015em; }
 .demo-word span { color: var(--accent); }
 
 .demo-note {
@@ -98,11 +98,11 @@ body {
   font: 600 10.5px/1 var(--sans);
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--accent);
-  background: rgb(55 224 184 / 12%);
-  border: 1px solid rgb(55 224 184 / 34%);
+  color: var(--banner-info-ink);
+  background: var(--pill-accent-bg);
+  border: 1px solid var(--pill-accent-line);
   border-radius: 999px;
-  padding: 5px 9px;
+  padding: 4px 8px;
 }
 
 .demo-note-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -114,7 +114,7 @@ body {
   font-weight: 600;
   color: var(--text-dim);
   text-decoration: none;
-  padding: 8px 10px;
+  padding: 6px 9px;
   border-radius: 9px;
 }
 
@@ -125,10 +125,10 @@ body {
   font-weight: 750;
   color: var(--accent-ink);
   text-decoration: none;
-  padding: 9px 14px;
-  border-radius: 11px;
+  padding: 7px 13px;
+  border-radius: 10px;
   background: var(--demo-cta);
-  box-shadow: 0 10px 30px rgb(55 224 184 / 22%);
+  box-shadow: 0 10px 30px rgb(var(--accent-rgb) / 22%);
   white-space: nowrap;
 }
 
@@ -172,16 +172,16 @@ body { height: 100dvh; }
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  padding: 7px 11px 7px 8px;
-  border: 1px solid rgb(55 224 184 / 26%);
+  padding: 6px 11px 6px 8px;
+  border: 1px solid rgb(var(--accent-rgb) / 26%);
   border-radius: 999px;
-  background: rgb(55 224 184 / 8%);
-  color: var(--text, #eef6f3);
+  background: rgb(var(--accent-rgb) / 8%);
+  color: var(--text);
   font: 600 12.5px/1 var(--sans, system-ui, sans-serif);
   cursor: pointer;
 }
 
-.demo-guide-btn:hover { background: rgb(55 224 184 / 15%); border-color: rgb(55 224 184 / 44%); }
+.demo-guide-btn:hover { background: rgb(var(--accent-rgb) / 15%); border-color: rgb(var(--accent-rgb) / 44%); }
 
 .demo-guide-icon {
   display: grid;
@@ -189,8 +189,8 @@ body { height: 100dvh; }
   width: 17px;
   height: 17px;
   border-radius: 50%;
-  background: rgb(55 224 184 / 22%);
-  color: var(--accent, #37e0b8);
+  background: var(--accent);
+  color: var(--accent-ink);
   font-size: 11px;
   font-weight: 800;
 }
@@ -203,8 +203,8 @@ body { height: 100dvh; }
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--accent, #37e0b8);
-  box-shadow: 0 0 0 3px rgb(55 224 184 / 22%);
+  background: var(--demo-cta);
+  box-shadow: 0 0 0 3px rgb(var(--accent-rgb) / 22%);
 }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -212,8 +212,8 @@ body { height: 100dvh; }
 }
 
 @keyframes demo-guide-pulse {
-  0%, 100% { box-shadow: 0 0 0 3px rgb(55 224 184 / 22%); }
-  50% { box-shadow: 0 0 0 6px rgb(55 224 184 / 6%); }
+  0%, 100% { box-shadow: 0 0 0 3px rgb(var(--accent-rgb) / 22%); }
+  50% { box-shadow: 0 0 0 6px rgb(var(--accent-rgb) / 6%); }
 }
 
 .demo-guide-scrim {
@@ -223,7 +223,7 @@ body { height: 100dvh; }
   display: grid;
   place-items: center;
   padding: 24px;
-  background: rgb(2 10 9 / 66%);
+  background: var(--scrim-backdrop);
   backdrop-filter: blur(2px);
 }
 
@@ -231,12 +231,12 @@ body { height: 100dvh; }
   position: relative;
   width: min(560px, 100%);
   padding: 24px 26px;
-  border: 1px solid rgb(55 224 184 / 24%);
+  border: 1px solid rgb(var(--accent-rgb) / 24%);
   border-radius: 18px;
   background:
-    linear-gradient(180deg, rgb(55 224 184 / 7%), rgb(55 224 184 / 2%)),
-    var(--surface, #0a1a18);
-  box-shadow: 0 30px 80px rgb(0 0 0 / 55%);
+    linear-gradient(180deg, rgb(var(--accent-rgb) / 7%), rgb(var(--accent-rgb) / 2%)),
+    var(--surface, var(--bg-raised));
+  box-shadow: 0 30px 80px rgb(var(--scrim-rgb) / 55%);
 }
 
 .demo-guide-close {
@@ -248,27 +248,27 @@ body { height: 100dvh; }
   border: 0;
   border-radius: 9px;
   background: transparent;
-  color: var(--muted, #9db4b0);
+  color: var(--text-dim);
   font-size: 13px;
   cursor: pointer;
 }
 
-.demo-guide-close:hover { background: var(--bg-hover, rgb(255 255 255 / 6%)); color: var(--ink, #eef6f3); }
+.demo-guide-close:hover { background: var(--bg-hover); color: var(--text); }
 
 .demo-guide-title {
   margin: 0 34px 10px 0;
-  font-family: var(--demo-display, "Sora", system-ui, sans-serif);
+  font-family: var(--sans);
   font-size: 18px;
   font-weight: 700;
   letter-spacing: -0.01em;
-  color: var(--ink, #eef6f3);
+  color: var(--text);
 }
 
 .demo-guide-text {
   margin: 0;
   font-size: 13.5px;
   line-height: 1.65;
-  color: var(--muted, #9db4b0);
+  color: var(--text-dim);
 }
 
 .demo-guide-actions {
@@ -285,8 +285,8 @@ body { height: 100dvh; }
   gap: 6px;
   padding: 9px 15px;
   border-radius: 10px;
-  background: var(--demo-cta, #37e0b8);
-  color: var(--accent-ink, #04211c);
+  background: var(--demo-cta);
+  color: var(--accent-ink, var(--accent-ink));
   font-size: 13px;
   font-weight: 750;
   text-decoration: none;
@@ -297,7 +297,7 @@ body { height: 100dvh; }
 
 .demo-guide-hint {
   font-size: 12.5px;
-  color: var(--muted, #9db4b0);
+  color: var(--text-dim);
 }
 
 /* Closing prompt on a call, at the point where the visitor has just seen the
@@ -310,14 +310,14 @@ body { height: 100dvh; }
   gap: 12px 18px;
   margin: 18px 0 8px;
   padding: 16px 20px;
-  border: 1px solid rgb(55 224 184 / 20%);
+  border: 1px solid rgb(var(--accent-rgb) / 20%);
   border-radius: 14px;
-  background: linear-gradient(180deg, rgb(55 224 184 / 6%), transparent);
+  background: linear-gradient(180deg, rgb(var(--accent-rgb) / 6%), transparent);
 }
 
 .demo-close-text {
   font-size: 13.5px;
-  color: var(--ink, #eef6f3);
+  color: var(--text);
 }
 
 @media (width <= 860px) {
@@ -338,7 +338,7 @@ body { height: 100dvh; }
    never see a ring they did not ask for. */
 .demo-bar :where(a, button):focus-visible,
 body :where(a, button, input, select, summary, [tabindex]):focus-visible {
-  outline: 2px solid var(--accent-2, #6ff2d6);
+  outline: 2px solid var(--accent-2);
   outline-offset: 2px;
   border-radius: 6px;
 }
@@ -353,12 +353,12 @@ body :where(a, button, input, select, summary, [tabindex]):focus-visible {
   display: none;
   margin: 0 0 12px;
   padding: 11px 14px;
-  border: 1px solid rgb(55 224 184 / 20%);
+  border: 1px solid rgb(var(--accent-rgb) / 20%);
   border-radius: 12px;
-  background: rgb(55 224 184 / 6%);
+  background: rgb(var(--accent-rgb) / 6%);
   font-size: 12.5px;
   line-height: 1.5;
-  color: var(--muted, #9db4b0);
+  color: var(--text-dim);
 }
 
 @media (width <= 860px) {

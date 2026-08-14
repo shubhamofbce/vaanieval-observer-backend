@@ -108,7 +108,7 @@
 .ac-chip.is-ok .ac-dot { background: var(--ok); }
 .ac-chip.is-nodata .ac-dot { background: var(--text-faint); }
 .ac-chip.is-muted .ac-dot { background: var(--line-strong); }
-.ac-chip.is-alerting[aria-pressed="true"] { border-color: rgb(255 138 122 / 45%); }
+.ac-chip.is-alerting[aria-pressed="true"] { border-color: rgb(var(--danger-rgb) / 45%); }
 .ac-chip.is-alerting b { color: var(--danger); }
 
 .ac-chips { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
@@ -124,11 +124,11 @@
   padding: 5px 11px 5px 9px;
   border: 1px solid var(--accent-soft);
   border-radius: 999px;
-  background: rgb(55 224 184 / 7%);
+  background: rgb(var(--accent-rgb) / 7%);
   font: 500 11.5px/1 var(--sans);
   color: var(--text-dim);
 }
-.ac-bar-note .ac-dot { background: var(--accent); box-shadow: 0 0 0 3px rgb(55 224 184 / 15%); }
+.ac-bar-note .ac-dot { background: var(--accent); box-shadow: 0 0 0 3px rgb(var(--accent-rgb) / 15%); }
 
 /* ------------------------------------------------------------------- table */
 
@@ -210,9 +210,9 @@
   border-radius: 999px;
   border: 1px solid transparent;
 }
-.ac-state.is-alerting { color: var(--danger); background: rgb(255 138 122 / 14%); border-color: rgb(255 138 122 / 30%); }
-.ac-state.is-warning { color: var(--warn); background: rgb(246 198 107 / 13%); border-color: rgb(246 198 107 / 28%); }
-.ac-state.is-ok { color: var(--ok); background: rgb(79 224 168 / 12%); border-color: rgb(79 224 168 / 24%); }
+.ac-state.is-alerting { color: var(--banner-danger-ink); background: var(--pill-danger-bg); border-color: var(--pill-danger-line); }
+.ac-state.is-warning { color: var(--warn-ink-hot); background: var(--pill-warn-bg); border-color: var(--pill-warn-line); }
+.ac-state.is-ok { color: var(--ok-ink); background: var(--pill-ok-bg); border-color: var(--pill-ok-line); }
 .ac-state.is-nodata { color: var(--text-faint); background: var(--bg-inset); border-color: var(--line); }
 .ac-state.is-muted { color: var(--text-faint); background: var(--bg-inset); border-color: var(--line); }
 
@@ -237,7 +237,7 @@
   color: var(--text-faint);
   background: var(--bg-inset);
 }
-.ac-tag.is-yours { color: var(--accent); border-color: var(--accent-soft); background: rgb(55 224 184 / 9%); }
+.ac-tag.is-yours { color: var(--accent); border-color: var(--accent-soft); background: rgb(var(--accent-rgb) / 9%); }
 
 .ac-scope,
 .ac-notify {
@@ -450,7 +450,7 @@
   position: fixed;
   inset: 0;
   z-index: 60;
-  background: rgb(0 0 0 / 52%);
+  background: rgb(var(--scrim-rgb) / 52%);
   backdrop-filter: blur(2px);
   animation: ac-fade .16s ease;
 }

@@ -142,7 +142,7 @@
 .board-page .chart-legend i { display: inline-block; width: 10px; height: 2px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
 .board-page .chart-legend .swatch-vol { height: 8px; width: 6px; border-radius: 1px; }
 .board-page .chart-hit { fill: transparent; cursor: pointer; }
-.board-page .chart-hit:hover { fill: rgb(255 255 255 / 4%); }
+.board-page .chart-hit:hover { fill: rgb(var(--lift-rgb) / 4%); }
 
 /* -------------------------------------------------------------- stage grid */
 /* Two columns, never three. The four stages are read as a pipeline, and a
@@ -209,8 +209,8 @@
   border-radius: 99px; font-size: 10.5px; white-space: nowrap;
   border: 1px solid transparent;
 }
-.board-page .reason-chip.failure { background: color-mix(in srgb, var(--danger) 16%, transparent); color: var(--danger); border-color: color-mix(in srgb, var(--danger) 32%, transparent); }
-.board-page .reason-chip.slow { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); border-color: color-mix(in srgb, var(--warn) 30%, transparent); }
+.board-page .reason-chip.failure { background: var(--pill-danger-bg); color: var(--banner-danger-ink); border-color: var(--pill-danger-line); }
+.board-page .reason-chip.slow { background: var(--pill-warn-bg); color: var(--warn-ink-hot); border-color: var(--pill-warn-line); }
 .board-page .reason-chip.missing_final, .board-page .reason-chip.unmeasured { background: var(--bg-inset); color: var(--text-dim); border-color: var(--line); }
 .board-page .reason-chip.capture { background: var(--bg-inset); color: var(--text-faint); border-color: var(--line); }
 
@@ -219,7 +219,7 @@
 
 /* ------------------------------------------------------------------ drawer */
 .board-page .drawer { position: fixed; inset: 0; z-index: 80; display: flex; justify-content: flex-end; }
-.board-page .drawer-backdrop { position: absolute; inset: 0; background: rgb(3 7 14 / 62%); }
+.board-page .drawer-backdrop { position: absolute; inset: 0; background: var(--scrim-backdrop); }
 .board-page .drawer-panel {
   position: relative;
   width: min(660px, 94vw);
@@ -276,7 +276,9 @@
   white-space: nowrap;
   vertical-align: 1px;
 }
-.board-page .metric-row.thin .metric-num { opacity: 0.82; }
+/* A secondary row is de-emphasised by colour, not opacity: fading the whole
+   cell also fades its uppercase caption below AA on the light surface. */
+.board-page .metric-row.thin .metric-num { color: var(--text-dim); }
 
 /* Rows are real links so they can be reached, focused and opened in a new tab. */
 .board-page a.row-link {

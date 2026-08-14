@@ -86,6 +86,25 @@ class TestHeaders:
         assert "frame-ancestors 'self' https://www.vaanieval.com" in csp
         assert "object-src 'none'" in csp
 
+    def test_no_third_party_script_without_configured_analytics(self) -> None:
+        """The default posture loads nothing from anyone else."""
+        csp = demo.security_headers("/dashboard")["Content-Security-Policy"]
+        assert "script-src 'self' 'unsafe-inline';" in csp
+        assert "connect-src 'self';" in csp
+        assert "googletagmanager" not in csp
+        assert "google-analytics" not in csp
+
+    def test_analytics_widens_only_the_hosts_it_needs(self) -> None:
+        """And when it is configured, only measurement hosts are added."""
+        csp = demo.security_headers("/dashboard", analytics=True)["Content-Security-Policy"]
+        assert "script-src 'self' 'unsafe-inline' https://www.googletagmanager.com;" in csp
+        assert "https://www.google-analytics.com" in csp
+        # Widening measurement must not relax anything structural.
+        assert "frame-ancestors 'self' https://www.vaanieval.com" in csp
+        assert "object-src 'none'" in csp
+        assert "form-action 'none'" in csp
+        assert "media-src 'self' blob:;" in csp
+
 
 class TestMediaLimiter:
     def test_media_is_recognised_but_metadata_is_not(self) -> None:

@@ -120,6 +120,11 @@ REQUIRE_API_KEY_ENV = "VAANI_REQUIRE_API_KEY"
 # between the KPI row and the chart under it during a single page load.
 DEMO_MODE = demo.enabled()
 DEMO_CONFIG: dict[str, Any] = demo.load_config(ROOT) if DEMO_MODE else {}
+
+
+def demo_ga_id() -> str:
+    """Measurement id for the public demo, empty when analytics is not set up."""
+    return os.environ.get("VAANI_DEMO_GA_ID", "").strip()
 MEDIA_LIMITER = demo.MediaLimiter()
 
 
@@ -285,12 +290,12 @@ async def demo_gate(request: Request, call_next):
             json.dumps({"detail": "This is a read-only public demo."}),
             status_code=404,
             media_type="application/json",
-            headers=demo.security_headers(request.url.path),
+            headers=demo.security_headers(request.url.path, bool(demo_ga_id())),
         )
     if demo.is_media(request.url.path) and not MEDIA_LIMITER.allow(
         demo.client_key(request), time.monotonic()
     ):
-        headers = demo.security_headers(request.url.path)
+        headers = demo.security_headers(request.url.path, bool(demo_ga_id()))
         headers["Retry-After"] = "30"
         # No caching of a refusal: the next request from this visitor, a few
         # seconds later, is meant to succeed.
@@ -302,7 +307,7 @@ async def demo_gate(request: Request, call_next):
             headers=headers,
         )
     response = await call_next(request)
-    for name, value in demo.security_headers(request.url.path).items():
+    for name, value in demo.security_headers(request.url.path, bool(demo_ga_id())).items():
         response.headers[name] = value
     return response
 
@@ -450,24 +455,32 @@ def page(path: Path, route: str) -> Response:
     if not DEMO_MODE:
         return FileResponse(path)
     html = path.read_text(encoding="utf-8")
-    config = json.dumps({**DEMO_CONFIG, "demo": True})
+    # Read from the environment rather than the snapshot: the measurement id
+    # is deployment configuration, and baking it into the snapshot would mean
+    # rebuilding 250MB of media to change an analytics setting.
+    config = json.dumps({
+        **DEMO_CONFIG,
+        "demo": True,
+        "ga_id": demo_ga_id(),
+    })
     injection = (
         f"<script>window.__VAANI_DEMO__={config};</script>\n"
         '<link rel="preconnect" href="https://fonts.googleapis.com">\n'
         '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n'
         '<link rel="stylesheet" href="https://fonts.googleapis.com/css2'
-        "?family=Inter:wght@400;500;600;700&family=Sora:wght@600;700;800&display=swap"
+        "?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
         '">\n'
         '<link rel="icon" href="/assets/vaanieval-logo.jpg">\n'
         '<link rel="stylesheet" href="/assets/demo.css">\n'
         '<script defer src="/assets/demo.js"></script>\n'
+        '<script defer src="/assets/analytics.js"></script>\n'
     )
     html = html.replace("</head>", f"{injection}</head>", 1)
     html = ASSET_REF.sub(
         lambda m: f'{m["attr"]}="{m["url"]}?v={ASSET_VERSION}"', html
     )
     return Response(html, media_type="text/html; charset=utf-8",
-                    headers=demo.security_headers(route))
+                    headers=demo.security_headers(route, bool(demo_ga_id())))
 
 
 @app.get("/")

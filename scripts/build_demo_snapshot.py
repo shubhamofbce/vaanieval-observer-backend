@@ -139,7 +139,20 @@ def parse_args() -> argparse.Namespace:
 
 # ------------------------------------------------------------------ selection
 
-def select_sessions(db: sqlite3.Connection, wanted: int) -> list[sqlite3.Row]:
+def has_playable_audio(source: Path, session_id: str) -> bool:
+    """Whether the console will actually be able to play this call.
+
+    A manifest declaring audio is not the same as audio existing. Calls captured
+    as separate agent/caller packages carry no stereo `call.audio`, so the
+    published render is a `mixed` track while the API still reports the declared
+    `agent`/`caller` tracks as never uploaded - and the visitor lands on the
+    "No audio uploaded" empty state. The demo's whole promise is "open a call and
+    hear it", so a call that cannot be heard is not publishable.
+    """
+    return (source / "objects" / session_id / "call.audio").is_file()
+
+
+def select_sessions(db: sqlite3.Connection, wanted: int, source: Path) -> list[sqlite3.Row]:
     """Choose the calls worth showing a stranger.
 
     Strict recency would publish whatever was uploaded last - here, a run of
@@ -155,7 +168,9 @@ def select_sessions(db: sqlite3.Connection, wanted: int) -> list[sqlite3.Row]:
         "FROM sessions s LEFT JOIN call_metrics c ON c.session_id = s.id "
         "WHERE s.status = 'ready' ORDER BY s.created_at DESC"
     ))
-    usable = [row for row in rows if row["turn_count"] >= 1 and row["duration_ms"] >= 5000]
+    usable = [row for row in rows
+              if row["turn_count"] >= 1 and row["duration_ms"] >= 5000
+              and has_playable_audio(source, row["id"])]
     interesting = [row for row in usable if row["failed_op_count"] > 0]
     ranked = sorted(usable, key=lambda row: (row["turn_count"], row["duration_ms"]), reverse=True)
 
@@ -415,7 +430,7 @@ def build() -> int:
 
     read = sqlite3.connect(f"file:{source / 'vaani.db'}?mode=ro", uri=True)
     read.row_factory = sqlite3.Row
-    selected = select_sessions(read, args.calls)
+    selected = select_sessions(read, args.calls, source)
     if not selected:
         print("No publishable calls found", file=sys.stderr)
         return 1

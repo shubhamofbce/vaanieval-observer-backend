@@ -105,7 +105,7 @@
   font-weight: 650;
   font-variant-numeric: tabular-nums;
 }
-.onboarding-page .step[data-state="verified"] .step-marker { background: #10281f; border-color: #1e4738; color: var(--ok); }
+.onboarding-page .step[data-state="verified"] .step-marker { background: var(--pill-ok-bg); border-color: var(--pill-ok-line); color: var(--ok); }
 .onboarding-page .step[data-state="self-reported"] .step-marker { border-style: dashed; color: var(--text-faint); }
 
 .onboarding-page .step-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-height: 26px; }
@@ -134,7 +134,7 @@
   color: var(--text-faint);
   white-space: nowrap;
 }
-.onboarding-page .step-state[data-state="verified"] { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); background: #10281f; }
+.onboarding-page .step-state[data-state="verified"] { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); background: var(--pill-ok-bg); }
 .onboarding-page .step-state[data-state="self-reported"] { border-style: dashed; }
 .onboarding-page .step-state[data-state="waiting"] { color: var(--text-faint); }
 .onboarding-page .step-state svg { flex: none; }
@@ -237,7 +237,7 @@
   cursor: pointer;
 }
 .onboarding-page .snippet-tabs button:hover { color: var(--text); background: var(--bg-hover); }
-.onboarding-page .snippet-tabs button[aria-selected="true"] { background: var(--accent-soft); color: #cfe4ff; }
+.onboarding-page .snippet-tabs button[aria-selected="true"] { background: var(--accent-soft); color: var(--accent-ink-strong); }
 
 /* -------------------------------------------------------------------- keys */
 .onboarding-page .key-reveal {

@@ -952,7 +952,10 @@ function teardownCall() {
   ui.transcriptFollowButton = null;
   ui.transcriptList = null;
   ui.transcriptCard = null;
-  ui.transcriptToggle = null;
+  ui.transcriptTools = null;
+  ui.deckTabs = null;
+  ui.deckTabTools = null;
+  ui.deckPanels = null;
   ui.liveTrace = null;
   ui.liveTurnId = null;
   ui.togglePlay = null;
@@ -1137,22 +1140,20 @@ function renderCall(session) {
   player.classList.add('call-player');
   const transcript = buildTranscriptSection(session);
   const liveTrace = buildLiveTraceCard(session);
-  // One review surface: what you can hear on the left, what the trace says was
-  // happening at that instant on the right.
+  // One review surface: what you can hear on the left, what was said and what
+  // the trace was doing at that instant on the right.
   //
-  // The transcript used to hold the right-hand slot and the trace lived only in
-  // the table below the fold, which meant the two things a reviewer compares —
-  // the words and the spans that produced them — were never on screen together.
-  // The words belong under the audio they transcribe; the spans belong beside
-  // it, because they answer "why did this take so long" about the exact moment
-  // the playhead is on.
+  // The transcript used to sit under the player, which made the deck a stack of
+  // three panels and pushed the trace table, the KPIs and the inspector under
+  // the fold. Both right-hand answers now share one column as tabs: each gets
+  // the full height instead of a third of it, and the deck is two panels tall.
   //
-  // Stacking all of that costs height, and the deck is pinned, so it collapses
-  // to a single transport bar the moment the reviewer scrolls down to read
-  // anything else. See `wireDeck`.
+  // Stacking all of that still costs height, and the deck is pinned, so it
+  // collapses to a single transport bar the moment the reviewer scrolls down to
+  // read anything else. See `wireDeck`.
   const deck = h('div', { class: 'review-deck' },
-    h('div', { class: 'deck-main' }, player, transcript),
-    h('div', { class: 'deck-side' }, liveTrace),
+    h('div', { class: 'deck-main' }, player),
+    h('div', { class: 'deck-side' }, buildDeckTabs(transcript, liveTrace)),
   );
 
   const deckToggle = h('button', {
@@ -1163,10 +1164,10 @@ function renderCall(session) {
   // The transport bar is where a reviewer's eye already is while listening, so
   // that is where the collapse control belongs. A call with no recording has no
   // transport bar, and its deck still collapses, so the control falls back to
-  // the transcript's own header rather than disappearing.
+  // the side tab strip rather than disappearing.
   const playerBar = player.querySelector('.player-bar');
   if (playerBar) playerBar.append(deckToggle);
-  else transcript.querySelector('.card-tools')?.append(deckToggle);
+  else ui.deckTabTools?.append(deckToggle);
   deck.dataset.transport = playerBar ? 'player' : 'transcript';
 
   clear($('#call')).append(...[head, deck, banner, columns].filter(Boolean));
@@ -1182,8 +1183,8 @@ const DECK_KEY = 'vaani.deck';
 function readDeckPrefs() {
   try {
     const saved = JSON.parse(localStorage.getItem(DECK_KEY) || '{}');
-    return { compact: saved.compact === true, transcript: saved.transcript !== false };
-  } catch { return { compact: false, transcript: true }; }
+    return { compact: saved.compact === true, sideTab: saved.sideTab === 'turns' ? 'turns' : 'transcript' };
+  } catch { return { compact: false, sideTab: 'transcript' }; }
 }
 function writeDeckPrefs(patch) {
   try { localStorage.setItem(DECK_KEY, JSON.stringify({ ...readDeckPrefs(), ...patch })); } catch { /* private mode */ }
@@ -1221,6 +1222,18 @@ function wireDeck(deck) {
 
   const paint = () => {
     deck.dataset.compact = String(compact);
+    // Folded, the side column is only the "what is playing" line, so the turn
+    // ladder is shown whichever tab was left selected. A global
+    // `[hidden] { display: none !important }` means CSS cannot reveal it —
+    // the fold has to move the panel flags itself.
+    if (ui.deckPanels) {
+      if (compact) {
+        ui.deckPanels.turns.hidden = false;
+        ui.deckPanels.transcript.hidden = true;
+      } else {
+        showDeckTab(readDeckPrefs().sideTab, { silent: true });
+      }
+    }
     const button = ui.deckToggle;
     if (!button) return;
     const label = compact ? 'Expand the player' : 'Collapse the player';
@@ -1637,7 +1650,7 @@ function transcriptSection(body, count, transcript, session, prompt = null) {
     class: 'btn tiny follow-toggle',
     'aria-pressed': 'true',
     title: 'Keep the playing turn in view',
-    text: 'Follow playback',
+    text: 'Follow',
     onClick: () => setFollow(!ui.transcriptFollow, { recentre: true }),
   });
 
@@ -1673,7 +1686,7 @@ function transcriptSection(body, count, transcript, session, prompt = null) {
       onClick: () => {
         prompt.open = !prompt.open;
         if (prompt.open) {
-          setTranscriptOpen(true);
+          showDeckTab('transcript');
           prompt.scrollIntoView({ block: 'nearest' });
         }
       },
@@ -1681,51 +1694,103 @@ function transcriptSection(body, count, transcript, session, prompt = null) {
     : null;
   prompt?.addEventListener('toggle', () => promptChip.setAttribute('aria-pressed', String(prompt.open)));
 
-  // The transcript sits inside a pinned deck, so it has to be able to get out
-  // of the way. Its header is the collapse control: a strip that only said
-  // "Transcript" above a panel full of dialogue was naming what the reader can
-  // already see, so the name, the count and the affordance are one target.
-  const toggle = h('button', {
-    type: 'button', class: 'icon-btn transcript-toggle strip-toggle',
-    onClick: () => setTranscriptOpen(ui.transcriptCard?.dataset.open === 'false'),
-  },
-    glyph(PATH.chevronUp, 12),
-    h('b', { text: 'Transcript' }),
-    h('span', { class: 'strip-count', text: count ? String(count) : '0' }),
-  );
-
-  const card = h('section', { class: 'card transcript-card' },
-    h('div', { class: 'card-head transcript-head' },
-      toggle,
-      h('div', { class: 'card-tools' },
-        promptChip,
-        transcript && playable ? follow : null,
-      ),
-    ),
-    body,
-  );
+  // The transcript is a panel of the deck's side tabs, so the tab is its name,
+  // its count and its affordance all at once. Repeating "Transcript 52" in a
+  // header directly under a selected tab reading the same thing spent a row on
+  // nothing, so the card keeps only its dialogue and hands its two controls up
+  // to the tab strip, which is where the reviewer is already looking.
+  const card = h('section', { class: 'card transcript-card' }, body);
 
   ui.transcriptCard = card;
-  ui.transcriptToggle = toggle;
-  setTranscriptOpen(readDeckPrefs().transcript, { silent: true });
+  ui.transcriptCount = count;
+  ui.transcriptTools = h('div', { class: 'card-tools transcript-tools' },
+    promptChip,
+    transcript && playable ? follow : null,
+  );
   return card;
 }
 
-/** Opening and closing the transcript is a view preference, so it survives the
- *  call, the reload and the tab. `silent` is the initial paint, which must not
- *  write the preference back or scroll a panel nobody has looked at yet. */
-function setTranscriptOpen(open, { silent = false } = {}) {
-  const card = ui.transcriptCard;
-  if (!card) return;
-  card.dataset.open = String(open);
-  const label = open ? 'Hide the transcript' : 'Show the transcript';
-  ui.transcriptToggle?.setAttribute('aria-expanded', String(open));
-  ui.transcriptToggle?.setAttribute('aria-label', label);
-  if (ui.transcriptToggle) ui.transcriptToggle.title = `${label}  ·  t`;
-  ui.transcriptToggle?.querySelector('path')?.setAttribute('d', open ? PATH.chevronUp : PATH.chevronDown);
+/** The deck's right-hand column. Two answers to "what happened here" — the
+ *  words and the spans behind them — compete for the same slot, and stacking
+ *  both is what pushed the transcript under the fold in the first place. Tabs
+ *  give each the full column at full height and cost one row.
+ *
+ *  Transcript leads because it is what a reviewer reads first: the audio names
+ *  the moment, the transcript says what was said in it, and the turn ladder is
+ *  the follow-up question about why it took so long.
+ */
+const DECK_TABS = [
+  { key: 'transcript', label: 'Transcript' },
+  { key: 'turns', label: 'Turns' },
+];
+
+function buildDeckTabs(transcriptCard, liveCard) {
+  const tabs = h('div', { class: 'tabs deck-tablist', role: 'tablist', 'aria-label': 'Call detail' });
+  for (const tab of DECK_TABS) {
+    tabs.append(h('button', {
+      type: 'button',
+      role: 'tab',
+      id: `deck-tab-${tab.key}`,
+      'aria-controls': `deck-panel-${tab.key}`,
+      dataset: { deckTab: tab.key },
+      'aria-selected': 'false',
+      tabindex: '-1',
+      onClick: () => showDeckTab(tab.key, { focus: false }),
+    },
+      h('span', { text: tab.label }),
+      tab.key === 'transcript'
+        ? h('span', { class: 'strip-count', text: String(ui.transcriptCount || 0) })
+        : null,
+    ));
+  }
+  // A tablist is a single tab stop; arrows move between the tabs inside it.
+  tabs.addEventListener('keydown', (event) => {
+    const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
+    const usable = [...tabs.querySelectorAll('button')];
+    let next = null;
+    if (step) next = usable[(usable.indexOf(event.target) + step + usable.length) % usable.length];
+    else if (event.key === 'Home') next = usable[0];
+    else if (event.key === 'End') next = usable[usable.length - 1];
+    if (!next) return;
+    event.preventDefault();
+    showDeckTab(next.dataset.deckTab);
+  });
+
+  transcriptCard.id = 'deck-panel-transcript';
+  transcriptCard.setAttribute('role', 'tabpanel');
+  transcriptCard.setAttribute('aria-labelledby', 'deck-tab-transcript');
+  liveCard.id = 'deck-panel-turns';
+  liveCard.setAttribute('role', 'tabpanel');
+  liveCard.setAttribute('aria-labelledby', 'deck-tab-turns');
+
+  const tools = h('div', { class: 'card-tools deck-tab-tools' }, ui.transcriptTools);
+  const card = h('section', { class: 'card side-deck' },
+    h('div', { class: 'card-head deck-tab-head' }, tabs, tools),
+    h('div', { class: 'side-panels' }, transcriptCard, liveCard),
+  );
+  ui.deckTabs = tabs;
+  ui.deckTabTools = tools;
+  ui.deckPanels = { transcript: transcriptCard, turns: liveCard };
+  showDeckTab(readDeckPrefs().sideTab, { silent: true });
+  return card;
+}
+
+/** Which panel the side column is showing. It is a view preference, so it
+ *  outlives the call and the reload, and never touches the URL. */
+function showDeckTab(key, { silent = false, focus = true } = {}) {
+  if (!ui.deckPanels || !ui.deckPanels[key]) key = 'transcript';
+  for (const tab of ui.deckTabs?.querySelectorAll('button') || []) {
+    const on = tab.dataset.deckTab === key;
+    tab.setAttribute('aria-selected', String(on));
+    tab.tabIndex = on ? 0 : -1;
+    if (on && focus && !silent) tab.focus();
+  }
+  for (const [name, panel] of Object.entries(ui.deckPanels)) panel.hidden = name !== key;
+  // Only the transcript owns tools; the turn ladder's own header is its label.
+  if (ui.transcriptTools) ui.transcriptTools.hidden = key !== 'transcript';
   if (silent) return;
-  writeDeckPrefs({ transcript: open });
-  if (open) scrollTranscriptTo(ui.liveTurnId, { force: true });
+  writeDeckPrefs({ sideTab: key });
+  if (key === 'transcript') scrollTranscriptTo(ui.liveTurnId, { force: true });
 }
 
 function setFollow(on, { recentre = false } = {}) {
@@ -3069,13 +3134,23 @@ function buildSttQualityCard(session) {
     }
   }
 
+  // The STT comparison page is turned off in the public demo: it is a separate
+  // deep-dive surface whose controls imply a run the snapshot cannot perform.
+  // The button stays visible but inert, so the capability is still legible.
+  const comparisonCta = window.__VAANI_DEMO__
+    ? h('button', {
+      type: 'button', class: 'btn', text: 'Open comparison', disabled: true,
+      title: 'The STT comparison is not part of this demo.',
+    })
+    : h('a', { class: 'btn', href: comparisonUrl, text: 'Open comparison' });
+
   return h('section', { class: 'card stt-card', id: 'stt-quality' },
     h('div', { class: 'card-head' },
       h('h3', {}, 'STT review', h('span', { class: 'chip', dataset: { tone: 'warn' }, text: 'Beta' })),
       h('div', { class: 'card-tools' },
         h('span', { class: 'chip', text: rows.length ? `${rows.length} captured STT turn${rows.length === 1 ? '' : 's'}` : 'not captured' }),
-        buildChallengerControl(session, comparisonUrl),
-        h('a', { class: 'btn', href: comparisonUrl, text: 'Open comparison' }),
+        window.__VAANI_DEMO__ ? null : buildChallengerControl(session, comparisonUrl),
+        comparisonCta,
       ),
     ),
     h('div', { class: 'card-body flush' }, notice, summary, table),
@@ -3707,13 +3782,35 @@ const wantsCalm = () => !!calmMotion?.matches;
 // than a solid block, and keeps the bucket count a screen actually needs small.
 const WAVE_PITCH = 3;
 const WAVE_LANE_GAP = 8;
-const CHANNEL_TONE = {
-  agent: { ink: '#4fd6a5', dim: 'rgb(79 214 165 / 26%)', label: 'Agent' },
-  caller: { ink: '#62b4ff', dim: 'rgb(98 180 255 / 26%)', label: 'Caller' },
-  mixed: { ink: '#9bb8e8', dim: 'rgb(155 184 232 / 26%)', label: 'Mixed' },
-  call: { ink: '#9bb8e8', dim: 'rgb(155 184 232 / 26%)', label: 'Call' },
-};
-const toneFor = (name) => CHANNEL_TONE[name] || CHANNEL_TONE.call;
+/* Canvas cannot read a CSS variable, so the waveform palette is pulled off the
+   root element and cached until the theme changes. Without this the wave keeps
+   its dark-tuned pastels on a white card and reads as an empty rail. */
+const CHANNEL_TOKEN = { agent: 'agent', caller: 'caller', mixed: 'mixed', call: 'mixed' };
+const CHANNEL_LABEL = { agent: 'Agent', caller: 'Caller', mixed: 'Mixed', call: 'Call' };
+let wavePalette = null;
+
+const readToken = (name) =>
+  getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+function buildWavePalette() {
+  const alpha = Number(readToken('--wave-dim-a')) || 0.28;
+  const lift = readToken('--wave-lift-rgb') || '255 255 255';
+  const tones = {};
+  for (const [channel, token] of Object.entries(CHANNEL_TOKEN)) {
+    const ink = readToken(`--wave-${token}`) || '#9bb8e8';
+    const rgb = readToken(`--wave-${token}-rgb`) || '155 184 232';
+    tones[channel] = { ink, dim: `rgb(${rgb} / ${alpha * 100}%)`, label: CHANNEL_LABEL[channel] };
+  }
+  return { tones, lift };
+}
+
+const palette = () => (wavePalette ||= buildWavePalette());
+/* A lift is white on a dark theme and shade on a light one, so the same rule
+   reads as "raise this off the surface" in both. */
+const waveLift = (percent) => `rgb(${palette().lift} / ${percent}%)`;
+const toneFor = (name) => palette().tones[name] || palette().tones.call;
+
+window.addEventListener('vaani:themechange', () => { wavePalette = null; });
 
 const PATH = {
   play: 'M5.2 3.3a.8.8 0 0 1 1.2-.68l6 4.7a.8.8 0 0 1 0 1.36l-6 4.7A.8.8 0 0 1 5.2 12.7Z',
@@ -3723,7 +3820,6 @@ const PATH = {
   back: 'M7.7 2.2a.7.7 0 0 1 0 1.18l-.86.6A4.6 4.6 0 1 1 3.4 8.3a.7.7 0 1 1 1.4-.1 3.2 3.2 0 1 0 2.5-3.26l.83.58a.7.7 0 1 1-.8 1.15L5.1 5.24a.7.7 0 0 1 0-1.15l2.2-1.53a.7.7 0 0 1 .4-.36Z',
   forward: 'M8.3 2.2a.7.7 0 0 0 0 1.18l.86.6A4.6 4.6 0 1 0 12.6 8.3a.7.7 0 1 0-1.4-.1 3.2 3.2 0 1 1-2.5-3.26l-.83.58a.7.7 0 1 0 .8 1.15l2.23-1.43a.7.7 0 0 0 0-1.15L8.7 2.56a.7.7 0 0 0-.4-.36Z',
   loop: 'M4.8 3.2h5.1a2.9 2.9 0 0 1 2.9 2.9v.6a.7.7 0 1 1-1.4 0v-.6c0-.83-.67-1.5-1.5-1.5H4.8v1.05a.5.5 0 0 1-.8.4L1.7 4.3a.5.5 0 0 1 0-.8l2.3-1.75a.5.5 0 0 1 .8.4Zm6.4 9.6H6.1a2.9 2.9 0 0 1-2.9-2.9v-.6a.7.7 0 1 1 1.4 0v.6c0 .83.67 1.5 1.5 1.5h5.1v-1.05a.5.5 0 0 1 .8-.4l2.3 1.75a.5.5 0 0 1 0 .8l-2.3 1.75a.5.5 0 0 1-.8-.4Z',
-  link: 'M6.5 9.5a2.6 2.6 0 0 1 0-3.68l2.3-2.3a2.6 2.6 0 0 1 3.68 3.68l-.9.9a.7.7 0 1 1-.99-.99l.9-.9a1.2 1.2 0 0 0-1.7-1.7l-2.3 2.3a1.2 1.2 0 0 0 0 1.7.7.7 0 0 1-.99.99Zm3 -3a2.6 2.6 0 0 1 0 3.68l-2.3 2.3a2.6 2.6 0 0 1-3.68-3.68l.9-.9a.7.7 0 1 1 .99.99l-.9.9a1.2 1.2 0 0 0 1.7 1.7l2.3-2.3a1.2 1.2 0 0 0 0-1.7.7.7 0 0 1 .99-.99Z',
   download: 'M8 1.6a.7.7 0 0 1 .7.7v6.1l1.9-1.9a.7.7 0 1 1 1 1L8.5 10.6a.7.7 0 0 1-1 0L4.4 7.5a.7.7 0 1 1 1-1l1.9 1.9V2.3a.7.7 0 0 1 .7-.7ZM2.6 10.4a.7.7 0 0 1 .7.7v1.4h9.4v-1.4a.7.7 0 1 1 1.4 0v1.7a1.1 1.1 0 0 1-1.1 1.1H2.9a1.1 1.1 0 0 1-1.1-1.1v-1.7a.7.7 0 0 1 .7-.7Z',
   zoomIn: 'M7 1.8a5.2 5.2 0 0 1 4.1 8.42l3 3a.75.75 0 0 1-1.06 1.06l-3-3A5.2 5.2 0 1 1 7 1.8Zm0 1.5a3.7 3.7 0 1 0 0 7.4 3.7 3.7 0 0 0 0-7.4Zm0 1.2a.6.6 0 0 1 .6.6v1.3h1.3a.6.6 0 1 1 0 1.2H7.6v1.3a.6.6 0 1 1-1.2 0V7.6H5.1a.6.6 0 0 1 0-1.2h1.3V5.1a.6.6 0 0 1 .6-.6Z',
   zoomOut: 'M7 1.8a5.2 5.2 0 0 1 4.1 8.42l3 3a.75.75 0 0 1-1.06 1.06l-3-3A5.2 5.2 0 1 1 7 1.8Zm0 1.5a3.7 3.7 0 1 0 0 7.4 3.7 3.7 0 0 0 0-7.4ZM5.1 6.4h3.8a.6.6 0 1 1 0 1.2H5.1a.6.6 0 0 1 0-1.2Z',
@@ -3984,26 +4080,6 @@ function buildAudioCard(session) {
 
   const download = h('a', { class: 'icon-btn', download: '', title: 'Download this track as WAV', 'aria-label': 'Download WAV' }, glyph(PATH.download, 15));
 
-  // Evidence is only useful if it can leave the tab it was found in.
-  const share = h('button', {
-    type: 'button', class: 'icon-btn', title: 'Copy a link to this moment', 'aria-label': 'Copy a link to this moment',
-    onClick: async () => {
-      const query = new URLSearchParams();
-      query.set('t', playedSeconds().toFixed(1));
-      if (view.selection) query.set('range', `${view.selection.from.toFixed(1)}-${view.selection.to.toFixed(1)}`);
-      const link = `${location.origin}${location.pathname}#/call/${encodeURIComponent(session.id)}?${query}`;
-      try {
-        await navigator.clipboard.writeText(link);
-        share.classList.add('is-done');
-        setTimeout(() => share.classList.remove('is-done'), 1400);
-      } catch {
-        // Clipboard access is denied outside a secure context; showing the link
-        // is more use than a silent failure.
-        window.prompt('Copy this link', link);
-      }
-    },
-  }, glyph(PATH.link, 15));
-
   const trackChips = h('div', { class: 'seg', role: 'group', 'aria-label': 'Audio source' });
   if (tracks.length > 1) {
     for (const track of tracks) {
@@ -4043,7 +4119,6 @@ function buildAudioCard(session) {
         h('div', { class: 'vol' }, muteButton, volumeSlider),
         speed,
         h('div', { class: 'zoom' }, zoomOut, zoomLabel, zoomIn),
-        share,
         download,
       ),
     ),
@@ -4258,9 +4333,9 @@ function buildAudioCard(session) {
     if (!channels) {
       // No envelope yet: a flat rail still shows position and keeps the control
       // usable while the summary is being computed.
-      context.fillStyle = 'rgb(255 255 255 / 6%)';
+      context.fillStyle = waveLift(6);
       context.fillRect(0, height / 2 - 3, width, 6);
-      context.fillStyle = 'rgb(76 154 255 / 55%)';
+      context.fillStyle = toneFor('caller').ink;
       context.fillRect(0, height / 2 - 3, Math.max(0, playedX), 6);
       return;
     }
@@ -4278,7 +4353,7 @@ function buildAudioCard(session) {
       const centre = top + laneHeight / 2;
       const reach = laneHeight / 2 - 1;
 
-      context.fillStyle = 'rgb(255 255 255 / 7%)';
+      context.fillStyle = waveLift(7);
       context.fillRect(0, centre - 0.5, width, 1);
 
       for (let x = 0; x < width; x += WAVE_PITCH) {
@@ -4309,7 +4384,7 @@ function buildAudioCard(session) {
     // Loaded ranges, so a reviewer scrubbing a long call can tell the difference
     // between silence and audio the browser has not fetched yet.
     if (length) {
-      context.fillStyle = 'rgb(255 255 255 / 12%)';
+      context.fillStyle = waveLift(12);
       for (let index = 0; index < audio.buffered.length; index += 1) {
         const from = (audio.buffered.start(index) / length) * total - offsetX;
         const to = (audio.buffered.end(index) / length) * total - offsetX;
@@ -5205,6 +5280,10 @@ function buildAudioCard(session) {
 
   const resize = new ResizeObserver(() => { paintWave(); paintRuler(); paintMini(); loadPeaks(); });
   resize.observe(viewport);
+
+  // Canvas keeps whatever it was last painted with, so a theme switch has to
+  // repaint or the waveform stays in the previous theme's colours.
+  bind('vaani:themechange', () => { paintWave(); paintRuler(); paintMini(); }, window);
   listeners.signal.addEventListener('abort', () => { resize.disconnect(); if (raf) cancelAnimationFrame(raf); });
 
   // A background tab never runs `requestAnimationFrame`, and neither the
@@ -5590,8 +5669,12 @@ document.addEventListener('keydown', (event) => {
   } else if (event.key.toLowerCase() === 'c' && ui.toggleDeck) {
     ui.toggleDeck();
     event.preventDefault();
-  } else if (event.key.toLowerCase() === 't' && ui.transcriptCard) {
-    setTranscriptOpen(ui.transcriptCard.dataset.open === 'false');
+  } else if (event.key.toLowerCase() === 't' && ui.deckPanels) {
+    // The key used to open and close the transcript; it now brings it forward,
+    // which is the same intent in a tabbed column. It must not move focus onto
+    // the tab: a focused `role="tab"` is a control, and the guard above would
+    // then swallow the next press of the same key.
+    showDeckTab(ui.deckPanels.transcript.hidden ? 'transcript' : 'turns', { focus: false });
     event.preventDefault();
   } else if (event.key === ' ' && state.audio) {
     ui.togglePlay?.();

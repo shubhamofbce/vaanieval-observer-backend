@@ -71,19 +71,37 @@ PAGE_CACHE = "public, max-age=300"
 # Inline styles and handlers exist in the console today, so `unsafe-inline` is
 # required for the demo to render at all. Everything else is locked to self:
 # no third-party script, no remote frame, no plugin.
-CSP = (
-    "default-src 'self'; "
-    "script-src 'self' 'unsafe-inline'; "
-    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-    "font-src 'self' https://fonts.gstatic.com data:; "
-    "img-src 'self' data:; "
-    "media-src 'self' blob:; "
-    "connect-src 'self'; "
-    "frame-ancestors 'self' https://www.vaanieval.com https://vaanieval.com; "
-    "base-uri 'self'; "
-    "form-action 'none'; "
-    "object-src 'none'"
+# Analytics hosts are added only when a measurement id is configured. An
+# unconfigured deployment keeps the tight policy and can load no third-party
+# script at all, which is the posture the demo should have by default.
+_GA_SCRIPT = "https://www.googletagmanager.com"
+_GA_CONNECT = (
+    "https://www.google-analytics.com https://analytics.google.com "
+    "https://region1.google-analytics.com https://stats.g.doubleclick.net"
 )
+
+
+def csp(analytics: bool = False) -> str:
+    """The demo's content policy, widened only for configured analytics."""
+    script = "'self' 'unsafe-inline'" + (f" {_GA_SCRIPT}" if analytics else "")
+    connect = "'self'" + (f" {_GA_CONNECT} {_GA_SCRIPT}" if analytics else "")
+    img = "'self' data:" + (f" {_GA_CONNECT} {_GA_SCRIPT}" if analytics else "")
+    return (
+        "default-src 'self'; "
+        f"script-src {script}; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com data:; "
+        f"img-src {img}; "
+        "media-src 'self' blob:; "
+        f"connect-src {connect}; "
+        "frame-ancestors 'self' https://www.vaanieval.com https://vaanieval.com; "
+        "base-uri 'self'; "
+        "form-action 'none'; "
+        "object-src 'none'"
+    )
+
+
+CSP = csp()
 
 
 def enabled() -> bool:
@@ -207,10 +225,10 @@ def client_key(request: Any) -> str:
     return getattr(client, "host", "") or "unknown"
 
 
-def security_headers(path: str) -> dict[str, str]:
+def security_headers(path: str, analytics: bool = False) -> dict[str, str]:
     """Headers applied to every demo response."""
     headers = {
-        "Content-Security-Policy": CSP,
+        "Content-Security-Policy": csp(analytics),
         "X-Content-Type-Options": "nosniff",
         "Referrer-Policy": "strict-origin-when-cross-origin",
         "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",

@@ -39,13 +39,20 @@
     // Say the date out loud. The snapshot's clock is frozen, so "3 days ago" in
     // the call list is measured from the sample window and not from today; a
     // visitor who is not told that will read it as stale data.
-    const calls = config.call_count ? `${config.call_count} real calls` : 'sample calls';
-    const when = config.window_label ? ` from ${config.window_label}` : '';
+    // Say the date out loud. The snapshot's clock is frozen, so "3 days ago" in
+    // the call list is measured from the sample window and not from today; a
+    // visitor who is not told that will read it as stale data.
+    // The bar carries the date and nothing else; the full provenance sentence
+    // lives in the title, and "How to read this" is where a visitor who wants
+    // the explanation actually goes.
+    const calls = config.call_count ? `${config.call_count} real calls` : 'Sample calls';
+    const when = config.window_label ? ` · ${config.window_label}` : '';
     const note = el('span', { class: 'demo-note' },
       el('span', { class: 'demo-tag', text: 'Live demo' }),
       el('span', {
         class: 'demo-note-text',
-        text: `${calls}${when}, anonymised. Read-only — the audio, transcripts, timings and traces are real captures.`,
+        title: `${calls} from ${config.window_label || 'the sample window'}, anonymised. Read-only — the audio, transcripts, timings and traces are real captures.`,
+        text: `${calls}${when} · anonymised`,
       }),
     );
 

@@ -427,14 +427,19 @@ def asset_version() -> str:
     saw an earlier build would keep their copy of the stylesheet for a year and
     never see a correction. Stamping the references makes the long cache safe,
     because a changed file is a changed URL.
+
+    The stamp hashes file *contents*, not size and mtime. A same-length edit
+    (renaming a button from "Book a demo" to "Book a call", say) leaves both of
+    those untouched, and the zip deploy carries mtimes along, so a metadata
+    stamp would keep serving the old URL and every returning visitor would hold
+    the stale file for the full year. Reading the bytes costs a few hundred
+    kilobytes once at import and removes that whole class of silent staleness.
     """
     digest = hashlib.sha256()
     for file in sorted(STATIC.rglob("*")):
         if file.is_file():
-            stat = file.stat()
             digest.update(file.name.encode())
-            digest.update(str(stat.st_mtime_ns).encode())
-            digest.update(str(stat.st_size).encode())
+            digest.update(file.read_bytes())
     return digest.hexdigest()[:12]
 
 

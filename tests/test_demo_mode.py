@@ -164,3 +164,31 @@ class TestMediaLimiter:
 
         assert demo.client_key(Request({"x-forwarded-for": "1.2.3.4, 5.6.7.8"}, "10.0.0.1")) == "1.2.3.4"
         assert demo.client_key(Request({}, "10.0.0.1")) == "10.0.0.1"
+
+
+class TestAssetVersion:
+    def test_stamp_follows_content_not_metadata(self, tmp_path, monkeypatch) -> None:
+        """A same-length edit must still produce a new URL.
+
+        `/assets/` is served immutable for a year, so the stamp is the only
+        thing that lets a returning visitor see a correction. Renaming a button
+        from "Book a demo" to "Book a call" changes no byte count and no mtime
+        the zip deploy preserves, which is exactly the edit a size-and-mtime
+        stamp would miss.
+        """
+        from app import main
+
+        asset = tmp_path / "demo.js"
+        asset.write_text("var label = 'Book a demo';")
+        stat = asset.stat()
+        monkeypatch.setattr(main, "STATIC", tmp_path)
+        before = main.asset_version()
+
+        asset.write_text("var label = 'Book a call';")
+        import os
+
+        os.utime(asset, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        assert asset.stat().st_size == stat.st_size
+        assert asset.stat().st_mtime_ns == stat.st_mtime_ns
+
+        assert main.asset_version() != before

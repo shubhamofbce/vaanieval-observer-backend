@@ -164,7 +164,7 @@ body { height: 100dvh; }
    -------------------------------------------------------------------------
    The framing that used to sit in a band above the KPIs now opens from the
    header. The trigger is sized as a quiet tertiary control so it never
-   competes with "Book a demo", and carries an unread dot until it is opened
+   competes with "Book a call", and carries an unread dot until it is opened
    once, which is what points a first-time visitor at it without spending any
    of the page on the sentence. */
 .demo-guide-btn {

@@ -64,7 +64,7 @@
         href: BOOKING,
         target: '_blank',
         rel: 'noopener',
-        text: 'Book a demo',
+        text: 'Book a call',
       }),
     );
 

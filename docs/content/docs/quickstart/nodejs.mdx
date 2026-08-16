@@ -1,0 +1,303 @@
+---
+title: Node.js
+description: Record your first voice-agent call from Node.js, with automatic fetch instrumentation and websocket accounting.
+---
+
+By the end of this page you will have a recorded call in a local dashboard, with
+audio you can play and a trace you can expand.
+
+## Before you start
+
+- **Node.js 20 or newer** (the SDK declares `engines.node >= 20`)
+- **Python 3.11 or newer** for the dashboard
+- Access to the private repositories. The SDK is **not published to npm** —
+  install it from Git.
+
+## 1. Run the dashboard
+
+<Steps>
+
+<Step>
+
+### Clone and install
+
+```bash
+git clone https://github.com/shubhamofbce/vaanieval-observer-backend.git dashboard
+cd dashboard
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+</Step>
+
+<Step>
+
+### Start it
+
+```bash
+uvicorn app.main:app --reload --port 8000
+```
+
+The console is at `http://localhost:8000/`.
+
+<Callout type="warn">
+  The local dashboard has **no authentication and no tenant isolation**, and it
+  accepts any non-empty API key without validating it. Keep it on localhost or a
+  private network. See [Self-hosting](/docs/dashboard/self-hosting).
+</Callout>
+
+</Step>
+
+</Steps>
+
+## 2. Install the SDK
+
+```bash
+npm install github:shubhamofbce/vaanieval-observer-nodejs-sdk
+```
+
+The SDK is pure ESM with **no runtime dependencies** — it uses only Node
+built-ins (`node:async_hooks`, `node:fs/promises`, `node:crypto`,
+`node:perf_hooks`).
+
+```json title="package.json"
+{
+  "type": "module"
+}
+```
+
+## 3. Record a call
+
+```js title="record-a-call.mjs"
+import { VaaniObserver } from '@vaanieal/observer';
+
+const SAMPLE_RATE = 16000;
+const FORMAT = { encoding: 'pcm_s16le', sampleRateHz: SAMPLE_RATE, channels: 1 };
+
+/** A second of audible PCM, so the recording has something to play. */
+function tone(hz, ms) {
+  const frames = Math.floor((SAMPLE_RATE * ms) / 1000);
+  const buffer = Buffer.alloc(frames * 2);
+  for (let n = 0; n < frames; n += 1) {
+    buffer.writeInt16LE(Math.round(9000 * Math.sin((2 * Math.PI * hz * n) / SAMPLE_RATE)), n * 2);
+  }
+  return buffer;
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const vaani = new VaaniObserver({
+  endpoint: 'http://localhost:8000',
+  apiKey: 'local-dev', // the local dashboard does not validate this
+  spoolDirectory: './.vaani-spool',
+  endpoints: [{ id: 'llm', type: 'llm', url: 'https://api.openai.com/v1' }],
+});
+
+const session = vaani.startSession({ agentId: 'quickstart-agent' });
+
+for (let index = 0; index < 2; index += 1) {
+  const turn = session.startTurn();
+
+  // The caller speaks.
+  const stt = turn.startOperation({ type: 'stt', provider: 'demo' });
+  stt.event('speech_started');
+  session.recordInboundAudio(tone(220, 900), FORMAT);
+  await sleep(900);
+  stt.event('final_transcript');
+  stt.end({ status: 'ok', response: { transcript: `caller line ${index + 1}` } });
+
+  // The model thinks.
+  const llm = turn.startOperation({ type: 'llm', provider: 'demo', model: 'demo-model' });
+  await sleep(400);
+  llm.event('first_token');
+  llm.end({ status: 'ok', response: { tokens: 128 } });
+
+  // The agent speaks. `operationId` attributes the PCM to this exact reply.
+  const tts = turn.startOperation({ type: 'tts', provider: 'demo' });
+  session.recordOutboundAudio(tone(440, 1200), {
+    ...FORMAT,
+    turnId: turn.id,
+    operationId: tts.id,
+  });
+  tts.end({ status: 'ok' });
+
+  turn.end();
+}
+
+const finalized = await session.end({ outcome: 'completed' });
+console.log('package written to', finalized.directory);
+
+await vaani.uploadPackage(finalized);
+console.log('uploaded session', finalized.sessionId);
+```
+
+```bash
+node record-a-call.mjs
+```
+
+## 4. Open the call
+
+Refresh `http://localhost:8000/`, click the call in the rail, and expand the
+trace.
+
+![The trace view expanded to milestone level: a TTS span with 'text handed to the voice', 'first audio byte' and 'audio streaming' milestones, and an LLM span whose framework operation covers two HTTP attempts, one of which failed and was retried.](/screenshots/trace-expanded.png)
+
+## Automatic `fetch` capture
+
+The Node SDK patches the global `fetch` when it is constructed. Any request made
+inside `session.run(...)` whose URL matches one of your `endpoints` rules is
+timed and recorded — no change at the call site:
+
+```js
+const session = vaani.startSession({ agentId: 'support' });
+const turn = session.startTurn();
+
+await turn.run(async () => {
+  // Recorded as an LLM operation on this turn, because api.openai.com
+  // matches the configured endpoint rule.
+  await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST', body });
+});
+```
+
+Three helpers scope that ambient context:
+
+| Helper | Use it when |
+| --- | --- |
+| `session.run(fn)` | Attribute work to this session |
+| `session.withTurn(turnId, fn)` | Group auto-instrumented calls under one turn |
+| `session.withEndpoint(id, fn, { turnId })` | Force a specific endpoint rule; throws on an unknown id |
+
+`session.bind(handler)` wraps a callback so it runs inside `session.run` — useful
+for event-emitter handlers.
+
+<Callout type="warn">
+  Streaming response bodies are **never drained** to capture them. Doing so would
+  hold back the first token, which is exactly the latency this SDK exists to
+  measure.
+</Callout>
+
+## Websockets
+
+Most streaming STT and TTS providers hold one socket open for the whole call, so
+the SDK records it as a **connection-scoped** span rather than as a turn:
+
+```js
+import WebSocket from 'ws';
+
+const socket = new WebSocket('wss://api.deepgram.com/v1/listen');
+const handle = vaani.observeWebSocket(socket, { session, url: socket.url });
+
+// ... later
+handle.detach();
+```
+
+It records `connected`, `sent_frame` and `received_frame` milestones with byte
+counts and a running total, plus the close code. **Frame contents and
+authentication headers are never stored.**
+
+<Callout type="info">
+  A session-long socket is recorded as a connection span, not a turn — per-turn
+  work is recorded explicitly with `session.startTurn()` and
+  `turn.startOperation()`. See
+  [Sessions, turns and operations](/docs/concepts/sessions-turns-operations).
+</Callout>
+
+## What just happened
+
+<Steps>
+
+<Step>
+
+### The observer installed instrumentation, not a connection
+
+`new VaaniObserver(...)` validates your endpoint rules and patches global
+`fetch`. `endpoint` and `apiKey` are used only by `uploadPackage()`.
+
+</Step>
+
+<Step>
+
+### The session spooled to disk during the call
+
+Events and audio were appended to `./.vaani-spool/<session-id>/` through a
+promise chain that preserves strict append ordering.
+
+</Step>
+
+<Step>
+
+### `end()` finalized the package
+
+Open spans were closed, the two mono tracks were composed into one
+timeline-aligned stereo `call.audio` (**agent left, caller right**), and
+`manifest.json` was written last.
+
+</Step>
+
+<Step>
+
+### `uploadPackage()` shipped it, after the call
+
+`POST /v1/sessions` → `PUT` each object → `POST .../complete` with byte sizes and
+SHA-256 digests. Upload is explicit and post-call; the library never uploads on
+the live media path.
+
+</Step>
+
+</Steps>
+
+## Troubleshooting
+
+<Accordions>
+
+<Accordion title="uploadPackage() throws 'endpoint and apiKey are required'">
+
+Both must be set on the observer. If you only want local spooling, do not call
+it — `session.end()` alone writes a complete package to disk.
+
+</Accordion>
+
+<Accordion title="The call appears but the trace is empty">
+
+An operation is written to `events.jsonl` **when it ends**, not when it starts.
+An operation that is never `end()`ed is deliberately absent rather than persisted
+as a span with no outcome, which would skew every duration percentile. Check that
+every `startOperation()` has a matching `end()`.
+
+</Accordion>
+
+<Accordion title="recordInboundAudio throws a TypeError">
+
+The chunk must be a `Buffer` or `Uint8Array`, and the format must be `pcm_s16le`
+with an integer `sampleRateHz` and `channels`. The format cannot change within a
+session.
+
+</Accordion>
+
+<Accordion title="fetch calls are not being recorded">
+
+Auto-instrumentation is inert unless there is an ambient session **and** the URL
+matches a configured endpoint rule. Wrap the call in `session.run()` (or
+`turn.run()`), and confirm your `endpoints` list has a rule whose `url` is a
+prefix of the request URL. See
+[Endpoints and instrumentation](/docs/concepts/endpoints-and-instrumentation).
+
+</Accordion>
+
+</Accordions>
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/nodejs/recording"
+    title="Recording a call"
+    description="Turns, operations, streamed TTS attribution and websockets in depth."
+  />
+  <Card
+    href="/docs/concepts/sessions-turns-operations"
+    title="Sessions, turns and operations"
+    description="The data model every measurement is built from."
+  />
+</Cards>

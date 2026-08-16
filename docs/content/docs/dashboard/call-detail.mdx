@@ -1,0 +1,191 @@
+---
+title: Reading a call
+description: How to go from "this call went wrong" to "this stage caused it" using the waveform, the transcript and the trace.
+---
+
+The call view is where a debugging session actually happens. Everything else in
+the product exists to help you choose which call to open.
+
+![One recorded call: a calls rail on the left, a header strip with turns, length, typical wait, worst wait, failures and providers, a waveform with turn markers and silence annotations, a transcript panel that follows playback, and a trace listing four turns.](/screenshots/call-detail.png)
+
+<Callout type="info">
+  Every screenshot on this page is from
+  [demo.vaanieval.com](https://demo.vaanieval.com), a frozen snapshot of 30 real
+  anonymised calls. Open it and follow along.
+</Callout>
+
+## The header strip
+
+| Field | Meaning |
+| --- | --- |
+| `TURNS` | Exchanges detected in the call |
+| `LENGTH` | Wall-clock duration |
+| `TYPICAL WAIT` | Median caller-visible reply wait |
+| `WORST WAIT` | The worst single reply wait |
+| `SLOWEST` | Which stage owned the worst turn |
+| `FAILURES` | Operations that ended with a non-`ok` status |
+| `TOOLS` | Tool operations recorded |
+| `PROVIDERS` | Which STT, LLM and TTS providers served the call |
+
+<Callout type="warn">
+  **"Wait" is the caller's experience, not a service's response time.** It is
+  measured from *caller stops speaking* to *first audio byte* — the silence the
+  caller actually sat through. A provider that responds in 200 ms can still
+  produce a 3-second wait if something downstream is slow.
+</Callout>
+
+## The waveform
+
+Agent audio and caller audio on one timeline, with turn markers, and the long
+silences annotated with the stage that owned them (`7.74s · the model`,
+`24.2s · the model`).
+
+That annotation is the fastest diagnosis in the product. A gap labelled *the
+model* and a gap labelled *the voice* are different teams and different fixes,
+and you can see which one you have without expanding anything.
+
+Playback details worth knowing:
+
+- Audio is stored once as raw PCM; the console requests an on-demand WAV wrapper
+  rather than storing a second copy.
+- The wrapper streams and honours HTTP `Range` — Safari refuses to play media
+  otherwise.
+- Waveform peaks are rendered server-side, one peak per pixel column, so a long
+  call does not ship megabytes of samples to the browser.
+- **Agent left, caller right.** The stereo composition is aligned on the session
+  timeline, so the silences you see are the silences that happened.
+
+## The transcript
+
+Follows playback and is tagged by turn. Its most useful behaviour is what it does
+when it has nothing:
+
+> Turn #1 played 2.63s of speech with no model call — a scripted opening line, so
+> its words are not in the capture.
+
+The product refuses to invent text it does not have, and it explains *why* it does
+not have it. That is a pattern you will see everywhere in the UI, and it is
+deliberate: a transcript panel that guesses is worse than one that admits a gap.
+
+<Callout type="info">
+  Transcript text only appears if `stt_content` capture was enabled for that call.
+  See [Capture and privacy](/docs/concepts/capture-and-privacy).
+</Callout>
+
+## The trace
+
+Each turn is summarised as **listening · thinking · speaking**, with a status.
+Expanding a turn is where the real answer usually is.
+
+![The trace expanded to milestone level. A TTS span shows 'text handed to the voice', 'first audio byte', 'audio streaming' and 'reported to the turn'. An STT span shows 'caller starts speaking', 'first partial transcript', 'caller stops speaking', 'provider marks speech final', 'final transcript' and 'end of utterance'. An LLM framework span sits above two HTTP attempts, one of which failed and was retried.](/screenshots/trace-expanded.png)
+
+### Milestones split a duration into a diagnosis
+
+An STT span carrying *caller starts speaking → first partial transcript → caller
+stops speaking → provider marks speech final → final transcript → end of
+utterance* lets you separate two failures that share a duration:
+
+- Slow to produce **text** — a recognition problem.
+- Slow to decide the caller **finished** — an endpointing problem.
+
+Different teams, different fixes, same 3.3 seconds.
+
+### Framework spans versus HTTP attempts
+
+The most valuable thing in that screenshot is the nesting. Turn 3's LLM operation
+reports 19.9 s with the note:
+
+> 2 HTTP attempts served this one model call, 1 of which failed and was retried.
+> The framework span above times the whole sequence, which is why its duration
+> covers every attempt.
+
+A request-level APM would show two requests of 10.7 s and 8.9 s, both arguably
+fine, and no explanation for why the caller waited 24 seconds. The framework span
+is the caller's reality; the HTTP attempts are the mechanism.
+
+### Cancellation is not failure
+
+A cancelled LLM attempt is annotated:
+
+> stopped before it finished and no caller speech overlaps it, so this is not
+> barge-in.
+
+The dashboard recognises `AbortError`, `CancelledError` and `CancelledException`
+and does not count them as faults. A TTS span aborted because the caller
+interrupted is the agent behaving correctly. The annotation goes further and
+checks whether caller speech actually overlaps — so a cancellation that was *not*
+barge-in is flagged as worth looking at.
+
+## A workflow that works
+
+<Steps>
+
+<Step>
+
+### Read `WORST WAIT` and `SLOWEST`
+
+If the worst wait is acceptable, the call is probably fine and you can stop.
+
+</Step>
+
+<Step>
+
+### Find the annotated silence on the waveform
+
+It names the stage. Click it to jump the trace to that turn.
+
+</Step>
+
+<Step>
+
+### Expand that turn
+
+Read the milestone list. The gap between two adjacent milestones is your answer.
+
+</Step>
+
+<Step>
+
+### Check for a framework span with multiple attempts
+
+If the turn's duration is much larger than any single HTTP attempt, you are
+looking at retries, not a slow provider.
+
+</Step>
+
+<Step>
+
+### Listen
+
+Scrub the waveform to that timestamp. What the caller heard is often not what the
+timings suggest — a 4-second wait filled with a "let me check that" is a very
+different experience from 4 seconds of silence.
+
+</Step>
+
+</Steps>
+
+## When numbers are missing
+
+A turn missing any milestone the dashboard needs is reported as **unmeasurable**
+and excluded from the percentiles, never estimated from operation start and end
+times. If a call shows a low measurable percentage, the finding is usually about
+your instrumentation rather than your agent — a provider wrapper that is not
+emitting milestones, or a code path that bypasses your endpoint rules. See
+[Milestones and samples](/docs/concepts/milestones-and-samples) for the full
+convention.
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/dashboard/fleet-and-alerts"
+    title="Fleet and alerts"
+    description="Finding the call worth opening, and being told without looking."
+  />
+  <Card
+    href="/docs/dashboard/stt-evaluation"
+    title="STT evaluation"
+    description="Whether transcription was accurate enough, and what switching would cost."
+  />
+</Cards>

@@ -1,0 +1,327 @@
+---
+title: Troubleshooting
+description: Symptoms you will actually hit, what causes them, and how to fix them — from empty traces to failed uploads to missing metrics.
+---
+
+## Nothing is recorded at all
+
+<Accordions>
+
+<Accordion title="No package directory appears">
+
+Check, in order:
+
+1. **Was the observer constructed?** Instrumentation is installed in the
+   constructor. A lazily created observer that never runs records nothing.
+2. **Did `session.end()` run?** The package directory exists during the call, but
+   `manifest.json` is only written by `end()`. Put it in a `finally` block.
+3. **Is `spool_directory` writable?** With `strict=False` a write failure is
+   swallowed. Set `strict=True` to see it.
+4. **LiveKit only:** `VAANI_ENABLED` defaults to **`false`**. `from_env()` returns
+   an inert recorder when disabled. Check `recorder.enabled`.
+
+</Accordion>
+
+<Accordion title="`from_env()` silently does nothing">
+
+By design — it never raises, so an observability misconfiguration cannot take
+down your agent. The cost is silence. Assert at startup:
+
+```python
+recorder = VaaniLiveKitRecorder.from_env(agent_id="support-bot")
+if not recorder.enabled:
+    logger.warning("vaani recording is disabled")
+```
+
+</Accordion>
+
+</Accordions>
+
+## The call appears but the trace is empty
+
+<Accordions>
+
+<Accordion title="Operations are missing entirely">
+
+**An operation is written when it ends, not when it starts.** An operation that
+is never `end()`ed is deliberately absent from the package rather than persisted
+as a span with no outcome, which would skew every duration percentile.
+
+- Ensure every `start_operation()` has a matching `end()`.
+- `session.end()` closes anything still open — a hard process kill does not.
+- With the LiveKit integration, call `await recorder.finish()` in a `finally`
+  block.
+
+</Accordion>
+
+<Accordion title="Automatically instrumented HTTP calls are not recorded">
+
+Two conditions must both hold, and both fail silently:
+
+1. **An ambient session must be installed.** Wrap the call in
+   `session.context()` / `session.run()`, `with_turn` / `withTurn`, or
+   `session.bind()`.
+2. **The URL must match an endpoint rule.** Verify with:
+
+```python
+print(vaani.classify_url("https://api.openai.com/v1/chat/completions"))
+```
+
+```js
+console.log(vaani.classifyUrl('https://api.openai.com/v1/chat/completions'));
+```
+
+`None` / `null` means no rule matched. Remember `match: "path"` is a **prefix**
+match on the path, and the host must be identical.
+
+</Accordion>
+
+<Accordion title="Spans have no turn_id">
+
+Ambient context carries the session but not necessarily the turn. Scope
+explicitly with `session.with_turn(turn.id)` / `session.withTurn(turn.id, fn)`, or
+attach late with `op.set_turn(turn.id)` / `op.setTurn(turn.id)`.
+
+With LiveKit, this is what `VaaniAudioTapMixin` does via `llm_node` — if you
+subclassed `Agent` without the mixin, or forgot `agent.vaani = recorder`, LLM
+spans will land without a turn.
+
+</Accordion>
+
+<Accordion title="An error is raised: Ambiguous Vaani endpoint rules">
+
+Two rules match the same URL at the same scheme precedence. This is intentional —
+VaaniEval fails loudly rather than attributing your LLM latency to your TTS
+budget.
+
+Fix by narrowing one rule to `match: "exact"`, or by making the paths disjoint.
+Note that a rule written for the exact scheme wins over the transport-neutral
+form, so an `https://` and a `wss://` rule on the same host do **not** conflict.
+
+</Accordion>
+
+</Accordions>
+
+## Audio problems
+
+<Accordions>
+
+<Accordion title="There is no audio">
+
+- `capture.audio` may be `False`. The audio methods return `False` rather than
+  raising when capture is off or the session has ended.
+- **Python:** a non-bytes chunk raises `TypeError`; a wrong encoding, sample rate
+  or channel count raises `ValueError`.
+- **Node:** all of the above raise `TypeError`.
+- The format cannot change within a session, per track.
+- **LiveKit:** audio comes from `VaaniAudioTapMixin`. It must be listed **before**
+  `Agent` in the base classes *and* `agent.vaani` must be set.
+
+</Accordion>
+
+<Accordion title="The recording sounds compressed — pauses are missing">
+
+That would mean agent chunks were placed at arrival time. The SDK avoids it with
+a playout clock: the agent track advances by the PCM duration of each chunk, so
+gaps between streamed TTS chunks are preserved.
+
+If pauses are still missing, check that you are passing a correct
+`sample_rate_hz` — an inflated rate makes each chunk appear shorter than it is,
+compressing the timeline.
+
+</Accordion>
+
+<Accordion title="call.audio will not open in an audio player">
+
+It has **no container and no header** — it is raw interleaved stereo PCM.
+
+```bash
+ffplay -f s16le -ar 16000 -ch_layout stereo call.audio
+ffmpeg -f s16le -ar 16000 -ac 2 -i call.audio call.wav
+```
+
+The sample rate is in `manifest.json` under `audio.call.sample_rate_hz`.
+
+</Accordion>
+
+<Accordion title="Audio will not play in Safari">
+
+The dashboard's WAV preview honours HTTP `Range`, which Safari requires before it
+will play any media response. If you are proxying the dashboard, make sure your
+proxy forwards `Range` and does not buffer the response.
+
+</Accordion>
+
+</Accordions>
+
+## Upload problems
+
+<Accordions>
+
+<Accordion title="uploadPackage throws 'endpoint and apiKey are required'">
+
+Both must be set on the observer. If you only want local spooling, do not call
+it — `session.end()` alone writes a complete package.
+
+</Accordion>
+
+<Accordion title="400 on POST /v1/sessions">
+
+The `idempotency-key` header must be **exactly** the `session_id`. Any other
+value is rejected.
+
+</Accordion>
+
+<Accordion title="413 on PUT /v1/uploads/...">
+
+The object exceeds **128 MiB**. Raw stereo PCM at 16 kHz is roughly 3.8 MB per
+minute, so this is a very long call. There is no chunked upload path — reduce the
+sample rate, disable audio capture for that agent, or split the call.
+
+</Accordion>
+
+<Accordion title="400 on POST .../complete">
+
+The server verifies both `byte_size` and `sha256` for every declared object.
+A mismatch means the upload was truncated or the digest was computed over
+different bytes. Recompute from the exact file you uploaded:
+
+```bash
+wc -c < events.jsonl
+shasum -a 256 events.jsonl
+```
+
+This check is why a truncated upload is a hard failure rather than a call with
+quietly missing turns.
+
+</Accordion>
+
+<Accordion title="The session shows as 'partial'">
+
+The objects verified, but no operations could be read from `events.jsonl`.
+Usually the process died before `session.end()`, or every operation was left
+unended. `partial` is what surfaces as **unverifiable** in the dashboard.
+
+</Accordion>
+
+</Accordions>
+
+## Metrics are missing
+
+<Accordions>
+
+<Accordion title="ENDPOINTING shows — unavailable">
+
+The engine requires `caller stops speaking` and `provider marks speech final` to
+have been **observed separately**. Many frameworks stamp both from the same
+underlying event, making them byte-identical; subtracting them would manufacture a
+zero, so the metric is reported as unavailable instead.
+
+This is correct behaviour, not a bug. If you need the metric, the recognizer
+integration has to emit the two moments independently.
+
+</Accordion>
+
+<Accordion title="Measurable-turn percentage is low">
+
+A turn missing any required milestone is excluded from percentiles rather than
+estimated. Common causes:
+
+- A provider wrapper that never calls `op.event(...)`.
+- A code path that bypasses your endpoint rules, so no span is created.
+- `metrics_collected` unavailable in your LiveKit version, removing TTFT/TTFB.
+
+Expand a turn in the trace and see which milestone is absent.
+
+</Accordion>
+
+<Accordion title="A five-minute call reports a five-minute STT latency">
+
+A session-long STT websocket is being scored as a turn. Open it with
+`scope: "connection"` — `observe_websocket()` / `observeWebSocket()` does this for
+you. Per-turn STT timing must come from explicit operations.
+
+</Accordion>
+
+<Accordion title="Accuracy / WER is not shown">
+
+Accuracy only appears after a challenger comparison. Queue one from the STT
+review tab, or `POST /v1/sessions/{id}/challenger-evaluation`. It requires
+`ELEVENLABS_API_KEY`, transcript capture (`stt_content`) and recorded caller
+audio.
+
+</Accordion>
+
+<Accordion title="A turn shows as failed but the agent behaved correctly">
+
+Check whether the operation ended with a cancellation. `AbortError`,
+`CancelledError` and `CancelledException` are excluded from failure counts — a TTS
+span aborted by barge-in is correct. If your provider raises a differently named
+cancellation, end the span with `status="cancelled"` explicitly rather than
+letting it record as an error.
+
+</Accordion>
+
+</Accordions>
+
+## Operational problems
+
+<Accordions>
+
+<Accordion title="Disk is filling up on the agent hosts">
+
+Spool directories are **not** removed after a successful upload. Add a sweep of
+`.vaani-spool` for directories containing a `manifest.json` older than your
+retention window.
+
+</Accordion>
+
+<Accordion title="Disk is filling up on the dashboard host">
+
+There is no retention policy. Delete session directories under
+`$VAANI_DATA_DIR/objects` and their rows in `vaani.db`. There is no deletion
+API, which is also how a right-to-erasure request has to be serviced.
+
+</Accordion>
+
+<Accordion title="The console is sluggish while evaluations run">
+
+Challenger jobs run on a **two-worker in-process thread pool**, so they compete
+with request serving. Queue fewer at a time, or run evaluation against a separate
+instance pointed at a copy of the data.
+
+</Accordion>
+
+<Accordion title="Evaluation jobs are stuck or marked failed after a restart">
+
+Jobs that were `queued` or `in_progress` when the process stopped are marked
+`failed` on startup and are not resumed — a half-finished run is never presented
+as complete. Re-queue them.
+
+</Accordion>
+
+<Accordion title="Two dashboard instances behave strangely">
+
+There is no horizontal scaling story. Two processes pointed at the same data
+directory will contend on a single SQLite file and can corrupt it. Run one.
+
+</Accordion>
+
+</Accordions>
+
+## Still stuck
+
+<Cards>
+  <Card
+    href="https://github.com/shubhamofbce/vaanieval-observer-backend"
+    external
+    title="Dashboard repository"
+    description="Open an issue with the manifest and the relevant events.jsonl lines."
+  />
+  <Card
+    href="https://calendar.app.google/5cNH8hB13LoC39Qk7"
+    external
+    title="Book a 20-minute call"
+    description="Walk through it with us against your own traffic."
+  />
+</Cards>

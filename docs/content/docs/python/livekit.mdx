@@ -1,0 +1,253 @@
+---
+title: LiveKit Agents
+description: Record a LiveKit Agents session end to end — spans, milestones, caller and agent audio — by adding a mixin and one call.
+---
+
+If your Python agent runs on LiveKit Agents, this integration records it with the
+least code. It subscribes to `AgentSession` events and produces the same spans,
+milestones and audio tracks you would otherwise write by hand.
+
+## Install
+
+```bash
+pip install "vaanieval-observer[livekit] @ git+https://github.com/shubhamofbce/vaanieval-observer-python-sdk.git"
+```
+
+## Wire it up
+
+```python title="agent.py"
+from livekit.agents import Agent, AgentSession
+from vaani_observer.integrations.livekit import (
+    VaaniAudioTapMixin,
+    VaaniLiveKitRecorder,
+    observe_agent_session,
+)
+
+
+class MyAgent(VaaniAudioTapMixin, Agent):
+    def __init__(self) -> None:
+        super().__init__(instructions="You are a helpful support agent.")
+
+
+async def entrypoint(ctx):
+    recorder = VaaniLiveKitRecorder.from_env(agent_id="support-bot")
+
+    agent = MyAgent()
+    agent.vaani = recorder            # required for audio and LLM turn scoping
+
+    session = AgentSession(...)
+    observe_agent_session(session, recorder)
+
+    try:
+        await session.start(agent=agent, room=ctx.room)
+    except BaseException as error:
+        recorder.fail(error)
+        raise
+    finally:
+        await recorder.finish(outcome="completed")
+```
+
+<Callout type="warn">
+  `VaaniAudioTapMixin` must come **before** `Agent` in the base class list, and
+  `agent.vaani` must be set. Without both you still get spans and milestones, but
+  no audio and no `turn_id` on automatically instrumented LLM HTTP calls.
+</Callout>
+
+## Configure from the environment
+
+`from_env()` mirrors the Node agent's variables so the same deployment config
+works for both:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `VAANI_ENABLED` | `false` | Master switch. **Off by default.** |
+| `VAANI_ENDPOINT` | `http://localhost:8000` | Dashboard base URL |
+| `VAANI_API_KEY` | `local-dev` | Bearer token for upload |
+| `VAANI_SPOOL_DIR` | `.vaani-spool` | Local package directory |
+| `VAANI_CAPTURE_AUDIO` | `true` | Record caller and agent PCM |
+| `VAANI_CAPTURE_HTTP_BODIES` | `true` | Capture request/response bodies |
+| `VAANI_CAPTURE_STT_CONTENT` | `true` | Capture transcript text |
+| `VAANI_PAYLOAD_MAX_BYTES` | `16384` | Payload size bound |
+| `VAANI_AGENT_ID` | `livekit-agent` | Default agent id |
+| `VAANI_UPLOAD` | `true` | Upload after `finish()` |
+
+<Callout type="warn">
+  The integration's defaults are **more permissive than the core SDK's**:
+  `VAANI_CAPTURE_HTTP_BODIES` and `VAANI_CAPTURE_STT_CONTENT` default to `true`
+  here, so prompts and caller transcripts are captured in plain text unless you
+  set them to `false`. That is a deliberate choice for a debugging integration,
+  but it is almost certainly not what you want pointed at production traffic
+  without a privacy review. See
+  [Capture and privacy](/docs/concepts/capture-and-privacy).
+</Callout>
+
+Constructor options can be passed directly, overriding the environment:
+
+```python
+recorder = VaaniLiveKitRecorder(
+    observer=None,               # built from env if omitted
+    agent_id="support-bot",
+    metadata={"env": "prod", "version": "2026.08.1"},
+    capture_transcripts=True,
+    upload=False,
+    input_sample_rate=24000,
+    output_sample_rate=24000,
+    channels=1,
+)
+```
+
+<Callout type="info">
+  **`from_env()` never raises.** If configuration is invalid or the SDK cannot
+  start, it returns an **inert recorder** whose methods are no-ops and whose
+  `enabled` property is `False`. Observability cannot take your agent down. The
+  cost is that a misconfiguration is silent — check `recorder.enabled` at startup
+  if you want to know.
+</Callout>
+
+## What it records
+
+<Steps>
+
+<Step>
+
+### STT spans, from the user's speech
+
+`user_state_changed` and `user_input_transcribed` drive an STT span carrying
+`speech_started`, `first_partial`, `final_transcript` and `speech_final`
+milestones, plus partial transcripts as bounded samples. Once the sample limit is
+reached it emits `partial_samples_truncated` rather than growing without bound.
+
+</Step>
+
+<Step>
+
+### LLM spans, from metrics
+
+`metrics_collected` produces an LLM span with a `first_token` milestone placed at
+`started_at + ttft`, and token counts when the provider reports them.
+
+</Step>
+
+<Step>
+
+### TTS spans, with real audio accounting
+
+A `speak` milestone with the character count, a `first_byte` milestone at
+`started_at + ttfb`, and a response carrying `audio_bytes` and `audio_ms` computed
+from the captured PCM. A reply that was cut off is ended with status
+`cancelled`, not `error` — barge-in is correct behaviour.
+
+</Step>
+
+<Step>
+
+### Tool calls
+
+`function_tools_executed` produces `tool` operations on the owning turn.
+
+</Step>
+
+<Step>
+
+### Audio, from the node hooks
+
+`stt_node` and `tts_node` are LiveKit's supported extension points, so the mixin
+tees the exact frames the pipeline uses rather than reaching into private io
+plumbing that changes between releases.
+
+</Step>
+
+<Step>
+
+### End-of-utterance timing
+
+`_record_eou` attaches LiveKit's own end-of-utterance measurement, which is the
+best available source for endpointing latency.
+
+</Step>
+
+</Steps>
+
+### Errors are routed to the component that failed
+
+A session error closes the spans of the component that actually failed, rather
+than marking the whole turn bad:
+
+| LiveKit error | Spans closed as failed |
+| --- | --- |
+| `stt_error` | STT |
+| `llm_error` | LLM |
+| `tts_error` | TTS |
+| `realtime_model_error` | STT, LLM and TTS |
+
+`recorder.fail(error)` records that the call could not be run at all.
+
+## Version drift
+
+The integration subscribes to nine `AgentSession` events, each guarded
+individually — a handler that raises is logged and swallowed, because an
+exception on LiveKit's event loop would kill the call.
+
+<Callout type="info">
+  `metrics_collected` is deprecated in LiveKit 1.6 in favour of
+  `session_usage_updated` plus `ChatMessage.metrics`, but it remains the only
+  source of per-stage duration, TTFT/TTFB and token counts. The integration
+  subscribes to **both**, so spans survive its removal with only the token counts
+  degrading. Subscription failures are logged at debug level and skipped.
+</Callout>
+
+## Manual escape hatches
+
+The recorder exposes the underlying primitives when the automatic path is not
+enough:
+
+| Method | Purpose |
+| --- | --- |
+| `recorder.call` | The underlying `Session` (`None` when inert) |
+| `recorder.enabled` | Whether recording is active |
+| `recorder.attach(session)` | Subscribe to another `AgentSession` |
+| `recorder.turn_context()` | Scope ambient work to the turn being served |
+| `recorder.observe_socket(socket, url=..., endpoint_id=...)` | Record a provider socket |
+| `recorder.tap_input_frame(frame)` / `tap_output_frame(frame)` | Feed PCM manually |
+| `recorder.finalize_open_spans(outcome=...)` | Close everything still open |
+| `recorder.fail(error)` | Record a call that could not run |
+| `await recorder.finish(outcome=...)` | Finalize and, if configured, upload |
+
+Constants for the endpoint ids the integration uses:
+
+```python
+from vaani_observer.integrations.livekit import (
+    STT_ENDPOINT_ID,   # "stt"
+    LLM_ENDPOINT_ID,   # "llm"
+    TTS_ENDPOINT_ID,   # "tts"
+)
+```
+
+## Limits worth knowing
+
+<Callout type="warn">
+  - **Only `AgentSession` is supported.** A custom pipeline built directly on
+    LiveKit primitives needs manual instrumentation.
+  - **Span quality depends on what the provider reports.** TTFT and TTFB come from
+    LiveKit metrics; a provider plugin that does not report them yields a span
+    with duration but no milestones, and those turns count as unmeasurable.
+  - **A hard crash loses open spans.** `finish()` in a `finally` block is what
+    guarantees they close.
+  - **The recorder is per-session.** Reusing one across concurrent
+    `AgentSession`s will interleave turns into one recording.
+</Callout>
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/python/recording"
+    title="Recording a call"
+    description="The primitives the integration is built from."
+  />
+  <Card
+    href="/docs/dashboard/call-detail"
+    title="Reading a call"
+    description="What the recording looks like once it lands."
+  />
+</Cards>

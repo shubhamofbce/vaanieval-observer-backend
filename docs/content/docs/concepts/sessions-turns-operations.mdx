@@ -1,0 +1,296 @@
+---
+title: Sessions, turns and operations
+description: The three-level data model behind every VaaniEval measurement, and the rules that decide what gets written.
+---
+
+Everything VaaniEval reports is derived from three nested objects.
+
+<Mermaid
+  chart={`
+flowchart TD
+  S["Session<br/><small>one call</small>"]
+  T1["Turn<br/><small>one exchange</small>"]
+  T2["Turn"]
+  O1["Operation · stt"]
+  O2["Operation · llm"]
+  O3["Operation · tts"]
+  C["Operation · scope: connection<br/><small>a session-long websocket</small>"]
+  S --> T1
+  S --> T2
+  S --> C
+  T1 --> O1
+  T1 --> O2
+  T1 --> O3
+`}
+/>
+
+## Session
+
+One call, from answer to hangup.
+
+<Tabs items={['Python', 'Node.js']}>
+
+<Tab value="Python">
+
+```python
+session = vaani.start_session(
+    session_id=None,          # generated if omitted
+    agent_id="support-bot",
+    metadata={"env": "prod", "version": "2026.08.1"},
+)
+...
+finalized = session.end(outcome="completed")
+```
+
+</Tab>
+
+<Tab value="Node.js">
+
+```js
+const session = vaani.startSession({
+  sessionId: undefined, // generated if omitted
+  agentId: 'support-bot',
+  metadata: { env: 'prod', version: '2026.08.1' },
+});
+...
+const finalized = await session.end({ outcome: 'completed' });
+```
+
+</Tab>
+
+</Tabs>
+
+`metadata` is the dimension you filter and group by in the dashboard — agent,
+provider, model, SDK, environment, version. Set it consistently on day one; it is
+much harder to backfill.
+
+`end()` closes any still-open turns and operations, composes the stereo audio
+track, writes `manifest.json` last, and returns a finalized handle pointing at the
+package directory. It is idempotent — a second call returns the same handle.
+
+`outcome` is free-form; the demo uses `completed`, and `unknown` is the default.
+
+## Turn
+
+One exchange: the caller says something, the agent replies. A turn is the unit
+the caller actually experiences, which is why every headline latency in the
+product is per-turn.
+
+<Tabs items={['Python', 'Node.js']}>
+
+<Tab value="Python">
+
+```python
+turn = session.start_turn()          # or start_turn("turn-7")
+stt = turn.start_operation(type="stt", provider="deepgram")
+...
+turn.end()
+```
+
+</Tab>
+
+<Tab value="Node.js">
+
+```js
+const turn = session.startTurn();     // or startTurn({ turnId: 'turn-7' })
+const stt = turn.startOperation({ type: 'stt', provider: 'deepgram' });
+...
+turn.end();
+```
+
+</Tab>
+
+</Tabs>
+
+`turn.start_operation()` / `turn.startOperation()` simply sets `turn_id` for you.
+A turn carries no timing of its own — it is a grouping key. Its duration is
+derived from the milestones of the operations inside it.
+
+<Callout type="info">
+  Turn ids are strings. If your framework already has a notion of a turn or
+  utterance id, pass it in — matching ids make it far easier to correlate a
+  VaaniEval trace with your own logs.
+</Callout>
+
+## Operation
+
+One unit of provider work. Four types are accepted: **`stt`**, **`llm`**,
+**`tts`**, **`tool`**.
+
+<Tabs items={['Python', 'Node.js']}>
+
+<Tab value="Python">
+
+```python
+op = session.start_operation(
+    type="llm",
+    turn_id=turn.id,
+    scope="turn",              # or "connection"
+    endpoint_id="llm",
+    provider="openai",
+    model="gpt-4o-mini",
+    transport="manual",        # set automatically by instrumentation
+    started_at_ms=None,        # defaults to now
+    request={"messages": [...]},
+)
+op.event("first_token")
+op.sample("partial_transcript", {"text": "how do I"}, limit=100)
+op.end(status="ok", response={"tokens": 128})
+```
+
+</Tab>
+
+<Tab value="Node.js">
+
+```js
+const op = session.startOperation({
+  type: 'llm',
+  turnId: turn.id,
+  scope: 'turn',              // or 'connection'
+  endpointId: 'llm',
+  provider: 'openai',
+  model: 'gpt-4o-mini',
+  transport: 'manual',        // set automatically by instrumentation
+  startedAtMs: undefined,     // defaults to now
+  request: { messages: [] },
+});
+op.event('first_token');
+op.sample('partial_transcript', { text: 'how do I' }, { limit: 100 });
+op.end({ status: 'ok', response: { tokens: 128 } });
+```
+
+</Tab>
+
+</Tabs>
+
+### An operation is written when it ends
+
+Nothing is persisted until `end()`. This is deliberate:
+
+<Callout type="warn">
+  An operation that is never ended is **absent from the package**, not persisted
+  as a span with no outcome. A half-written span would silently skew every
+  duration percentile in the product. If a trace looks emptier than the call
+  sounded, look for a missing `end()` first.
+</Callout>
+
+`session.end()` closes anything still open, so a crash-free process will not lose
+spans. A hard crash will.
+
+### `scope`: turn versus connection
+
+`scope` defaults to `turn`. Set `scope="connection"` for work that spans the
+whole call rather than one exchange — most importantly a streaming STT or TTS
+websocket that is opened once and held open.
+
+<Callout type="info">
+  A session-long socket is a **connection span, never scored as a turn**. If it
+  were treated as an utterance, a five-minute call would show a five-minute
+  transcription latency. The dashboard excludes connection spans from per-turn
+  percentiles.
+</Callout>
+
+### Failures, and what is not a failure
+
+`op.end(status=...)` records the outcome. A `status` other than `ok`, or a
+non-null `error`, marks the operation as failed and surfaces the call in the
+*failed* class.
+
+Cancellation is treated separately. The dashboard recognises `AbortError`,
+`CancelledError` and `CancelledException` and does **not** count them as faults —
+a TTS span aborted because the caller barged in is the agent behaving correctly.
+The demo annotates a cancelled LLM attempt with *"stopped before it finished and
+no caller speech overlaps it, so this is not barge-in"*, which is the distinction
+made visible.
+
+## Milestones and samples
+
+`event()` records a milestone; `sample()` retains a bounded series. Both matter
+enough to have [their own page](/docs/concepts/milestones-and-samples).
+
+The short version: repeated `event()` calls with the same name **accumulate**
+(first `occurred_at_ms`, latest `last_at_ms`, `count`) rather than overwriting, so
+a high-frequency transport keeps useful timing without emitting one event per
+frame. `sample()` stops at `limit` (default 100) and sets `truncated: true`
+instead of growing without bound.
+
+## Ambient context
+
+You do not have to thread the session through your call stack. Both SDKs keep an
+ambient context (`contextvars` in Python, `AsyncLocalStorage` in Node) that
+auto-instrumentation reads:
+
+<Tabs items={['Python', 'Node.js']}>
+
+<Tab value="Python">
+
+```python
+with session.context():
+    await call_the_model()          # attributed to this session
+
+with session.with_turn(turn.id):
+    await call_the_model()          # ... and this turn
+
+with session.with_endpoint("llm", turn_id=turn.id):
+    await call_the_model()          # ... forced onto the "llm" rule
+```
+
+</Tab>
+
+<Tab value="Node.js">
+
+```js
+await session.run(() => callTheModel());
+await session.withTurn(turn.id, () => callTheModel());
+await session.withEndpoint('llm', () => callTheModel(), { turnId: turn.id });
+```
+
+</Tab>
+
+</Tabs>
+
+`session.bind(handler)` wraps a callback so it carries the context into an
+event-emitter or task queue. `with_endpoint` / `withEndpoint` raises on an
+unknown endpoint id — a typo is a startup error, not a silently unattributed
+call.
+
+## Audio
+
+Audio is recorded on the **session**, not the operation, because the caller's
+microphone does not stop between turns.
+
+- `record_inbound_audio()` / `recordInboundAudio()` — the caller, **right**
+  channel
+- `record_outbound_audio()` / `recordOutboundAudio()` — the agent, **left**
+  channel
+
+Both require `pcm_s16le` with an explicit sample rate and channel count, and the
+format cannot change within a session.
+
+<Callout type="warn">
+  **SDK parity gap.** The Node SDK accepts `turnId`, `operationId` and
+  `playoutAtMs` on the audio format object, so a chunk can be attributed to the
+  exact reply that produced it. The Python SDK currently accepts only
+  `encoding`, `sample_rate_hz`, `channels` and `timestamp_ms`; Python audio is
+  attributed to the session timeline alone.
+</Callout>
+
+Agent audio uses a **playout clock**: because TTS often arrives in a burst but is
+played in real time, the agent track's clock advances by the PCM duration of each
+chunk. That keeps the pauses before and between replies instead of compressing
+them away — which is what makes the waveform's silence annotations meaningful.
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/concepts/milestones-and-samples"
+    title="Milestones and samples"
+    description="The vocabulary the dashboard reads, and why a missing one means unmeasurable."
+  />
+  <Card
+    href="/docs/reference/session-package"
+    title="Session package"
+    description="The exact on-disk shape of everything described here."
+  />
+</Cards>

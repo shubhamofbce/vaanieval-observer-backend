@@ -1,0 +1,17 @@
+{
+  "title": "Documentation",
+  "pages": [
+    "index",
+    "---Get started---",
+    "quickstart",
+    "---Learn---",
+    "concepts",
+    "---SDKs---",
+    "python",
+    "nodejs",
+    "---Platform---",
+    "dashboard",
+    "---Reference---",
+    "reference"
+  ]
+}

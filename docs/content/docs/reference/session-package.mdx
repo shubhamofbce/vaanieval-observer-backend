@@ -1,0 +1,270 @@
+---
+title: Session package
+description: The exact on-disk format both SDKs produce — manifest, event stream and audio — and the invariants that make it safe to consume.
+---
+
+`session.end()` produces a directory. That directory is the contract between the
+capture SDKs and the dashboard, and both SDKs emit a **byte-compatible** format.
+
+You can inspect it, diff it, archive it, or replay it into a different backend
+entirely.
+
+<Files>
+  <Folder name=".vaani-spool" defaultOpen>
+    <Folder name="9f2c1e4a-…" defaultOpen>
+      <File name="manifest.json" />
+      <File name="events.jsonl" />
+      <File name="call.audio" />
+    </Folder>
+  </Folder>
+</Files>
+
+## Write invariants
+
+Two rules make the format safe to consume concurrently:
+
+<Callout type="info">
+  **1. `manifest.json` is written last.** Its presence is the signal that a
+  package is finished. A directory without it is still being written or was
+  abandoned.
+
+  **2. Every file is written to a temporary name and renamed into place.** A
+  crash mid-write leaves an obviously incomplete directory rather than a
+  plausible-looking corrupt one.
+</Callout>
+
+## `manifest.json`
+
+```json
+{
+  "schema_version": "1.0",
+  "sdk": { "name": "@vaanieal/observer", "version": "0.1.0" },
+  "session_id": "9f2c1e4a-3b7d-4c88-9a21-0e5f7b2d1c34",
+  "agent_id": "support-bot",
+  "metadata": { "env": "prod", "version": "2026.08.1" },
+  "started_at": "2026-08-14T09:12:03.418Z",
+  "duration_ms": 184320,
+  "outcome": "completed",
+  "capture_status": {
+    "events_complete": true,
+    "audio_complete": true,
+    "http_instrumentation": "active",
+    "websocket_instrumentation": "active",
+    "dropped_event_count": 0,
+    "dropped_audio_chunk_count": 0
+  },
+  "audio": {
+    "call": {
+      "file": "call.audio",
+      "encoding": "pcm_s16le",
+      "sample_rate_hz": 16000,
+      "channels": 2,
+      "channel_layout": { "left": "agent", "right": "caller" }
+    }
+  }
+}
+```
+
+<TypeTable
+  type={{
+    schema_version: { description: 'Format version. Currently 1.0.', type: 'string' },
+    sdk: { description: 'Which SDK and version produced this package.', type: 'object' },
+    session_id: { description: 'Also the idempotency key on upload.', type: 'string' },
+    agent_id: { description: 'Your identifier for the agent.', type: 'string' },
+    metadata: { description: 'Free-form; becomes the dashboard filter dimensions.', type: 'object' },
+    started_at: { description: 'ISO 8601 timestamp.', type: 'string' },
+    duration_ms: { description: 'Session clock at end().', type: 'number' },
+    outcome: { description: 'Free-form. Defaults to "unknown".', type: 'string' },
+    capture_status: { description: 'What capture actually achieved. See below.', type: 'object' },
+    audio: { description: 'Empty object when no audio was captured.', type: 'object' },
+  }}
+/>
+
+### `capture_status`
+
+This is how degraded capture becomes visible when `strict` is off.
+
+| Field | Meaning |
+| --- | --- |
+| `events_complete` | No event write failed |
+| `audio_complete` | No audio chunk write failed |
+| `http_instrumentation` | `"active"` when HTTP patching is installed, else `"disabled"` |
+| `websocket_instrumentation` | `"active"` when websocket observation is enabled, else `"disabled"` |
+| `dropped_event_count` | Events lost to write failures |
+| `dropped_audio_chunk_count` | Audio chunks lost to write failures |
+
+<Callout type="warn">
+  A session with `events_complete: false` or a non-zero drop count is classified
+  **unverifiable** in the dashboard, not healthy and not failed. "We do not know
+  what the caller heard" is a distinct claim, and it is ranked above merely slow
+  calls precisely because it hides problems.
+</Callout>
+
+## `events.jsonl`
+
+One JSON object per line, in append order. Operation spans are written when they
+end and are identified by their `type`; audio and websocket lifecycle events
+carry a `kind` field instead (`audio_chunk`, `websocket`, and — in Python —
+`capture_error`).
+
+### `operation`
+
+Written when the operation **ends**.
+
+```json
+{
+  "event_id": "b41c…",
+  "session_id": "9f2c…",
+  "turn_id": "turn-2",
+  "scope": "turn",
+  "type": "llm",
+  "endpoint_id": "llm",
+  "provider": "openai",
+  "model": "gpt-4o-mini",
+  "transport": "http",
+  "started_at_ms": 4821,
+  "ended_at_ms": 6104,
+  "duration_ms": 1283,
+  "status": "ok",
+  "request": { "messages": "…" },
+  "response": { "tokens": 128 },
+  "error": null,
+  "milestones": {
+    "first_token": { "occurred_at_ms": 5290, "last_at_ms": 5290, "count": 1 }
+  },
+  "samples": {
+    "partial_transcript": { "items": [{ "occurred_at_ms": 5010, "text": "how do i" }], "truncated": false }
+  }
+}
+```
+
+| Field | Notes |
+| --- | --- |
+| `type` | `stt` \| `llm` \| `tts` \| `tool` |
+| `scope` | `turn` (default) or `connection` |
+| `transport` | `manual`, or set by instrumentation (`http`, `websocket`) |
+| `status` | `ok` by default; anything else marks the span failed |
+| `milestones` | Repeated names merge: first `occurred_at_ms`, latest `last_at_ms`, `count` |
+| `samples` | Per-name bucket, capped at `limit` (default 100), with a `truncated` flag |
+
+### `audio_chunk`
+
+```json
+{ "kind": "audio_chunk", "track": "caller", "occurred_at_ms": 1240, "byte_length": 3200, "duration_ms": 100 }
+```
+
+`track` is `caller` or `agent`. `duration_ms` is present when the PCM duration is
+computable. The agent track's `occurred_at_ms` comes from the **playout clock**,
+not arrival time — see below.
+
+### `websocket`
+
+```json
+{ "kind": "websocket", "session_id": "9f2c…", "occurred_at_ms": 980, "event": "closed", "url": "wss://…", "code": 1000 }
+```
+
+### Payload bounding
+
+Any captured payload larger than `payload_max_bytes` (16 KiB default) is
+replaced in place:
+
+```json
+{ "_truncated": true, "_original_bytes": 184320, "_preview": "{\"messages\":[{\"role\"…" }
+```
+
+A value that cannot be serialised becomes `{ "_capture_error": "…" }`. The event
+is still written — capture never fails an operation.
+
+## `call.audio`
+
+Raw interleaved stereo PCM. **No container, no header.**
+
+| Property | Value |
+| --- | --- |
+| Encoding | `pcm_s16le` |
+| Channels | 2 |
+| Sample rate | The **maximum** of the two input track rates |
+| Left channel | Agent |
+| Right channel | Caller |
+| Frame size | 4 bytes |
+
+Bytes are `frames × 4`, where `frames` is the larger of the session duration in
+samples and the longest rendered track. A track with no audio is silence.
+
+### The playout clock
+
+TTS audio usually arrives in a burst even though it will be played in real time.
+If chunks were placed at arrival time, a 12-second reply would appear as a
+half-second blob and every pause in the call would vanish.
+
+Instead, the agent track's clock advances by the **PCM duration** of each chunk:
+a chunk is placed at `max(arrival_time, end_of_previous_chunk)`. That preserves
+the real silences, which is what makes the waveform's gap annotations meaningful
+and what makes latency audible when you scrub to a timestamp.
+
+### Playing it
+
+```bash
+ffplay -f s16le -ar 16000 -ch_layout stereo call.audio
+```
+
+```bash
+ffmpeg -f s16le -ar 16000 -ac 2 -i call.audio call.wav
+```
+
+The dashboard does the same thing on demand — it wraps the raw PCM in a WAV
+header per request rather than storing a second copy, and honours HTTP `Range`
+because Safari refuses to play media otherwise.
+
+<Callout type="warn">
+  **Audio dominates storage.** Two raw 16-bit PCM tracks are roughly 64 KB per
+  second of call at 16 kHz — about 3.8 MB per minute. There is no compression and
+  no retention policy in either the SDK spool or the dashboard. A production
+  deployment needs both, and realistically Opus rather than PCM.
+</Callout>
+
+## Consuming a package yourself
+
+The format is deliberately boring, so you do not have to use the dashboard:
+
+```python
+import json
+from pathlib import Path
+
+package = Path("./.vaani-spool/9f2c1e4a-…")
+manifest = json.loads((package / "manifest.json").read_text())
+
+operations = [
+    json.loads(line)
+    for line in (package / "events.jsonl").read_text().splitlines()
+    if line and json.loads(line).get("type") in {"stt", "llm", "tts", "tool"}
+]
+
+turns = {}
+for op in operations:
+    if op.get("scope") == "connection":
+        continue          # a session-long socket is not an utterance
+    turns.setdefault(op["turn_id"], []).append(op)
+```
+
+<Callout type="info">
+  Two rules to honour if you build on this: skip `scope: "connection"` spans when
+  computing per-turn metrics, and treat a missing milestone as **unmeasurable**
+  rather than substituting an operation's start or end time. Both are the reason
+  the dashboard's numbers hold up.
+</Callout>
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/reference/http-api"
+    title="HTTP API"
+    description="How a package is uploaded and verified."
+  />
+  <Card
+    href="/docs/reference/metrics"
+    title="Metrics glossary"
+    description="What the dashboard derives from these events."
+  />
+</Cards>

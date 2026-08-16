@@ -1,0 +1,226 @@
+---
+title: Endpoints and instrumentation
+description: How VaaniEval decides that an outbound HTTP request or websocket belongs to your STT, LLM or TTS provider — and what it deliberately refuses to guess.
+---
+
+Automatic instrumentation is only useful if it attributes calls correctly. VaaniEval
+does not sniff request bodies or guess from hostnames — you declare the mapping,
+and the SDK enforces it.
+
+## Endpoint rules
+
+```python
+vaani = VaaniObserver(
+    endpoints=[
+        {"id": "stt", "type": "stt", "url": "wss://api.deepgram.com/v1/listen"},
+        {"id": "llm", "type": "llm", "url": "https://api.openai.com/v1"},
+        {"id": "tts", "type": "tts", "url": "https://api.elevenlabs.io", "match": "origin"},
+    ],
+)
+```
+
+<TypeTable
+  type={{
+    id: {
+      description: 'Your name for this endpoint. Must be unique — duplicates raise at construction.',
+      type: 'string',
+      required: true,
+    },
+    type: {
+      description: 'What kind of work this endpoint does.',
+      type: "'stt' | 'llm' | 'tts'",
+      required: true,
+    },
+    url: {
+      description: 'The provider URL this rule matches against. http/https/ws/wss.',
+      type: 'string',
+      required: true,
+    },
+    match: {
+      description: 'How strictly to compare. See below.',
+      type: "'path' | 'origin' | 'exact'",
+      default: "'path'",
+    },
+  }}
+/>
+
+## Match strategies
+
+Every strategy requires the **host** to be identical. They differ in what happens
+after that.
+
+| Strategy | Matches when | Use it for |
+| --- | --- | --- |
+| `path` *(default)* | The request path **starts with** the rule path | A provider mounted under a prefix, e.g. `https://api.openai.com/v1` |
+| `origin` | Anything on that host | A provider that spreads across many paths |
+| `exact` | Path **and** query string are identical | Disambiguating two rules on one host |
+
+### Scheme handling
+
+A rule written for the exact scheme always wins. Only when nothing matches
+literally does the transport-neutral form apply — `http`/`ws` are comparable, as
+are `https`/`wss`.
+
+This exists because a provider's websocket usually lives at the same origin as
+its REST API. Deepgram is `https://api.deepgram.com` and
+`wss://api.deepgram.com`. Without this rule, adding websocket coverage would
+retroactively make a previously working pair of rules ambiguous.
+
+<Callout type="warn">
+  **Ambiguity is an error, not a coin flip.** If a URL matches more than one rule
+  at the same scheme precedence, `classify_url()` raises `Ambiguous Vaani endpoint
+  rules for …`. Fix it by narrowing one rule to `exact`, or by making the paths
+  disjoint. VaaniEval would rather fail loudly than silently attribute your LLM
+  latency to your TTS budget.
+</Callout>
+
+## What gets instrumented
+
+| SDK | HTTP | Websocket |
+| --- | --- | --- |
+| Python | `httpx` and `aiohttp`, patched on construction | `observe_websocket()`, explicit |
+| Node.js | global `fetch`, patched on construction | `observeWebSocket()`, explicit |
+
+Both are on by default and can be disabled:
+
+<Tabs items={['Python', 'Node.js']}>
+
+<Tab value="Python">
+
+```python
+vaani = VaaniObserver(instrumentations={"http": True, "websocket": False})
+...
+vaani.uninstall_instrumentation()   # restore the originals
+```
+
+</Tab>
+
+<Tab value="Node.js">
+
+```js
+const vaani = new VaaniObserver({ instrumentations: { fetch: true, websocket: false } });
+```
+
+</Tab>
+
+</Tabs>
+
+## Two conditions, both required
+
+A patched call is recorded only when **both** are true:
+
+<Steps>
+
+<Step>
+
+### There is an ambient session
+
+Set by `session.context()` / `session.run()`, `with_turn` / `withTurn`,
+`with_endpoint` / `withEndpoint`, or `session.bind()`. Outside any session the
+patched function is a pass-through.
+
+</Step>
+
+<Step>
+
+### The URL matches an endpoint rule
+
+If `classify_url()` returns nothing, the request is not yours to measure — a
+call to your own database or a feature flag service is left alone.
+
+</Step>
+
+</Steps>
+
+<Callout type="info">
+  This is the first thing to check when auto-instrumentation "isn't working". Both
+  conditions fail silently by design, because the alternative is an observability
+  library throwing inside your agent's request path.
+</Callout>
+
+## Forcing an endpoint
+
+When a provider is reached through an SDK that does not expose the URL — or
+through a gateway that rewrites it — bypass classification:
+
+<Tabs items={['Python', 'Node.js']}>
+
+<Tab value="Python">
+
+```python
+with session.with_endpoint("llm", turn_id=turn.id):
+    await provider_sdk.complete(prompt)
+```
+
+</Tab>
+
+<Tab value="Node.js">
+
+```js
+await session.withEndpoint('llm', () => providerSdk.complete(prompt), { turnId: turn.id });
+```
+
+</Tab>
+
+</Tabs>
+
+An unknown endpoint id raises immediately — a typo is a startup error rather than
+a call that quietly goes unattributed.
+
+## Websockets are connection spans
+
+`observe_websocket()` / `observeWebSocket()` creates a span with
+`scope: "connection"`, not a turn:
+
+```js
+const handle = vaani.observeWebSocket(socket, {
+  session,
+  url: socket.url,
+  endpointId: 'stt', // optional; classified from the URL if omitted
+});
+// ...
+handle.detach();
+```
+
+It records `connected`, `sent_frame` and `received_frame` (accumulating byte
+counts and totals) and the close code.
+
+<Callout type="warn">
+  **Frame contents are never recorded** — only lifecycle, direction, and byte
+  counts. Because a streaming STT socket is open for the whole call, treating it as a turn
+  would report a five-minute transcription latency on a five-minute call. Per-turn
+  STT timing must come from explicit operations and milestones.
+</Callout>
+
+## What instrumentation will not do
+
+Being explicit about the boundaries, because these are the cases where people
+expect magic:
+
+- **It will not drain a streaming response body.** Reading a stream to capture it
+  would delay your first token — the exact latency this product measures.
+- **It will not infer turn boundaries.** Nothing in an HTTP request says which
+  utterance it belongs to. Use `startTurn()` and `withTurn`.
+- **It will not derive STT milestones from an HTTP round trip.** A batch request's
+  start and end times say nothing about endpointing, so the dashboard reports
+  those metrics as unavailable rather than estimating them.
+- **It will not patch arbitrary provider SDKs.** Only `httpx`/`aiohttp` (Python)
+  and global `fetch` (Node). Anything else needs `with_endpoint` or manual
+  operations.
+- **It will not capture request or response bodies by default.** See
+  [Capture and privacy](/docs/concepts/capture-and-privacy).
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/concepts/capture-and-privacy"
+    title="Capture and privacy"
+    description="Every capture flag, its default, and what turning it on costs you."
+  />
+  <Card
+    href="/docs/reference/configuration"
+    title="Configuration reference"
+    description="Every option and environment variable in both SDKs."
+  />
+</Cards>

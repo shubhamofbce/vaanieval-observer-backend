@@ -1,0 +1,296 @@
+---
+title: Recording a call
+description: The full Python recording surface — turns, operations, milestones, samples, audio tracks, websockets and ambient context.
+---
+
+This page assumes you have an observer. See [Overview](/docs/python) if not.
+
+## The shape of a recorded call
+
+```python
+session = vaani.start_session(agent_id="support-bot", metadata={"env": "prod"})
+
+turn = session.start_turn()
+op = turn.start_operation(type="llm", provider="openai", model="gpt-4o-mini")
+op.event("first_token")
+op.end(status="ok", response={"tokens": 128})
+turn.end()
+
+finalized = await session.end(outcome="completed")
+await vaani.upload_package(finalized)
+```
+
+Everything below is detail on those seven lines.
+
+## Sessions
+
+```python
+session = vaani.start_session(
+    session_id="call-8f21",              # optional; a UUID is generated
+    agent_id="support-bot",
+    metadata={"env": "prod", "version": "2026.08.1", "region": "eu-west-1"},
+)
+```
+
+`metadata` becomes the filter and group-by dimensions in the dashboard. Establish
+a convention early — it is much harder to backfill than to set.
+
+| Method | Purpose |
+| --- | --- |
+| `session.now()` | Milliseconds on the session clock |
+| `session.id` | The session id |
+| `session.start_turn(turn_id=None)` | Open a turn |
+| `session.start_operation(**kwargs)` | Open an operation |
+| `session.record_inbound_audio(chunk, fmt)` | Caller audio → right channel |
+| `session.record_outbound_audio(chunk, fmt)` | Agent audio → left channel |
+| `session.record_websocket_event(**input)` | Neutral socket lifecycle data |
+| `session.context()` | Ambient context for this session |
+| `session.with_endpoint(id, turn_id=None)` | Force an endpoint rule |
+| `session.with_turn(turn_id)` | Tag ambient work with a turn |
+| `session.bind(handler)` | Wrap a callback with the context |
+| `session.defer_capture(awaitable)` | Hold `end()` open for late capture |
+| `session.end(outcome="unknown")` | Finalize; returns `FinalizedSession` |
+
+`end()` is idempotent. It closes open turns and operations, composes the stereo
+`call.audio`, and writes `manifest.json` last.
+
+## Turns
+
+```python
+turn = session.start_turn()          # generated id
+turn = session.start_turn("turn-7")  # your id
+turn.id                              # always a string
+turn.ended                           # bool
+turn.end()
+```
+
+`turn.start_operation(**kwargs)` is `session.start_operation` with `turn_id`
+prefilled. `turn.context()` scopes ambient instrumentation to this turn.
+
+A turn has no timing of its own — it is a grouping key. Its latency is derived
+from the milestones of the operations inside it.
+
+## Operations
+
+```python
+op = session.start_operation(
+    type="stt",                # stt | llm | tts | tool
+    turn_id=turn.id,
+    scope="turn",              # or "connection"
+    endpoint_id="stt",
+    provider="deepgram",
+    model="nova-3",
+    transport="manual",
+    started_at_ms=None,        # defaults to session.now()
+    request={"language": "en"},
+)
+```
+
+| Method | Purpose |
+| --- | --- |
+| `op.event(name, data=None, **kwargs)` | Record a milestone |
+| `op.sample(name, data=None, limit=100, **kwargs)` | Retain a bounded series |
+| `op.set_turn(turn_id)` | Reattach to a turn discovered late |
+| `op.set_request(request, bounded=False)` | Attach the request after the fact |
+| `op.end(status="ok", response=None, error=None, ended_at_ms=None, payload_bounded=False)` | Close and write |
+| `op.ended` | Whether it has been written |
+| `op.turn_id` | Current turn attribution |
+
+<Callout type="warn">
+  **Nothing is written until `end()`.** An operation that is never ended is
+  deliberately absent from the package rather than persisted as a span with no
+  outcome, which would skew every duration percentile. `session.end()` closes
+  anything still open; a hard crash does not.
+</Callout>
+
+Calls on an already-ended operation are silently ignored — `event()`, `sample()`,
+`set_turn()`, `set_request()` and a second `end()` are all no-ops. That keeps a
+late callback from throwing inside your agent.
+
+### `set_turn` for late attribution
+
+Streaming frameworks often start work before they know which utterance it belongs
+to:
+
+```python
+op = session.start_operation(type="stt", provider="deepgram")
+# ... the framework resolves the utterance
+op.set_turn(turn.id)
+op.end(status="ok")
+```
+
+## Milestones
+
+```python
+op.event("speech_started")
+op.event("first_partial", {"text_length": 12})
+op.event("first_byte", occurred_at_ms=session.now())
+```
+
+Data can be passed as a mapping, as keyword arguments, or both. `occurred_at_ms`
+is pulled out of the payload if present; otherwise the session clock is stamped
+at the moment of the call — so record milestones when they happen.
+
+Repeated names **accumulate** rather than overwrite:
+
+```python
+for frame in stream:
+    op.event("received_frame", total_bytes=running_total)
+```
+
+produces one entry with the first `occurred_at_ms`, the latest `last_at_ms`, a
+`count`, and the merged payload. See
+[Milestones and samples](/docs/concepts/milestones-and-samples) for the names the
+dashboard recognises.
+
+## Samples
+
+```python
+op.sample("partial_transcript", {"text": partial}, limit=100)
+```
+
+Bounded at `limit` per name (default 100). At the cap, further samples are
+dropped and the bucket is marked `truncated: true`. Payloads pass through the
+`payload_max_bytes` bound.
+
+## Audio
+
+```python
+FORMAT = {"encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": 1}
+
+session.record_inbound_audio(caller_pcm, FORMAT)    # right channel
+session.record_outbound_audio(agent_pcm, FORMAT)    # left channel
+```
+
+Both return `True` if the chunk was recorded, `False` if capture is off or the
+session has ended.
+
+**Requirements, all enforced:**
+
+- The chunk must be `bytes`, `bytearray` or `memoryview` — otherwise `TypeError`.
+- `encoding` must be `pcm_s16le` — otherwise `ValueError`.
+- `sample_rate_hz` and `channels` must be positive integers — otherwise
+  `ValueError`.
+- The format cannot change within a session, per track.
+
+An optional `timestamp_ms` in the format overrides the arrival time:
+
+```python
+session.record_inbound_audio(chunk, {**FORMAT, "timestamp_ms": frame.captured_at_ms})
+```
+
+<Callout type="info">
+  **The agent track uses a playout clock:** its clock advances by the PCM
+  duration of each chunk, not by arrival time, so bursty TTS keeps the real
+  pauses between replies. See
+  [the playout clock](/docs/reference/session-package#the-playout-clock).
+</Callout>
+
+<Callout type="warn">
+  **Parity gap with the Node SDK.** Node accepts `turnId`, `operationId` and
+  `playoutAtMs` on the format object, attributing a chunk to the exact reply that
+  produced it. Python currently accepts only `encoding`, `sample_rate_hz`,
+  `channels` and `timestamp_ms`. Python audio is placed on the session timeline
+  alone; per-reply audio attribution is not available.
+</Callout>
+
+## Websockets
+
+```python
+from vaani_observer import observe_websocket
+
+handle = observe_websocket(socket, session=session, url=url, endpoint_id="stt")
+...
+handle.detach()
+```
+
+Or via the observer, which classifies the URL for you:
+
+```python
+handle = vaani.observe_websocket(socket, session=session, url=url)
+```
+
+The span is created with `scope="connection"` and records `connected`,
+`sent_frame`, `received_frame` (accumulating byte counts) and the close code.
+Frame contents and authentication headers are never recorded.
+
+For transports the SDK cannot patch, feed it neutral lifecycle data yourself:
+
+```python
+session.record_websocket_event(
+    event="closed", url=url, code=1000, occurred_at_ms=session.now()
+)
+```
+
+## Ambient context
+
+```python
+with session.context():
+    await client.post("https://api.openai.com/v1/chat/completions", json=body)
+
+with session.with_turn(turn.id):
+    ...
+
+with session.with_endpoint("llm", turn_id=turn.id):
+    await provider_sdk.complete(prompt)   # bypasses URL classification
+```
+
+Instrumented `httpx` and `aiohttp` calls are recorded only when there is an
+ambient session **and** the URL matches an endpoint rule. `current_context()`
+reads the active `ObserverContext`.
+
+For callbacks:
+
+```python
+socket.on_message(session.bind(handle_message))
+```
+
+`bind()` handles both sync and async callables, and an async handler inherits an
+enclosing endpoint or turn.
+
+## Deferring capture past the response
+
+```python
+async def handler(request):
+    response = await downstream()
+    session.defer_capture(record_body(response))
+    return response
+```
+
+`session.end()` waits for deferred work, so a body read that outlives the
+response still lands in the package.
+
+## Ending and uploading
+
+```python
+finalized = await session.end(outcome="completed")
+finalized.session_id
+finalized.directory
+
+await vaani.upload_package(finalized)     # or upload_package_sync(finalized)
+```
+
+At shutdown:
+
+```python
+await vaani.flush()
+```
+
+`flush()` finalizes every open session and waits for writes to land. Finalization
+errors propagate — a package that could not be written should be visible, not
+swallowed.
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/python/livekit"
+    title="LiveKit Agents"
+    description="Get all of this without writing any of it."
+  />
+  <Card
+    href="/docs/reference/session-package"
+    title="Session package"
+    description="What these calls actually produce on disk."
+  />
+</Cards>

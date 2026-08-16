@@ -1,0 +1,277 @@
+---
+title: Overview
+description: Installing and configuring the VaaniEval Python SDK — options, defaults, the observer lifecycle and the upload API.
+---
+
+`vaanieval-observer` is a zero-dependency Python package that records voice-agent
+calls to a local session package and uploads them after the call.
+
+<Callout type="warn">
+  The SDK is **not published to PyPI**. Install it from the private repository.
+</Callout>
+
+## Install
+
+```bash
+pip install "git+https://github.com/shubhamofbce/vaanieval-observer-python-sdk.git"
+```
+
+Requires **Python 3.10 or newer**. The core package has no required
+dependencies; extras pull in only what you already use:
+
+<Tabs items={['httpx', 'aiohttp', 'LiveKit', 'Everything']}>
+
+<Tab value="httpx">
+
+```bash
+pip install "vaanieval-observer[httpx] @ git+https://github.com/shubhamofbce/vaanieval-observer-python-sdk.git"
+```
+
+</Tab>
+
+<Tab value="aiohttp">
+
+```bash
+pip install "vaanieval-observer[aiohttp] @ git+https://github.com/shubhamofbce/vaanieval-observer-python-sdk.git"
+```
+
+</Tab>
+
+<Tab value="LiveKit">
+
+```bash
+pip install "vaanieval-observer[livekit] @ git+https://github.com/shubhamofbce/vaanieval-observer-python-sdk.git"
+```
+
+See [LiveKit Agents](/docs/python/livekit).
+
+</Tab>
+
+<Tab value="Everything">
+
+```bash
+pip install "vaanieval-observer[httpx,aiohttp,livekit] @ git+https://github.com/shubhamofbce/vaanieval-observer-python-sdk.git"
+```
+
+</Tab>
+
+</Tabs>
+
+<Callout type="info">
+  Pin a commit or tag in production (`…sdk.git@v0.1.0`). Installing from a moving
+  branch means a redeploy can change your instrumentation without a version bump.
+</Callout>
+
+## Constructing the observer
+
+```python
+from vaani_observer import VaaniObserver
+
+vaani = VaaniObserver(
+    endpoint="http://localhost:8000",
+    api_key="local-dev",
+    spool_directory="./.vaani-spool",
+    capture={"audio": True, "http_bodies": False},
+    instrumentations={"http": True, "websocket": True},
+    endpoints=[
+        {"id": "stt", "type": "stt", "url": "wss://api.deepgram.com/v1/listen"},
+        {"id": "llm", "type": "llm", "url": "https://api.openai.com/v1"},
+        {"id": "tts", "type": "tts", "url": "https://api.elevenlabs.io"},
+    ],
+    upload={"retries": 3},
+    strict=False,
+)
+```
+
+<TypeTable
+  type={{
+    endpoint: {
+      description: 'Dashboard base URL. Only used by upload_package(); capture works without it.',
+      type: 'str | None',
+      default: 'None',
+    },
+    api_key: {
+      description: 'Sent as a bearer token on the upload handshake. The local dashboard does not validate it.',
+      type: 'str | None',
+      default: 'None',
+    },
+    spool_directory: {
+      description: 'Where session packages are written during the call.',
+      type: 'str | Path',
+      default: './.vaani-spool',
+    },
+    capture: {
+      description: 'What to record. See Capture and privacy.',
+      type: 'dict',
+      default: 'audio=True, http_bodies=False, websocket_text_frames=False, stt_content=False, payload_max_bytes=16384',
+    },
+    instrumentations: {
+      description: 'Which client libraries to patch on construction.',
+      type: 'dict',
+      default: 'http=True, websocket=True',
+    },
+    endpoints: {
+      description: 'Rules mapping provider URLs to endpoint ids and types.',
+      type: 'list[dict]',
+      default: '[]',
+    },
+    upload: {
+      description: 'Upload behaviour.',
+      type: 'dict',
+      default: 'retries=3',
+    },
+    strict: {
+      description: 'Raise on instrumentation errors instead of degrading silently.',
+      type: 'bool',
+      default: 'False',
+    },
+  }}
+/>
+
+Constructing the observer **installs instrumentation immediately**. It does not
+open a connection, contact your dashboard, or perform any I/O. Construct it once
+at process start.
+
+<Callout type="warn">
+  Duplicate endpoint `id`s raise at construction, and an unknown `match` strategy
+  raises `TypeError`. That is intentional — a misconfigured rule is a startup
+  failure rather than a call whose latency lands under the wrong provider.
+</Callout>
+
+## Lifecycle
+
+<Steps>
+
+<Step>
+
+### Start a session per call
+
+```python
+session = vaani.start_session(agent_id="support-bot", metadata={"env": "prod"})
+```
+
+</Step>
+
+<Step>
+
+### Record turns, operations and audio
+
+See [Recording a call](/docs/python/recording).
+
+</Step>
+
+<Step>
+
+### End the session
+
+```python
+finalized = await session.end(outcome="completed")
+print(finalized.directory, finalized.session_id)
+```
+
+Closes open spans, composes stereo audio, writes `manifest.json` last.
+
+</Step>
+
+<Step>
+
+### Upload
+
+```python
+await vaani.upload_package(finalized)     # async
+vaani.upload_package_sync(finalized)      # sync
+```
+
+Both require `endpoint` and `api_key`. If you skip this, the package simply stays
+on disk.
+
+</Step>
+
+<Step>
+
+### Flush at shutdown
+
+```python
+await vaani.flush()
+```
+
+Finalizes every session still open and waits for their writes to land. Call it
+from your process's shutdown hook.
+
+</Step>
+
+</Steps>
+
+## Public API
+
+Exported from `vaani_observer`:
+
+| Name | What it is |
+| --- | --- |
+| `VaaniObserver` | The entry point |
+| `Session` | One call |
+| `Turn` | One exchange |
+| `Operation` | One provider span |
+| `FinalizedSession` | Handle to a written package |
+| `ObserverContext` | The ambient context object |
+| `WebSocketHandle` | Returned by `observe_websocket` |
+| `observe_websocket` | Standalone websocket observation |
+| `current_context` | Read the ambient context |
+| `sha256` | Digest helper used by the upload protocol |
+
+Observer methods:
+
+| Method | Purpose |
+| --- | --- |
+| `start_session(**input)` | Open a session (`session_id`, `agent_id`, `metadata`) |
+| `flush()` | Finalize all open sessions |
+| `context(session, endpoint_id=None, turn_id=None)` | Install ambient context |
+| `classify_url(url)` | Which endpoint rule a URL matches, or `None` |
+| `rule_for(endpoint_id)` | Look up a configured rule |
+| `observe_websocket(...)` | Observe a socket |
+| `uninstall_instrumentation()` | Restore original client methods |
+| `upload_package(finalized)` | Async upload |
+| `upload_package_sync(finalized)` | Blocking upload |
+
+## Async and sync
+
+The SDK works in both. `start_session`, `start_turn`, `start_operation`,
+`event`, `sample` and the audio methods are all synchronous and
+non-blocking — they append to an in-process queue drained by a writer.
+
+Two async-specific helpers:
+
+- `session.defer_capture(awaitable)` holds `end()` open for post-response capture
+  work such as reading a body.
+- `session.bind(handler)` wraps sync or async callables, installing the ambient
+  context inside the coroutine so it inherits an enclosing endpoint or turn.
+
+## Failure behaviour
+
+With `strict=False` (the default), instrumentation errors are swallowed.
+Recording problems surface as `capture_status` counters in the manifest —
+`dropped_event_count`, `dropped_audio_chunk_count`, `events_complete`,
+`audio_complete` — and as the *unverifiable* class in the dashboard.
+
+Set `strict=True` in staging so those failures raise.
+
+<Callout type="warn">
+  Spool directories are **not** removed after a successful upload. Add a cleanup
+  sweep of `.vaani-spool` to your deployment, or audio will accumulate on your
+  agent hosts indefinitely.
+</Callout>
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/python/recording"
+    title="Recording a call"
+    description="Turns, operations, milestones, audio and websockets in depth."
+  />
+  <Card
+    href="/docs/python/livekit"
+    title="LiveKit Agents"
+    description="One-line integration, environment configuration and its limits."
+  />
+</Cards>

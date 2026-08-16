@@ -1,0 +1,5 @@
+{
+  "title": "Python SDK",
+  "icon": "FileCode",
+  "pages": ["index", "recording", "livekit"]
+}

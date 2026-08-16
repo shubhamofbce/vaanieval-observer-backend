@@ -1,0 +1,11 @@
+{
+  "title": "Concepts",
+  "icon": "BookOpen",
+  "pages": [
+    "architecture",
+    "sessions-turns-operations",
+    "milestones-and-samples",
+    "endpoints-and-instrumentation",
+    "capture-and-privacy"
+  ]
+}

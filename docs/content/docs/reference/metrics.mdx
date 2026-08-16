@@ -1,0 +1,230 @@
+---
+title: Metrics glossary
+description: Every number VaaniEval reports, the milestones it is derived from, and the exact conditions under which it is reported as unavailable instead.
+---
+
+The single rule behind this page: **a metric that cannot be measured is reported
+as unavailable, never estimated and never zero.** Everything below states what
+each number needs, so you know what your instrumentation has to emit.
+
+## Latency
+
+### Reply wait
+
+The caller-visible silence between finishing speaking and hearing a response.
+
+| | |
+| --- | --- |
+| **Measured from** | `caller stops speaking` → `first audio byte` |
+| **Reported as** | *Typical wait* (median) and *worst wait* per call; p50/p95 across a fleet |
+| **Unavailable when** | Either milestone is missing on the turn |
+
+<Callout type="warn">
+  This is **not** a provider's response time. A provider that answers in 200 ms
+  can still produce a 3-second reply wait if endpointing was slow or a retry
+  happened. Conflating the two is the most common mistake when moving from a
+  request-level APM.
+</Callout>
+
+### Time to first partial
+
+| | |
+| --- | --- |
+| **Measured from** | Caller speech start → `first partial transcript` |
+| **Tells you** | How quickly the recognizer produced *any* text |
+| **Unavailable when** | The build did not record a first-partial milestone, or word timestamps are absent |
+
+Caller speech start is taken from **word timestamps**, not from
+`speech_started` — that milestone marks when the recognizer opened its listening
+window, which on real data can precede the first word by more than ten seconds.
+
+### Endpointing delay
+
+| | |
+| --- | --- |
+| **Measured from** | `caller stops speaking` → `provider marks speech final` |
+| **Tells you** | How long the recognizer took to *decide* the caller had finished |
+| **Unavailable when** | The two instants were not observed separately |
+
+<Callout type="info">
+  Half of real STT spans stamp `speech_ended` and `final_transcript` from the same
+  underlying framework event, so the milestones exist, look independent, and are
+  byte-identical. Subtracting them would manufacture a zero, so the engine
+  requires genuinely separate observations. This is why `ENDPOINTING` frequently
+  shows `—  unavailable` on real calls.
+</Callout>
+
+### Finalization delay
+
+| | |
+| --- | --- |
+| **Measured from** | Last word → `final transcript` |
+| **Tells you** | How long after the caller stopped the final text arrived |
+| **Unavailable when** | Word timestamps or the final-transcript milestone are missing |
+
+### Time to first token
+
+| | |
+| --- | --- |
+| **Measured from** | `request sent` → `first token` |
+| **Unavailable when** | The provider or framework does not report TTFT |
+
+### Time to first byte (TTS)
+
+| | |
+| --- | --- |
+| **Measured from** | `text handed to the voice` → `first audio byte` |
+| **Unavailable when** | The provider does not report TTFB |
+
+## Coverage and quality of measurement
+
+### Measurable turns
+
+The percentage of turns with every milestone a metric needs. Published alongside
+every percentile — *"68% of 111 turns measurable"*.
+
+<Callout type="warn">
+  A low measurable percentage is a finding about **your instrumentation**, not
+  your agent. It usually means a provider wrapper is not emitting milestones or a
+  code path bypasses your endpoint rules. Fix it before trusting the percentile
+  above it.
+</Callout>
+
+### Coverage
+
+Recorded turns that carry usable STT evidence, e.g. *"3 of 4 recorded turns"*.
+
+### Transcripts available
+
+How many turns have transcript text at all, e.g. *"3 of 3"*. Distinct from
+coverage: a call can have timing without text when `stt_content` capture is off.
+
+<Callout type="info">
+  The engine distinguishes a **privacy-redacted** build (records a character count
+  but not the words) from one that never captured a transcript. "Withheld" and
+  "absent" are different facts and are not conflated.
+</Callout>
+
+## Reliability
+
+### Failures
+
+Operations that ended with a status other than `ok`, or with a non-null `error`.
+
+**Cancellation is not failure.** `AbortError`, `CancelledError` and
+`CancelledException` are recognised and excluded — a TTS span aborted because the
+caller barged in is the agent behaving correctly. The UI goes further and checks
+whether caller speech actually overlaps the cancellation, flagging one that was
+*not* barge-in as worth investigating.
+
+### Turns over 3s
+
+Turns whose reply wait exceeded 3 seconds. A blunt but useful "how often did this
+feel slow" counter.
+
+### Attention classes
+
+Calls are ranked in three classes, then by magnitude within each:
+
+| Class | Meaning |
+| --- | --- |
+| **Failed** | The caller heard an error |
+| **Unverifiable** | Capture is incomplete, so we cannot say what they heard |
+| **Slow** | It worked; it took too long |
+
+<Callout type="warn">
+  **Unverifiable is ranked above slow deliberately.** "We do not know what
+  happened" is a different claim from "it was slow", and folding it into a healthy
+  bucket would hide the calls most likely to contain a problem. Its sources are a
+  `partial` session status, `events_complete: false`, or non-zero drop counts in
+  `capture_status`.
+</Callout>
+
+## Transcription accuracy
+
+### Estimated WER
+
+Word error rate between the production transcript and a challenger transcript,
+from deterministic normalization and word alignment. Reported per turn and per
+call, with substitution, deletion and insertion counts.
+
+<Callout type="warn">
+  **This is a disagreement score, not accuracy.** The challenger is a
+  *pseudo-reference*, not ground truth — where the two models disagree, either
+  could be wrong. The UI labels it *estimated WER* / *model disagreement*, never
+  *accuracy*, and it stays that way until a human-reviewed reference transcript
+  exists.
+</Callout>
+
+**Unavailable when** no challenger run has been executed. Accuracy never appears
+before a comparison.
+
+### Semantic risk
+
+An LLM judge classifies whether each disagreement could have **changed the
+conversation** — a misheard account number matters, a dropped filler word does
+not. Cached by content fingerprint so re-runs do not re-bill. Requires
+`OPENAI_API_KEY`; model set by `STT_EVAL_JUDGE_MODEL` (default `gpt-4o-mini`).
+
+This exists precisely because WER alone over-reports: it counts every word
+equally, and conversations do not.
+
+### Cohort comparison
+
+The same call's metrics against other calls from the same agent, computed over a
+**25-session sample** (`COHORT_SAMPLE_LIMIT`) rather than full history — cheap,
+but a sample estimate.
+
+## Cost
+
+Per-minute list pricing with a **provenance flag**:
+
+| Provenance | Meaning |
+| --- | --- |
+| `estimated_list_price` | Published list rate |
+| `configured` | A rate you set via `PUT /v1/pricing` |
+| `usage_not_reported` | The provider did not report usage for this run |
+
+<Callout type="warn">
+  Cost figures are for comparing options, not reconciling invoices. Challenger
+  transcription and the judge both bill per run, and there is no spend cap in the
+  service.
+</Callout>
+
+## Scoping rules that affect every number
+
+<Callout type="info">
+  **1. Connection spans are excluded from per-turn statistics.** A session-long
+  STT websocket is a connection span, never scored as an utterance — otherwise a
+  five-minute call would report a five-minute transcription latency.
+
+  **2. Framework spans cover retries.** An LLM operation whose duration exceeds
+  any single HTTP attempt is timing the whole retry sequence. That is the caller's
+  reality; the attempts are the mechanism.
+
+  **3. Missing milestones exclude a turn, they do not zero it.** No metric is ever
+  derived from operation start/end times or a batch HTTP round trip.
+</Callout>
+
+## Verification
+
+`scripts/validate-latency.py` in the dashboard repository is a deliberate second
+implementation. It re-derives every published latency value straight from
+`events.jsonl` with its own arithmetic and asserts the served payload agrees, and
+it runs in the test suite — so a change that reintroduces a fabricated
+measurement fails the build.
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/concepts/milestones-and-samples"
+    title="Milestones and samples"
+    description="How to emit what these metrics need."
+  />
+  <Card
+    href="/docs/reference/troubleshooting"
+    title="Troubleshooting"
+    description="When a number is missing and you expected it."
+  />
+</Cards>

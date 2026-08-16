@@ -1,0 +1,187 @@
+---
+title: Architecture
+description: How the SDK, the on-disk session package, the upload protocol and the dashboard fit together — and why capture is deliberately kept off the live media path.
+---
+
+VaaniEval has three moving parts and one file format between them.
+
+<Mermaid
+  chart={`
+flowchart LR
+  subgraph app["Your voice agent process"]
+    A["Agent code"]
+    S["VaaniEval SDK<br/>(Python or Node)"]
+    A -->|"turns, operations,<br/>milestones, PCM"| S
+  end
+
+  S -->|"append-only writes"| P["Session package<br/>on local disk"]
+
+  P -->|"POST /v1/sessions<br/>PUT objects<br/>POST .../complete"| B["Dashboard API<br/>(FastAPI)"]
+
+  B --> DB[("SQLite<br/>sessions · operations")]
+  B --> FS[("Object store<br/>events.jsonl · audio")]
+  B --> UI["Console<br/>call view · STT review"]
+`}
+/>
+
+## The design constraint
+
+A voice agent is a soft-real-time system. Anything that adds latency to the media
+path degrades the very experience you are trying to measure. Every architectural
+decision follows from that:
+
+| Decision | Consequence |
+| --- | --- |
+| Capture writes to **local disk**, never to the network | A slow or unreachable collector cannot stall a call |
+| Upload happens **after** `session.end()` | Network cost is paid when nobody is listening |
+| Response bodies are **never drained** to inspect them | Reading a stream to capture it would hold back the first token |
+| Instrumentation failures are **swallowed by default** | A bug in observability cannot take down the agent |
+| The library ships with **no runtime dependencies** | Nothing in your agent's dependency tree changes |
+
+<Callout type="warn">
+  The last point is a real tradeoff, not just a feature. `strict: false` (the
+  default) means capture can silently degrade — you find out from
+  `capture_status` in the manifest and the *unverifiable* class in the dashboard,
+  not from an exception. Set `strict: true` in staging to surface those failures
+  loudly, and keep it off in production.
+</Callout>
+
+## Layer 1: the SDK
+
+The SDK does three things:
+
+**It models the call.** You open a `Session`, then `Turn`s, then `Operation`s.
+See [Sessions, turns and operations](/docs/concepts/sessions-turns-operations).
+
+**It instruments providers.** On construction the observer patches HTTP
+(`httpx`/`aiohttp` in Python, global `fetch` in Node) and offers websocket
+observation. A patched call is recorded **only** when there is an ambient session
+*and* the URL matches one of your endpoint rules — otherwise it passes through
+untouched. See
+[Endpoints and instrumentation](/docs/concepts/endpoints-and-instrumentation).
+
+**It writes.** Events are appended to a JSONL file; PCM chunks are appended to
+per-track raw files. Writes are serialised so append order is preserved.
+
+## Layer 2: the session package
+
+`session.end()` produces a directory. That directory is the contract between the
+SDK and the dashboard — you can inspect it, diff it, archive it, or replay it
+into a different backend.
+
+<Files>
+  <Folder name=".vaani-spool" defaultOpen>
+    <Folder name="9f2c…-session-id" defaultOpen>
+      <File name="manifest.json" />
+      <File name="events.jsonl" />
+      <File name="call.audio" />
+    </Folder>
+  </Folder>
+</Files>
+
+`manifest.json` is written **last**, after every other file is complete. Its
+presence is the signal that a package is finished. Every file is written to a
+temporary name and renamed into place, so a crash mid-write leaves an obviously
+incomplete directory rather than a plausible-looking corrupt one.
+
+`call.audio` is a single stereo track composed from the two mono captures —
+**agent on the left channel, caller on the right** — aligned on the session
+timeline so the silences are real silences. See
+[Session package](/docs/reference/session-package).
+
+## Layer 3: the dashboard
+
+A FastAPI service with three responsibilities: accept uploads, import them, and
+serve the console.
+
+<Steps>
+
+<Step>
+
+### Handshake
+
+`POST /v1/sessions` with the manifest and an `idempotency-key` header equal to
+the session id. Returns the URLs to upload each object to.
+
+</Step>
+
+<Step>
+
+### Objects
+
+`PUT` each object. Bodies are streamed to a `.part` file and renamed on success,
+capped at **128 MiB** (`413` beyond that). Only four object names are accepted:
+`events.jsonl`, `call.audio`, `caller.audio`, `agent.audio`.
+
+</Step>
+
+<Step>
+
+### Completion
+
+`POST /v1/sessions/{id}/complete` with each object's byte size and SHA-256. The
+server verifies both and rejects the completion on a mismatch — a truncated
+upload is a `400`, not a call with quietly missing turns.
+
+</Step>
+
+</Steps>
+
+The session lands as `ready` if operations were imported, or `partial` if the
+objects arrived but no operations could be read. `partial` is what surfaces as
+*unverifiable* in the dashboard.
+
+<Callout type="warn">
+  **Scaling limits you should know before you commit.** The dashboard stores
+  metadata in a single SQLite file and audio on the local filesystem, with no
+  authentication, no tenant isolation and no retention policy. It is built for a
+  team debugging their own agent, not for multi-tenant production. Challenger
+  evaluation runs on a two-worker thread pool in the same process, so a batch of
+  replays competes with request serving. See
+  [Self-hosting](/docs/dashboard/self-hosting) for the full list.
+</Callout>
+
+## Where the numbers come from
+
+Nothing in the dashboard is inferred from wall-clock guessing. Every latency it
+reports is derived from milestones the SDK recorded during the call:
+
+<Mermaid
+  chart={`
+sequenceDiagram
+  autonumber
+  participant C as Caller
+  participant STT
+  participant LLM
+  participant TTS
+  C->>STT: caller starts speaking
+  STT-->>STT: first partial transcript
+  C->>STT: caller stops speaking
+  STT-->>STT: provider marks speech final
+  STT->>LLM: final transcript
+  LLM-->>LLM: first token
+  LLM->>TTS: text handed to the voice
+  TTS-->>C: first audio byte
+`}
+/>
+
+The caller-visible reply wait is *caller stops speaking → first audio byte*. If
+any milestone in that chain is missing, the turn is reported as **unmeasurable**
+and excluded from the percentile — it is never estimated from operation start and
+end times. That is why the dashboard always publishes a denominator like *"68% of
+111 turns measurable"*.
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/concepts/sessions-turns-operations"
+    title="Sessions, turns and operations"
+    description="The three nouns everything else is built from."
+  />
+  <Card
+    href="/docs/concepts/capture-and-privacy"
+    title="Capture and privacy"
+    description="Exactly what leaves your process, and what never does."
+  />
+</Cards>

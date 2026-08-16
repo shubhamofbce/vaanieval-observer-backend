@@ -1,0 +1,172 @@
+---
+title: Fleet and alerts
+description: Rolling per-call measurements up across agents, finding the calls worth opening, and getting told when something regresses.
+---
+
+<Callout type="info">
+  The fleet dashboard and alerts are part of the **hosted** product. A self-hosted
+  [`vaanieval-observer-backend`](https://github.com/shubhamofbce/vaanieval-observer-backend)
+  gives you the call console and the STT evaluation workspace. Everything on this
+  page is live at [demo.vaanieval.com](https://demo.vaanieval.com).
+</Callout>
+
+## The fleet dashboard
+
+![The fleet dashboard: KPI cards for calls, typical reply wait, worst-case reply wait, turns over 3 seconds and calls hitting an error, above a 'calls needing attention' table ranked by severity with the reason each call was flagged.](/screenshots/fleet-dashboard.png)
+
+Five KPI cards over a filtered set of calls:
+
+| Card | Question it answers |
+| --- | --- |
+| **Calls** | How much traffic is in this view |
+| **Typical reply wait** | What a normal caller experiences |
+| **Worst-case reply wait** | What an unlucky caller experiences |
+| **Turns over 3s** | How often the agent felt slow |
+| **Calls hitting an error** | How often something actually broke |
+
+Filters: time range, agent, provider, model, SDK, environment and version — all
+sourced from the `metadata` you set on the session. Set those consistently on day
+one; they are the difference between "latency went up" and "latency went up on
+version 2026.08.1, only on the eu-west-1 agent".
+
+### Every number publishes its denominator
+
+Look closely at the cards in the screenshot: *"still a small sample"*, *"not
+enough history to compare"*, *"68% of 111 turns measurable"*.
+
+<Callout type="warn">
+  A p95 over 75 measured turns and a p95 over 75,000 are different claims, and the
+  product refuses to render them identically. If the measurable percentage is low,
+  fix your instrumentation before you trust the percentile — a turn missing a
+  milestone is excluded rather than estimated.
+</Callout>
+
+Comparison to a previous period is suppressed entirely when there is not enough
+history, rather than showing a meaningless arrow.
+
+## Calls needing attention
+
+The table below the cards is the actual answer to "what should I look at?". It
+ranks in three classes, then by magnitude within each class:
+
+<Steps>
+
+<Step>
+
+### Failed
+
+The caller heard an error. An operation ended with a non-`ok` status that was not
+a cancellation.
+
+</Step>
+
+<Step>
+
+### Unverifiable
+
+Capture is incomplete, so we cannot say what the caller heard. The session landed
+as `partial`, or `capture_status` reports dropped events or audio.
+
+</Step>
+
+<Step>
+
+### Slow
+
+Everything worked; it just took too long.
+
+</Step>
+
+</Steps>
+
+<Callout type="info">
+  **Unverifiable is deliberately its own class, ranked above slow.** "We do not
+  know what happened" is a different statement from "it was slow", and folding it
+  into a healthy bucket would hide exactly the calls most likely to contain a
+  problem. It is also the metric that tells you your instrumentation is
+  incomplete.
+</Callout>
+
+Each row carries the reason it was flagged, and opening it lands on the turn that
+caused the flag rather than the top of the call.
+
+## Alerts
+
+![The alerts page: six rules, four firing, each showing scope (how many agents), the current reading against its threshold, and where it notifies.](/screenshots/alerts.png)
+
+Rules evaluate against the same calls the dashboard reports on, so a rule and a
+chart can never disagree.
+
+Each rule shows:
+
+- **Scope** — how many agents it applies to (*3 of 4 agents*), and how many have
+  **no reading**
+- **Reading against threshold** — the current value and the line it crossed
+- **Destination** — where it notifies
+
+<Callout type="warn">
+  **"No reading" is reported, not assumed healthy.** A rule that cannot evaluate
+  on an agent — because there were no calls, or too few measurable turns — says so
+  explicitly. An alerting system that treats missing data as "fine" is worse than
+  no alerting, because it actively reassures you.
+</Callout>
+
+### Rules that tend to earn their keep
+
+Based on the classes the product already computes:
+
+| Rule | Why |
+| --- | --- |
+| Reply wait p95 above your target | The headline caller experience |
+| Error rate above a baseline | Something is actually broken |
+| Unverifiable rate above a baseline | Your capture is degrading — often the first sign of a deploy problem |
+| Measurable-turn percentage below a floor | Instrumentation regressed |
+| Worst-case reply wait above a hard ceiling | Catches tail failures a p95 hides |
+
+### Alerting tradeoffs to plan for
+
+<Callout type="warn">
+  - **Thresholds are per-rule, not per-agent-baseline.** An agent with a genuinely
+    different latency profile needs its own rule or its own scope, or it will
+    either page constantly or never.
+  - **Percentile alerts on thin traffic are noisy.** A p95 over a handful of turns
+    moves a lot. Pair the rule with a minimum-volume condition, or expect flapping
+    on low-traffic agents.
+  - **Evaluation is post-call.** Sessions upload after they end, so an alert fires
+    minutes after the caller's bad experience, not during it. This is not a
+    real-time monitoring system, and it deliberately is not one — capture stays
+    off the live media path.
+  - **In the demo, nothing is ever delivered.** Rules you add stay in your browser.
+</Callout>
+
+## How this fits together
+
+<Mermaid
+  chart={`
+flowchart LR
+  A["Alerts<br/><small>tells you something changed</small>"]
+  B["Fleet dashboard<br/><small>tells you how much and where</small>"]
+  C["Calls needing attention<br/><small>tells you which call</small>"]
+  D["Call view<br/><small>tells you which stage</small>"]
+  E["Trace milestones<br/><small>tells you why</small>"]
+  A --> B --> C --> D --> E
+`}
+/>
+
+Each step narrows the question. If you find yourself skipping steps — going
+straight to a call view every morning — that usually means a rule is missing.
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/dashboard/call-detail"
+    title="Reading a call"
+    description="The waveform, transcript and trace in detail."
+  />
+  <Card
+    href="/docs/reference/metrics"
+    title="Metrics glossary"
+    description="Exactly what each number means and when it is unavailable."
+  />
+</Cards>

@@ -1,0 +1,283 @@
+---
+title: Recording a call
+description: The full Node.js recording surface — turns, operations, milestones, samples, audio attribution, websockets and AsyncLocalStorage context.
+---
+
+This page assumes you have an observer. See [Overview](/docs/nodejs) if not.
+
+## The shape of a recorded call
+
+```js
+const session = vaani.startSession({ agentId: 'support-bot', metadata: { env: 'prod' } });
+
+const turn = session.startTurn();
+const op = turn.startOperation({ type: 'llm', provider: 'openai', model: 'gpt-4o-mini' });
+op.event('first_token');
+op.end({ status: 'ok', response: { tokens: 128 } });
+turn.end();
+
+const finalized = await session.end({ outcome: 'completed' });
+await vaani.uploadPackage(finalized);
+```
+
+## Sessions
+
+```js
+const session = vaani.startSession({
+  sessionId: 'call-8f21',            // optional; a UUID is generated
+  agentId: 'support-bot',
+  metadata: { env: 'prod', version: '2026.08.1', region: 'eu-west-1' },
+});
+```
+
+| Member | Purpose |
+| --- | --- |
+| `session.id` | The session id |
+| `session.now()` | Milliseconds on the session clock |
+| `session.startTurn(input)` | Open a turn |
+| `session.startOperation(input)` | Open an operation |
+| `session.recordInboundAudio(chunk, format)` | Caller audio → right channel |
+| `session.recordOutboundAudio(chunk, format)` | Agent audio → left channel |
+| `session.recordWebSocketEvent(input)` | Neutral socket lifecycle data |
+| `session.run(fn)` | Ambient context for this session |
+| `session.withEndpoint(id, fn, options)` | Force an endpoint rule |
+| `session.withTurn(turnId, fn)` | Tag ambient work with a turn |
+| `session.bind(handler)` | Wrap a callback with the context |
+| `session.deferCapture(promise)` | Hold `end()` open for late capture |
+| `session.end(input)` | Finalize; resolves to the package handle |
+
+## Turns
+
+```js
+const turn = session.startTurn();                  // generated id
+const turn = session.startTurn({ turnId: 'turn-7' });
+turn.id;
+turn.ended;
+turn.end();
+```
+
+`turn.startOperation(input)` prefills `turnId`. `turn.run(fn)` scopes ambient
+instrumentation to this turn.
+
+## Operations
+
+```js
+const op = session.startOperation({
+  type: 'stt',              // stt | llm | tts | tool
+  turnId: turn.id,
+  scope: 'turn',            // or 'connection'
+  endpointId: 'stt',
+  provider: 'deepgram',
+  model: 'nova-3',
+  transport: 'manual',
+  startedAtMs: undefined,   // defaults to session.now()
+  eventId: undefined,       // generated
+  request: { language: 'en' },
+});
+```
+
+An unknown `type` throws. Attribution fields are optional; `scope` defaults to
+`turn` and `transport` to `manual`.
+
+| Member | Purpose |
+| --- | --- |
+| `op.id` | Operation id |
+| `op.eventId` | Id of the event this span will be written as |
+| `op.ended` | Whether it has been written |
+| `op.event(name, data)` | Record a milestone |
+| `op.sample(name, data, { limit })` | Retain a bounded series |
+| `op.setTurn(turnId)` | Reattach to a turn discovered late |
+| `op.setRequest(request, bounded)` | Attach the request after the fact |
+| `op.end({ status, response, error, endedAtMs, payloadBounded })` | Close and write |
+
+<Callout type="warn">
+  **Nothing is written until `end()`.** An operation that is never ended is
+  deliberately absent from the package rather than persisted as a span with no
+  outcome, which would skew every duration percentile. `session.end()` closes
+  anything still open; a hard crash does not.
+</Callout>
+
+Calls on an already-ended operation are no-ops, so a late callback cannot throw
+inside your agent.
+
+## Milestones
+
+```js
+op.event('speech_started');
+op.event('first_partial', { textLength: 12 });
+op.event('first_byte', { occurredAtMs: session.now() });
+```
+
+Repeated names accumulate — first `occurred_at_ms`, latest `last_at_ms`, a
+`count`, and the merged payload — which is what makes it safe to call from a
+websocket frame handler running hundreds of times per call.
+
+See [Milestones and samples](/docs/concepts/milestones-and-samples) for the names
+the dashboard recognises.
+
+## Samples
+
+```js
+op.sample('partial_transcript', { text: partial }, { limit: 100 });
+```
+
+Bounded at `limit` per name (default 100). At the cap, further samples are
+dropped and the bucket is marked `truncated: true`.
+
+Payloads pass through the `payloadMaxBytes` bound (16 KiB by default). Oversized
+values become `{ _truncated: true, _original_bytes, _preview }`; values that
+cannot be serialised become `{ _capture_error }`. The event is still written
+either way — capture never fails an operation.
+
+## Audio
+
+```js
+const FORMAT = { encoding: 'pcm_s16le', sampleRateHz: 16000, channels: 1 };
+
+session.recordInboundAudio(callerPcm, FORMAT);   // right channel
+session.recordOutboundAudio(agentPcm, FORMAT);   // left channel
+```
+
+The chunk must be a `Buffer` or `Uint8Array`, the encoding must be `pcm_s16le`,
+and `sampleRateHz` and `channels` must be positive integers. The format cannot
+change within a session.
+
+### Attributing agent audio to a reply
+
+The Node SDK accepts three extra format fields:
+
+<TypeTable
+  type={{
+    timestampMs: {
+      description: 'Override the arrival time of this chunk.',
+      type: 'number',
+      default: 'session.now()',
+    },
+    playoutAtMs: {
+      description: 'When this chunk will actually be played, if you know it.',
+      type: 'number',
+      default: 'derived from the playout clock',
+    },
+    turnId: {
+      description: 'Attribute this audio to a turn.',
+      type: 'string',
+      default: 'undefined',
+    },
+    operationId: {
+      description: 'Attribute this audio to the exact TTS operation that produced it.',
+      type: 'string',
+      default: 'undefined',
+    },
+  }}
+/>
+
+```js
+const tts = turn.startOperation({ type: 'tts', provider: 'elevenlabs' });
+for await (const chunk of ttsStream) {
+  session.recordOutboundAudio(chunk, { ...FORMAT, turnId: turn.id, operationId: tts.id });
+}
+tts.end({ status: 'ok' });
+```
+
+<Callout type="info">
+  **The agent track uses a playout clock:** its clock advances by the PCM
+  duration of each chunk, not by arrival time, so bursty TTS keeps the real
+  pauses between replies. See
+  [the playout clock](/docs/reference/session-package#the-playout-clock).
+</Callout>
+
+## Websockets
+
+```js
+import WebSocket from 'ws';
+
+const socket = new WebSocket('wss://api.deepgram.com/v1/listen');
+const handle = vaani.observeWebSocket(socket, {
+  session,
+  url: socket.url,
+  endpointId: 'stt',   // optional; classified from the URL if omitted
+});
+// ...
+handle.detach();
+```
+
+Creates a span with `scope: 'connection'` recording `connected`, `sent_frame`,
+`received_frame` (accumulating byte counts and totals) and the close code.
+
+<Callout type="warn">
+  Frame contents and authentication headers are never recorded. A session-long
+  socket is a connection span, never scored as a turn — per-turn STT timing must
+  come from explicit operations and milestones.
+</Callout>
+
+For transports the SDK cannot observe:
+
+```js
+session.recordWebSocketEvent({ event: 'closed', url, code: 1000 });
+```
+
+## Ambient context
+
+Backed by `AsyncLocalStorage`:
+
+```js
+await session.run(() => callTheModel());
+await session.withTurn(turn.id, () => callTheModel());
+await session.withEndpoint('llm', () => providerSdk.complete(prompt), { turnId: turn.id });
+
+const context = vaani.currentContext();  // { session, endpointId, turnId } or null
+```
+
+`withEndpoint` throws on an unknown endpoint id — a typo is an error, not a call
+that quietly goes unattributed.
+
+For event emitters:
+
+```js
+socket.on('message', session.bind(handleMessage));
+```
+
+<Callout type="info">
+  `AsyncLocalStorage` context does not cross a process or worker boundary. If your
+  agent hands work to a worker thread or a queue, pass the session and turn ids
+  explicitly and open operations manually on the other side.
+</Callout>
+
+## Deferring capture past the response
+
+```js
+const response = await downstream();
+session.deferCapture(recordBody(response));
+return response;
+```
+
+`session.end()` waits for deferred work, so a body read that outlives the
+response still lands in the package.
+
+## Ending and uploading
+
+```js
+const finalized = await session.end({ outcome: 'completed' });
+finalized.sessionId;
+finalized.directory;
+
+await vaani.uploadPackage(finalized);
+```
+
+`end()` is idempotent. At shutdown, `await vaani.flush()` finalizes everything
+still open.
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/reference/session-package"
+    title="Session package"
+    description="What these calls produce on disk."
+  />
+  <Card
+    href="/docs/dashboard/call-detail"
+    title="Reading a call"
+    description="What the recording looks like once it lands."
+  />
+</Cards>

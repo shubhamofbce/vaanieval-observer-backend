@@ -1,0 +1,261 @@
+---
+title: Self-hosting
+description: Running the VaaniEval dashboard yourself — setup, configuration, storage layout, and an honest account of its operational limits.
+---
+
+The dashboard is a FastAPI service that ingests session packages, serves the call
+console, and runs the STT evaluation engine.
+
+<Callout type="warn">
+  **Read the [limits](#operational-limits) before you point production traffic at
+  it.** There is no authentication, no tenant isolation and no retention policy.
+  It is a development and debugging tool, not a multi-tenant service.
+</Callout>
+
+## Requirements
+
+- **Python 3.11 or newer**
+- Disk for audio (a 5-minute stereo call at 16 kHz is roughly 9 MB of raw PCM)
+
+Runtime dependencies are just `fastapi`, `uvicorn[standard]` and `websockets`.
+
+## Setup
+
+<Steps>
+
+<Step>
+
+### Clone
+
+```bash
+git clone https://github.com/shubhamofbce/vaanieval-observer-backend.git dashboard
+cd dashboard
+```
+
+</Step>
+
+<Step>
+
+### Install
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install -r requirements-dev.txt   # for tests
+```
+
+</Step>
+
+<Step>
+
+### Run
+
+```bash
+uvicorn app.main:app --reload --port 8000
+```
+
+- Console: `http://localhost:8000/`
+- STT evaluation workspace: `http://localhost:8000/stt-evaluation?session=<id>`
+- Health: `http://localhost:8000/health`
+
+</Step>
+
+<Step>
+
+### Point an SDK at it
+
+```python
+VaaniObserver(endpoint="http://localhost:8000", api_key="local-dev")
+```
+
+Any non-empty API key works — the local service intentionally does not validate
+it.
+
+</Step>
+
+</Steps>
+
+## Configuration
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `VAANI_DATA_DIR` | `./data` | Runtime data directory |
+| `ELEVENLABS_API_KEY` | — | Challenger transcription; **required** to run an STT evaluation |
+| `OPENAI_API_KEY` | — | Semantic risk judge |
+| `STT_EVAL_JUDGE_MODEL` | `gpt-4o-mini` | Judge model |
+| `VAANI_ENV_FILE` | `./.env` | `os.pathsep`-separated dotenv paths to read keys from when they are not exported |
+
+<Callout type="warn">
+  Never commit provider keys. `.env` and `data/` are both gitignored. Note that
+  `ELEVENLABS_API_KEY` and `OPENAI_API_KEY` are billed per use — a batch of
+  challenger evaluations against long calls can cost real money, and there is no
+  spend cap in the service.
+</Callout>
+
+## Storage layout
+
+Everything lives under `VAANI_DATA_DIR`:
+
+<Files>
+  <Folder name="data" defaultOpen>
+    <File name="vaani.db" />
+    <Folder name="objects" defaultOpen>
+      <Folder name="9f2c…-session-id" defaultOpen>
+        <File name="events.jsonl" />
+        <File name="call.audio" />
+      </Folder>
+    </Folder>
+  </Folder>
+</Files>
+
+SQLite holds three tables:
+
+| Table | Contents |
+| --- | --- |
+| `sessions` | `id`, `manifest_json`, `status`, `created_at`, `updated_at`, `completed_at` |
+| `operations` | `id`, `session_id`, `operation_json`, `started_at_ms`, `turn_id`, `scope`, `failed` |
+| `challenger_evaluation_jobs` | `session_id`, `model_key`, `job_id`, `status`, `error`, timestamps |
+
+Audio is stored **once**, as the SDK's raw PCM. The console requests an on-demand
+WAV wrapper for browser playback rather than storing a second copy. The wrapper
+streams and honours HTTP `Range`, which Safari requires before it will play any
+media response.
+
+`PRAGMA user_version` guards a one-time backfill of the `failed` column on
+upgrade.
+
+## Ingestion
+
+Three steps, described in full in the [HTTP API reference](/docs/reference/http-api):
+
+<Steps>
+
+<Step>
+
+### `POST /v1/sessions`
+
+The manifest, with an `idempotency-key` header equal to the session id. A
+mismatch is a `400`. Returns upload URLs.
+
+</Step>
+
+<Step>
+
+### `PUT /v1/uploads/{session_id}/{object_name}`
+
+Only four names are accepted: `events.jsonl`, `call.audio`, `caller.audio`,
+`agent.audio`. Bodies stream to a `.part` file and are renamed on success. The
+cap is **128 MiB**; beyond that the server returns `413`.
+
+</Step>
+
+<Step>
+
+### `POST /v1/sessions/{session_id}/complete`
+
+Byte size and SHA-256 for each object. Both are verified; a mismatch is a `400`.
+The session becomes `ready` if operations were imported, or `partial` if not.
+
+</Step>
+
+</Steps>
+
+<Callout type="info">
+  `partial` is what surfaces as **unverifiable** in the dashboard. It means the
+  objects arrived but no operations could be read — usually a crash before
+  `session.end()`, or capture that was disabled mid-call.
+</Callout>
+
+## Restart behaviour
+
+Challenger evaluation jobs that were `queued` or `in_progress` when the process
+stopped are marked `failed` on startup. They are not resumed — a half-finished
+run is not silently presented as complete. Re-queue them from the UI.
+
+## Tests
+
+```bash
+pytest
+```
+
+Tests run against a temporary data directory and SQLite file per test, so they
+never touch `data/`.
+
+`scripts/validate-latency.py` is a deliberate **second implementation**: it
+re-derives every published latency value straight from `events.jsonl` using its
+own arithmetic and asserts the payload agrees. It is wired into the suite, so a
+change that reintroduces a fabricated measurement fails the build. It needs
+recorded calls in `data/`, so it skips on a clean checkout.
+
+## Operational limits
+
+These are real constraints, not future work items. Decide against them before you
+depend on the dashboard.
+
+### Security
+
+<Callout type="warn">
+  - **No authentication.** Every endpoint is open. The API key is accepted and
+    ignored.
+  - **No tenant isolation.** Every session is visible to everyone who can reach
+    the service.
+  - **No authorization on audio.** `GET /v1/sessions/{id}/audio/{track}` streams a
+    recorded call to any caller who knows the session id.
+
+  Bind it to localhost or put it behind an authenticating reverse proxy on a
+  private network. Do not expose it to the internet.
+</Callout>
+
+### Scale
+
+| Component | Limit | What happens past it |
+| --- | --- | --- |
+| SQLite metadata | Single file, single writer | Concurrent ingestion serialises; write contention grows with volume |
+| Audio storage | Local filesystem | No replication; the host's disk is the ceiling |
+| Upload size | 128 MiB per object | `413`; a very long call cannot be uploaded |
+| Challenger evaluation | 2-worker thread pool, in-process | Replays compete with request serving; a queue of long calls makes the console sluggish |
+| Cohort comparison | 25-session sample (`COHORT_SAMPLE_LIMIT`) | Comparisons are computed against a sample, not the full history |
+
+There is no horizontal scaling story: two instances pointed at the same data
+directory would corrupt SQLite.
+
+### Data lifecycle
+
+<Callout type="warn">
+  - **No retention policy.** Sessions and audio accumulate until you delete them.
+  - **No deletion API.** A right-to-erasure request must be serviced by removing
+    the session directory and the SQLite rows by hand.
+  - **No backup.** `vaani.db` and `objects/` are ordinary files; back them up
+    yourself.
+  - **SDK spool directories are not cleaned up** after upload either, so audio
+    accumulates on your agent hosts as well.
+</Callout>
+
+### Operations
+
+- Single process, no queue: an ingestion spike is absorbed by the web workers.
+- No metrics endpoint and no structured audit log.
+- Schema migrations are a single `user_version` guard, not a migration framework.
+
+## When to use it anyway
+
+For its intended job — a team debugging their own voice agent, on a private
+network, with a bounded number of calls — none of the above matters much, and the
+setup cost is one `pip install`. Reach for the hosted product when you need
+authentication, retention, fleet rollups or alerting.
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/dashboard/call-detail"
+    title="Reading a call"
+    description="The waveform, transcript and trace, and how to read them."
+  />
+  <Card
+    href="/docs/reference/http-api"
+    title="HTTP API"
+    description="Every endpoint, status code and validation rule."
+  />
+</Cards>

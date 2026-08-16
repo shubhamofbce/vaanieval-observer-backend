@@ -1,0 +1,190 @@
+---
+title: Tour the live demo
+description: Thirty real, anonymised calls you can open right now — the fastest way to understand what VaaniEval measures before you install anything.
+---
+
+[**demo.vaanieval.com**](https://demo.vaanieval.com) is a frozen, read-only
+snapshot of 30 real voice-agent calls from August 2026. The audio, transcripts,
+timings and traces are genuine captures, anonymised. Nothing you click changes
+anything.
+
+It is the fastest way to decide whether VaaniEval measures what you care about.
+
+<Callout type="info">
+  The demo is a hosted build with a fleet dashboard and alerts on top of the
+  open-source call console. A self-hosted dashboard from
+  [`vaanieval-observer-backend`](https://github.com/shubhamofbce/vaanieval-observer-backend)
+  gives you the call console and the STT evaluation workspace; fleet rollups and
+  alert rules are part of the hosted product.
+</Callout>
+
+## Start with one call
+
+The call view is the heart of the product: everything else is a way of finding
+which call to open.
+
+![One recorded call: a calls rail on the left, a header strip with turns, length, typical wait, worst wait, failures and providers, a waveform with turn markers and silence annotations, a transcript panel that follows playback, and a trace listing four turns.](/screenshots/call-detail.png)
+
+Four things to look at, in order:
+
+<Steps>
+
+<Step>
+
+### The header strip
+
+`TURNS`, `LENGTH`, `TYPICAL WAIT`, `WORST WAIT`, `SLOWEST`, `FAILURES`, `TOOLS`,
+`PROVIDERS`. "Typical wait" and "worst wait" are the caller's experience — the
+gap between the caller finishing and the agent starting to speak — not a
+service's response time.
+
+</Step>
+
+<Step>
+
+### The waveform
+
+Agent audio and caller audio on one timeline, with turn markers and the long
+silences annotated (`7.74s · the model`, `24.2s · the model`). The annotation
+names the stage that owned the silence, so you can see at a glance whether the
+caller was waiting on transcription, the model, or speech synthesis.
+
+</Step>
+
+<Step>
+
+### The transcript
+
+Follows playback and is tagged by turn. Turn #1 in the demo call is annotated
+*"played 2.63s of speech with no model call — a scripted opening line, so its
+words are not in the capture."* That is the product refusing to invent a number
+it does not have, which is a pattern you will see everywhere.
+
+</Step>
+
+<Step>
+
+### The trace
+
+Each turn summarised as **listening · thinking · speaking**, with a status. Two
+of the four turns in this call are `error`.
+
+</Step>
+
+</Steps>
+
+## Expand a turn
+
+This is where the real answer usually is.
+
+![The trace expanded to milestone level. A TTS span shows 'text handed to the voice', 'first audio byte', 'audio streaming' and 'reported to the turn'. An STT span shows 'caller starts speaking', 'first partial transcript', 'caller stops speaking', 'provider marks speech final', 'final transcript' and 'end of utterance'. An LLM framework span sits above two HTTP attempts, one of which failed and was retried.](/screenshots/trace-expanded.png)
+
+Two details in that screenshot are worth the whole tour:
+
+- **Milestones, not just durations.** An STT span records *caller starts
+  speaking → first partial transcript → caller stops speaking → provider marks
+  speech final → final transcript → end of utterance*. That is enough to separate
+  "the recognizer was slow to produce text" from "the recognizer was slow to
+  decide the caller had finished" — two different problems with two different
+  fixes.
+
+- **The framework span versus the HTTP attempts.** Turn 3's LLM operation
+  reports 19.9 s and carries the note *"2 HTTP attempts served this one model
+  call, 1 of which failed and was retried. The framework span above times the
+  whole sequence, which is why its duration covers every attempt."* A
+  request-level APM would have shown you two requests of 10.7 s and 8.9 s and no
+  reason the caller waited 24 seconds.
+
+There is also a `cancelled` LLM attempt annotated: *"stopped before it finished
+and no caller speech overlaps it, so this is not barge-in."* An operation that
+stopped because something cancelled it is not automatically a fault — a TTS span
+aborted by barge-in is the agent behaving correctly — so the product
+distinguishes the two rather than counting both as failures.
+
+## Find the call worth opening
+
+The **Dashboard** tab rolls the same measurements across a time range, agent,
+provider, model, SDK, environment and version.
+
+![The fleet dashboard: KPI cards for calls, typical reply wait, worst-case reply wait, turns over 3 seconds and calls hitting an error, above a 'calls needing attention' table ranked by severity with the reason each call was flagged.](/screenshots/fleet-dashboard.png)
+
+Note what the KPI cards do when the sample is thin: *"still a small sample"*,
+*"not enough history to compare"*, *"68% of 111 turns measurable"*. The
+denominator is always published, because a p95 over 75 measured turns is a very
+different claim from a p95 over 75,000.
+
+**Calls needing attention** ranks in three classes — **failed** (the caller heard
+an error), **unverifiable** (capture is incomplete, so we cannot say what they
+heard) and **slow** — then by magnitude within each class. Opening a row lands on
+the turn that caused the flag, not the top of the call.
+
+## Get told without looking
+
+The **Alerts** tab evaluates rules against the same calls the dashboard reports
+on.
+
+![The alerts page: six rules, four firing, each showing scope (how many agents), the current reading against its threshold, and where it notifies.](/screenshots/alerts.png)
+
+Each rule shows its scope (*3 of 4 agents*, *1 no reading*), the reading against
+its threshold, and the destination. The *no reading* count matters: a rule that
+cannot evaluate on an agent says so rather than quietly reporting healthy.
+
+<Callout type="warn">
+  In the demo, nothing is ever delivered — rules you add stay in your browser.
+</Callout>
+
+## Review the transcription
+
+The **STT review** tab on a call shows streaming timing and transcripts captured
+from production.
+
+![The STT review tab showing coverage 3 of 4 recorded turns, 3 of 3 transcripts available, first partial p50 of 2.90s, finalization p50 of 3.30s, and endpointing shown as an em dash marked unavailable, above a per-turn table.](/screenshots/stt-review.png)
+
+Two conventions to internalise:
+
+1. **`—` means unavailable, and it always carries a reason.** In the screenshot
+   `ENDPOINTING` is `—  unavailable`. It is never rendered as `0`, and never
+   inferred from an operation's start and end times or from a batch HTTP round
+   trip.
+2. **Accuracy only appears after a challenger comparison.** The banner says so
+   explicitly: *"Streaming timing and transcripts. Accuracy appears after a
+   challenger comparison."* Until you replay the call against a challenger model,
+   there is nothing to compare the production transcript to.
+
+Running a comparison produces an estimated WER, per-word substitutions, deletions
+and insertions, and a judge pass that flags only the disagreements that could
+have changed the conversation. See
+[STT evaluation](/docs/dashboard/stt-evaluation) and
+[Metrics](/docs/reference/metrics).
+
+<Callout type="warn">
+  The challenger is a **pseudo-reference, not ground truth**. The score is
+  labelled *estimated WER* / *model disagreement*, never accuracy, until a
+  human-reviewed reference transcript exists.
+</Callout>
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/quickstart/python"
+    title="Record your own call (Python)"
+    description="Ten minutes to the same view, running against your traffic."
+  />
+  <Card
+    href="/docs/quickstart/nodejs"
+    title="Record your own call (Node.js)"
+    description="Same, with automatic fetch instrumentation."
+  />
+  <Card
+    href="/docs/reference/metrics"
+    title="Metrics glossary"
+    description="Exactly what each number means and when it is reported as unavailable."
+  />
+  <Card
+    href="https://calendar.app.google/5cNH8hB13LoC39Qk7"
+    external
+    title="Book a 20-minute walkthrough"
+    description="See it running against your own traffic."
+  />
+</Cards>

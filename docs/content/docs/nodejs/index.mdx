@@ -1,0 +1,238 @@
+---
+title: Overview
+description: Installing and configuring the VaaniEval Node.js SDK — options, defaults, automatic fetch instrumentation and the upload API.
+---
+
+`@vaanieal/observer` is a zero-dependency, pure-ESM package that records
+voice-agent calls to a local session package and uploads them after the call.
+
+<Callout type="warn">
+  The SDK is **not published to npm**. Install it from the private repository.
+</Callout>
+
+## Install
+
+```bash
+npm install github:shubhamofbce/vaanieval-observer-nodejs-sdk
+```
+
+Requires **Node.js 20 or newer**. The package is ESM-only and uses only Node
+built-ins — `node:async_hooks`, `node:fs/promises`, `node:crypto`,
+`node:perf_hooks`. Nothing else enters your dependency tree.
+
+```json title="package.json"
+{
+  "type": "module"
+}
+```
+
+<Callout type="info">
+  Pin a commit or tag in production
+  (`github:shubhamofbce/vaanieval-observer-nodejs-sdk#v0.1.0`). Installing from a
+  moving branch means a redeploy can change your instrumentation without a
+  version bump.
+</Callout>
+
+## Constructing the observer
+
+```js
+import { VaaniObserver } from '@vaanieal/observer';
+
+const vaani = new VaaniObserver({
+  endpoint: 'http://localhost:8000',
+  apiKey: 'local-dev',
+  spoolDirectory: './.vaani-spool',
+  capture: { audio: true, httpBodies: false },
+  instrumentations: { fetch: true, websocket: true },
+  endpoints: [
+    { id: 'stt', type: 'stt', url: 'wss://api.deepgram.com/v1/listen' },
+    { id: 'llm', type: 'llm', url: 'https://api.openai.com/v1' },
+    { id: 'tts', type: 'tts', url: 'https://api.elevenlabs.io' },
+  ],
+  upload: { retries: 3 },
+  strict: false,
+});
+```
+
+<TypeTable
+  type={{
+    endpoint: {
+      description: 'Dashboard base URL. Only used by uploadPackage(); capture works without it.',
+      type: 'string',
+      default: 'undefined',
+    },
+    apiKey: {
+      description: 'Sent as a bearer token on the upload handshake. The local dashboard does not validate it.',
+      type: 'string',
+      default: 'undefined',
+    },
+    spoolDirectory: {
+      description: 'Where session packages are written during the call.',
+      type: 'string',
+      default: './.vaani-spool',
+    },
+    capture: {
+      description: 'What to record. See Capture and privacy.',
+      type: 'object',
+      default: 'audio=true, httpBodies=false, websocketTextFrames=false, sttContent=false, payloadMaxBytes=16384',
+    },
+    instrumentations: {
+      description: 'Which globals to patch on construction.',
+      type: 'object',
+      default: 'fetch=true, websocket=true',
+    },
+    endpoints: {
+      description: 'Rules mapping provider URLs to endpoint ids and types.',
+      type: 'Array<object>',
+      default: '[]',
+    },
+    upload: {
+      description: 'Upload behaviour.',
+      type: 'object',
+      default: 'retries=3',
+    },
+    strict: {
+      description: 'Throw on instrumentation errors instead of degrading silently.',
+      type: 'boolean',
+      default: 'false',
+    },
+  }}
+/>
+
+Constructing the observer **patches global `fetch` immediately**. It performs no
+network I/O. Construct it once at process start.
+
+<Callout type="warn">
+  Because `fetch` is a global, constructing more than one observer in a process
+  stacks patches. Create exactly one and share it.
+</Callout>
+
+## Lifecycle
+
+<Steps>
+
+<Step>
+
+### Start a session per call
+
+```js
+const session = vaani.startSession({ agentId: 'support-bot', metadata: { env: 'prod' } });
+```
+
+</Step>
+
+<Step>
+
+### Record turns, operations and audio
+
+See [Recording a call](/docs/nodejs/recording).
+
+</Step>
+
+<Step>
+
+### End the session
+
+```js
+const finalized = await session.end({ outcome: 'completed' });
+console.log(finalized.directory, finalized.sessionId);
+```
+
+Closes open spans, composes stereo audio, writes `manifest.json` last.
+
+</Step>
+
+<Step>
+
+### Upload
+
+```js
+await vaani.uploadPackage(finalized);
+```
+
+Requires `endpoint` and `apiKey` — it throws if either is missing. If you skip
+this, the package simply stays on disk.
+
+</Step>
+
+<Step>
+
+### Flush at shutdown
+
+```js
+process.on('SIGTERM', async () => {
+  await vaani.flush();
+  process.exit(0);
+});
+```
+
+Finalizes every open session. Finalization errors reject, matching
+`Promise.all` semantics — a package that could not be written is visible, not
+swallowed.
+
+</Step>
+
+</Steps>
+
+## Observer API
+
+| Method | Purpose |
+| --- | --- |
+| `startSession(input)` | Open a session (`sessionId`, `agentId`, `metadata`) |
+| `flush()` | Finalize all open sessions |
+| `run(session, fn)` | Install ambient context |
+| `runWithEndpoint(session, endpointId, fn, turnId)` | Force an endpoint rule |
+| `runWithTurn(session, turnId, fn)` | Tag ambient work with a turn |
+| `currentContext()` | Read the ambient context |
+| `classifyUrl(url)` | Which endpoint rule a URL matches |
+| `observeWebSocket(socket, options)` | Observe a socket; returns `{ detach }` |
+| `uploadPackage(finalized)` | Upload a written package |
+
+## Automatic `fetch` instrumentation
+
+A patched `fetch` is recorded only when there is an ambient session **and** the
+URL matches one of your endpoint rules:
+
+```js
+await session.run(async () => {
+  await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST', body });
+});
+```
+
+Everything else passes through untouched — your database, your feature flag
+service, your own APIs.
+
+<Callout type="warn">
+  Streaming response bodies are **never drained** to capture them. Reading a
+  stream to inspect it would hold back the first token, which is exactly the
+  latency this SDK exists to measure. `httpBodies: true` captures non-streaming
+  bodies only.
+</Callout>
+
+## Failure behaviour
+
+With `strict: false` (the default), instrumentation errors are swallowed.
+Recording problems surface as `capture_status` counters in the manifest and as
+the *unverifiable* class in the dashboard. Set `strict: true` in staging so those
+failures throw.
+
+<Callout type="warn">
+  Spool directories are **not** removed after a successful upload. Add a cleanup
+  sweep of `.vaani-spool` to your deployment, or audio will accumulate on your
+  agent hosts indefinitely.
+</Callout>
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/nodejs/recording"
+    title="Recording a call"
+    description="Turns, operations, streamed TTS attribution, websockets and context."
+  />
+  <Card
+    href="/docs/concepts/endpoints-and-instrumentation"
+    title="Endpoints and instrumentation"
+    description="How a URL becomes an attributed provider span."
+  />
+</Cards>

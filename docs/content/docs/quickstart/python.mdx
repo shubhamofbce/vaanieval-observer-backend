@@ -1,0 +1,315 @@
+---
+title: Python
+description: Record your first voice-agent call from Python and open it in the console — about ten minutes, no agent framework required.
+---
+
+By the end of this page you will have a recorded call sitting in a local
+dashboard, with audio you can play and a trace you can expand.
+
+## Before you start
+
+- **Python 3.10 or newer** for the SDK
+- **Python 3.11 or newer** for the dashboard
+- Access to the private repositories. Neither SDK is on PyPI yet, so both are
+  installed from Git.
+
+<Callout type="info">
+  Nothing here requires LiveKit, OpenAI, or any particular provider. If you *are*
+  on LiveKit Agents, do this page first anyway — then swap in the
+  [LiveKit integration](/docs/python/livekit), which wires all of it up for you.
+</Callout>
+
+## 1. Run the dashboard
+
+<Steps>
+
+<Step>
+
+### Clone and install
+
+```bash
+git clone https://github.com/shubhamofbce/vaanieval-observer-backend.git dashboard
+cd dashboard
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+</Step>
+
+<Step>
+
+### Start it
+
+```bash
+uvicorn app.main:app --reload --port 8000
+```
+
+The console is served at `http://localhost:8000/`. It will be empty — you have
+not recorded anything yet.
+
+<Callout type="warn">
+  The local dashboard has **no authentication and no tenant isolation**, and it
+  accepts any non-empty API key without validating it. That is deliberate for a
+  developer loop. Do not expose it beyond localhost or a private network. See
+  [Self-hosting](/docs/dashboard/self-hosting).
+</Callout>
+
+</Step>
+
+</Steps>
+
+## 2. Install the SDK
+
+```bash
+pip install "git+https://github.com/shubhamofbce/vaanieval-observer-python-sdk.git"
+```
+
+The SDK has **no required runtime dependencies**. Install the extra that matches
+the HTTP client your agent already uses, so provider calls are instrumented
+automatically:
+
+<Tabs items={['httpx (OpenAI SDK)', 'aiohttp (streaming plugins)', 'LiveKit Agents']}>
+
+<Tab value="httpx (OpenAI SDK)">
+
+```bash
+pip install "vaanieval-observer[httpx] @ git+https://github.com/shubhamofbce/vaanieval-observer-python-sdk.git"
+```
+
+</Tab>
+
+<Tab value="aiohttp (streaming plugins)">
+
+```bash
+pip install "vaanieval-observer[aiohttp] @ git+https://github.com/shubhamofbce/vaanieval-observer-python-sdk.git"
+```
+
+</Tab>
+
+<Tab value="LiveKit Agents">
+
+```bash
+pip install "vaanieval-observer[livekit] @ git+https://github.com/shubhamofbce/vaanieval-observer-python-sdk.git"
+```
+
+</Tab>
+
+</Tabs>
+
+## 3. Record a call
+
+This script records one synthetic call: two turns, a transcription span, a model
+span, and audio on both channels. Run it against the dashboard you just started.
+
+```python title="record_a_call.py"
+import asyncio
+import math
+import struct
+
+from vaani_observer import VaaniObserver
+
+SAMPLE_RATE = 16000
+FORMAT = {"encoding": "pcm_s16le", "sample_rate_hz": SAMPLE_RATE, "channels": 1}
+
+
+def tone(hz: int, ms: int) -> bytes:
+    """A second of audible PCM, so the recording has something to play."""
+    frames = int(SAMPLE_RATE * ms / 1000)
+    return b"".join(
+        struct.pack("<h", int(9000 * math.sin(2 * math.pi * hz * n / SAMPLE_RATE)))
+        for n in range(frames)
+    )
+
+
+async def main() -> None:
+    vaani = VaaniObserver(
+        endpoint="http://localhost:8000",
+        api_key="local-dev",              # the local dashboard does not validate this
+        spool_directory="./.vaani-spool",
+        endpoints=[
+            {"id": "llm", "type": "llm", "url": "https://api.openai.com/v1"},
+        ],
+    )
+
+    session = vaani.start_session(agent_id="quickstart-agent")
+
+    for index in range(2):
+        turn = session.start_turn()
+
+        # The caller speaks.
+        stt = session.start_operation(type="stt", turn_id=turn.id, provider="demo")
+        stt.event("speech_started")
+        session.record_inbound_audio(tone(220, 900), FORMAT)
+        await asyncio.sleep(0.9)
+        stt.event("final_transcript")
+        stt.end(status="ok", response={"transcript": f"caller line {index + 1}"})
+
+        # The model thinks.
+        llm = session.start_operation(
+            type="llm", turn_id=turn.id, provider="demo", model="demo-model"
+        )
+        await asyncio.sleep(0.4)
+        llm.event("first_token")
+        llm.end(status="ok", response={"tokens": 128})
+
+        # The agent speaks.
+        tts = session.start_operation(type="tts", turn_id=turn.id, provider="demo")
+        tts.event("first_byte")
+        session.record_outbound_audio(tone(440, 1200), FORMAT)
+        tts.end(status="ok")
+
+        turn.end()
+
+    finalized = await session.end(outcome="completed")
+    print("package written to", finalized.directory)
+
+    await vaani.upload_package(finalized)
+    print("uploaded session", finalized.session_id)
+
+
+asyncio.run(main())
+```
+
+```bash
+python record_a_call.py
+```
+
+You should see something like:
+
+```text
+package written to ./.vaani-spool/6f1c...-...
+uploaded session 6f1c...-...
+```
+
+## 4. Open the call
+
+Refresh `http://localhost:8000/`. Your call is in the rail on the left. Click it
+and you get the waveform, the turn markers, and a trace you can expand down to
+individual milestones.
+
+![The trace view expanded to milestone level, showing a TTS span with 'text handed to the voice', 'first audio byte' and 'audio streaming' milestones, and an LLM span whose framework operation covers two HTTP attempts.](/screenshots/trace-expanded.png)
+
+<Callout type="info">
+  Look at the spool directory too — `.vaani-spool/&lt;session-id&gt;/` contains
+  `manifest.json`, `events.jsonl` and `call.audio`. Everything the dashboard
+  shows is derived from those three files. See
+  [Session package](/docs/reference/session-package).
+</Callout>
+
+## What just happened
+
+<Steps>
+
+<Step>
+
+### `VaaniObserver` was configured, not connected
+
+Constructing the observer installs HTTP and websocket instrumentation in-process
+and validates your endpoint rules. It does not open a connection to the
+dashboard. `endpoint` and `api_key` are only used by `upload_package()`.
+
+</Step>
+
+<Step>
+
+### The session spooled to disk as the call ran
+
+Every event and audio chunk was appended to `./.vaani-spool/<session-id>/` by a
+dedicated writer thread, so no filesystem syscall ran on the event loop. Audio
+arrives every 20 ms in a real agent, and a blocking write there is audible.
+
+</Step>
+
+<Step>
+
+### `end()` finalized the package
+
+It closed open spans, flushed the writer, composed the two mono tracks into one
+timeline-aligned stereo `call.audio` (**agent left, caller right**), and wrote
+`manifest.json` last — via a temp file and rename, so a reader never sees a
+half-written manifest.
+
+</Step>
+
+<Step>
+
+### `upload_package()` shipped it, after the call
+
+Three steps: `POST /v1/sessions` with the manifest, `PUT` each object to the URL
+the dashboard returned, then `POST .../complete` with byte sizes and SHA-256
+digests. Upload is always explicit and always post-call — the library never
+uploads on the live media path.
+
+</Step>
+
+</Steps>
+
+## Wire it into a real agent
+
+The synthetic script called `start_operation()` by hand. In a real agent you will
+usually want two things instead:
+
+- **Automatic HTTP capture.** Any `httpx` or `aiohttp` request made inside
+  `with session.context():` whose URL matches one of your configured `endpoints`
+  is timed and recorded for you, with no code change at the call site.
+- **Turn grouping.** Wrap the work for one caller utterance in
+  `with session.with_turn(turn.id):` so auto-instrumented calls land on the right
+  turn.
+
+```python
+session = vaani.start_session(agent_id="support")
+turn = session.start_turn()
+
+with session.with_turn(turn.id):
+    # Instrumented automatically because api.openai.com matches an endpoint rule.
+    response = await client.chat.completions.create(...)
+```
+
+Read [Recording a call](/docs/python/recording) next, or go straight to
+[LiveKit Agents](/docs/python/livekit) if that is your framework.
+
+## Troubleshooting
+
+<Accordions>
+
+<Accordion title="upload_package() raises 'endpoint and api_key are required'">
+
+`upload_package()` needs both `endpoint` and `api_key` on the observer. If you
+only want local spooling, do not call it — `session.end()` alone writes a
+complete, valid package to disk.
+
+</Accordion>
+
+<Accordion title="The call appears but the trace is empty">
+
+`POST /complete` marks a session `ready` only when it imported at least one
+operation from `events.jsonl`; otherwise the status is `partial`. A partial
+session is still browsable. The usual cause is a session that ended before any
+`start_operation()` call, or operations that were never `end()`ed — an operation
+is written to `events.jsonl` **when it ends**, not when it starts.
+
+</Accordion>
+
+<Accordion title="There is no audio">
+
+Audio capture requires `pcm_s16le` input with an integer `sample_rate_hz` and
+`channels`; anything else raises a `ValueError` rather than recording silently
+(a non-bytes chunk raises `TypeError`). The format also cannot change within a
+session. Check that `capture.audio` was not set to `False` — `record_*_audio()`
+returns `False` instead of raising when capture is disabled or the session has
+already ended.
+
+</Accordion>
+
+<Accordion title="Provider calls are not showing up automatically">
+
+Auto-instrumentation is inert unless there is an ambient session **and** the URL
+matches a configured endpoint rule. Confirm the call is inside
+`with session.context():` and that your `endpoints` list has a rule whose `url`
+is a prefix of the request URL. See
+[Endpoints and instrumentation](/docs/concepts/endpoints-and-instrumentation).
+
+</Accordion>
+
+</Accordions>

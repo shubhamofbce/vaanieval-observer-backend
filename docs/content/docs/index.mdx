@@ -1,0 +1,136 @@
+---
+title: Introduction
+description: VaaniEval records every voice-agent call as a portable session package — audio, transcripts, provider spans and turn timings — so you can answer "why was that call bad?" with evidence instead of guesses.
+icon: House
+---
+
+VaaniEval is observability and evaluation for **voice agents**: the systems that
+listen to a caller, think with a model, call a tool or two, and speak back.
+
+A voice call is not a web request. It is a chain of turns, each one a race
+against the caller's patience, and each one stitched together from three or four
+providers that all report time differently. When someone says *"the bot was slow
+and it got my destination wrong"*, a normal APM can tell you an HTTP request took
+7.4 seconds. It cannot tell you which turn the caller was waiting through, that
+the model was silently retried inside that turn, or that the transcription heard
+"Dubai" when the caller said "Manali".
+
+VaaniEval is built to answer exactly those questions.
+
+![The VaaniEval console showing one recorded call: the calls rail on the left, a waveform with turn markers, a transcript that follows playback, and a trace listing every turn with its listening, thinking and speaking time.](/screenshots/call-detail.png)
+
+## What you get
+
+<Cards>
+  <Card
+    title="A complete recording of every call"
+    description="Timeline-aligned stereo audio with the agent on the left and the caller on the right, the transcript, every provider span, and the turn structure — written to disk during the call and uploaded afterwards."
+  />
+  <Card
+    title="Turn-level latency you can defend"
+    description="Listening, thinking and speaking time per turn, attributed to the STT, LLM, tool or TTS span that actually caused the wait — including retried HTTP attempts hidden inside a single framework call."
+  />
+  <Card
+    title="Transcription review"
+    description="Replay a recorded call against a stronger challenger model, see every word production disagreed on, and let a judge flag only the disagreements that could have changed the conversation."
+  />
+  <Card
+    title="A fleet view and alerts"
+    description="Roll the same measurements up across agents, providers, models and environments, and get told when a threshold you care about is breached."
+  />
+</Cards>
+
+## How it fits together
+
+VaaniEval has two halves, and they are deliberately separate.
+
+**A capture SDK** runs inside your agent process. It writes a *session package* —
+`manifest.json`, `events.jsonl`, `call.audio` — to a local spool directory as the
+call happens. It never blocks the media path on a network call. There are two
+SDKs, [Python](/docs/python) and [Node.js](/docs/nodejs), and they emit a
+byte-compatible format.
+
+**A dashboard** ingests those packages, stores them, and answers questions about
+them. It is a FastAPI service you run yourself.
+
+<Mermaid
+  chart={`
+flowchart LR
+  A["Your voice agent<br/>(Python or Node.js)"] -->|writes during the call| B["Local spool<br/>manifest.json - events.jsonl - call.audio"]
+  B -->|explicit upload, after the call| C["VaaniEval dashboard"]
+  C --> D["Call console<br/>trace, audio, transcript"]
+  C --> E["Fleet dashboard<br/>and alerts"]
+  C --> F["STT evaluation<br/>challenger comparison"]
+`}
+/>
+
+The split matters. Because capture is local-first, a network problem between
+your agent and the dashboard costs you an upload, not a call. Because the package
+is a plain directory of files, you can inspect it with `cat` and `jq` before you
+trust anything the dashboard tells you.
+
+<Callout type="info">
+  Every number the dashboard shows is derived from the events in the package.
+  There is no separate metrics pipeline to drift out of sync — if you disagree
+  with a value, you can recompute it from `events.jsonl` yourself.
+</Callout>
+
+## Where to start
+
+<Cards>
+  <Card
+    href="/docs/quickstart/python"
+    title="Python quickstart"
+    description="Record your first call from a Python agent, including LiveKit Agents, and open it in the console."
+  />
+  <Card
+    href="/docs/quickstart/nodejs"
+    title="Node.js quickstart"
+    description="Record your first call from a Node.js agent with automatic fetch instrumentation."
+  />
+  <Card
+    href="/docs/quickstart/demo"
+    title="Tour the live demo"
+    description="Thirty real, anonymised calls. No install required — read the product before you wire anything up."
+  />
+  <Card
+    href="/docs/concepts/architecture"
+    title="Core concepts"
+    description="Sessions, turns, operations, milestones and the call clock — the five ideas everything else is built from."
+  />
+</Cards>
+
+## What VaaniEval is not
+
+Being clear about this saves you an evaluation cycle.
+
+- **It is not a real-time monitor.** Upload is explicit and happens after the
+  call ends, so a call becomes visible one call-duration later. If you need
+  sub-second alerting on a call in progress, this is the wrong tool today.
+- **It is not a ground-truth accuracy benchmark.** The STT comparison scores your
+  production transcript against a *challenger* model, not a human reference. The
+  result is labelled **estimated WER** / **model disagreement**, never accuracy.
+  See [Metrics](/docs/reference/metrics).
+- **It is not multi-tenant SaaS in this release.** The dashboard you self-host
+  has no authentication and no tenant isolation. Read
+  [Self-hosting](/docs/dashboard/self-hosting) before you put it anywhere but a
+  private network.
+- **It does not replace your agent framework's own tracing.** It complements it.
+  VaaniEval cares about the caller's experience of time and words; framework
+  tracing cares about your code.
+
+## Source
+
+The platform is three private repositories:
+
+| Repository | What it is |
+| --- | --- |
+| [`vaanieval-observer-backend`](https://github.com/shubhamofbce/vaanieval-observer-backend) | The FastAPI dashboard, console and STT evaluation engine |
+| [`vaanieval-observer-python-sdk`](https://github.com/shubhamofbce/vaanieval-observer-python-sdk) | The Python capture SDK, including the LiveKit Agents integration |
+| [`vaanieval-observer-nodejs-sdk`](https://github.com/shubhamofbce/vaanieval-observer-nodejs-sdk) | The Node.js capture SDK |
+
+<Callout type="warn">
+  Access is invite-only while the SDKs are pre-1.0. Neither SDK is published to a
+  public package registry yet — install both from Git. If a link above 404s for
+  you, ask for access before following the quickstarts.
+</Callout>

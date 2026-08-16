@@ -1,0 +1,180 @@
+---
+title: Configuration
+description: Every SDK option, environment variable and dashboard setting in one place, with defaults and the tradeoff each one carries.
+---
+
+## Python SDK
+
+```python
+VaaniObserver(
+    endpoint=None,
+    api_key=None,
+    spool_directory=None,
+    capture=None,
+    instrumentations=None,
+    endpoints=None,
+    upload=None,
+    strict=False,
+)
+```
+
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `endpoint` | `str` | `None` | Dashboard base URL; only used by upload |
+| `api_key` | `str` | `None` | Bearer token; not validated by the local dashboard |
+| `spool_directory` | `str \| Path` | `cwd/.vaani-spool` | Package output directory |
+| `capture` | `dict` | see below | What to record |
+| `instrumentations` | `dict` | `{http: True, websocket: True}` | Which clients to patch |
+| `endpoints` | `list[dict]` | `[]` | Provider URL rules |
+| `upload` | `dict` | `{retries: 3}` | Upload behaviour |
+| `strict` | `bool` | `False` | Raise instead of degrading |
+
+## Node.js SDK
+
+```js
+new VaaniObserver({
+  endpoint: undefined,
+  apiKey: undefined,
+  spoolDirectory: undefined,
+  capture: undefined,
+  instrumentations: undefined,
+  endpoints: undefined,
+  upload: undefined,
+  strict: false,
+});
+```
+
+Identical shape in camelCase. `instrumentations` uses `{ fetch, websocket }`
+rather than `{ http, websocket }`.
+
+## `capture`
+
+| Option (Python / Node) | Default | Effect |
+| --- | --- | --- |
+| `audio` / `audio` | `True` | Record caller and agent PCM |
+| `http_bodies` / `httpBodies` | `False` | Capture request and response bodies |
+| `websocket_text_frames` / `websocketTextFrames` | `False` | Capture text frame contents |
+| `stt_content` / `sttContent` | `False` | Capture transcript text |
+| `payload_max_bytes` / `payloadMaxBytes` | `16384` | Size bound on every payload |
+
+<Callout type="warn">
+  **Audio is on by default.** A recorded call is personal data in most
+  jurisdictions. `http_bodies` and `stt_content` put prompts and caller speech in
+  plain text into `events.jsonl` and the dashboard's database — usually the reason
+  a deployment needs a privacy review. See
+  [Capture and privacy](/docs/concepts/capture-and-privacy).
+</Callout>
+
+## `endpoints`
+
+```python
+{"id": "llm", "type": "llm", "url": "https://api.openai.com/v1", "match": "path"}
+```
+
+| Field | Required | Values |
+| --- | --- | --- |
+| `id` | yes | Unique; duplicates raise at construction |
+| `type` | yes | `stt` \| `llm` \| `tts` |
+| `url` | yes | `http`, `https`, `ws` or `wss` |
+| `match` | no | `path` (default) \| `origin` \| `exact` |
+
+An unknown `match` raises `TypeError`. A URL matching more than one rule at the
+same scheme precedence raises `Ambiguous Vaani endpoint rules for …`. See
+[Endpoints and instrumentation](/docs/concepts/endpoints-and-instrumentation).
+
+## `strict`
+
+| Value | Behaviour | Use it |
+| --- | --- | --- |
+| `False` *(default)* | Instrumentation errors are swallowed; degradation surfaces in `capture_status` | Production |
+| `True` | Errors raise | Staging and CI |
+
+<Callout type="warn">
+  The default trades visibility for safety: a bug in observability cannot take
+  down a call, but capture can degrade silently. Your signals that it happened are
+  `capture_status` in the manifest and the *unverifiable* class in the dashboard —
+  not an exception.
+</Callout>
+
+## LiveKit integration environment
+
+Read by `VaaniLiveKitRecorder.from_env()`.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `VAANI_ENABLED` | `false` | **Master switch — off by default** |
+| `VAANI_ENDPOINT` | `http://localhost:8000` | Dashboard base URL |
+| `VAANI_API_KEY` | `local-dev` | Bearer token |
+| `VAANI_SPOOL_DIR` | `.vaani-spool` | Package output directory |
+| `VAANI_CAPTURE_AUDIO` | `true` | Record PCM |
+| `VAANI_CAPTURE_HTTP_BODIES` | `true` | Capture bodies |
+| `VAANI_CAPTURE_STT_CONTENT` | `true` | Capture transcripts |
+| `VAANI_PAYLOAD_MAX_BYTES` | `16384` | Payload bound |
+| `VAANI_AGENT_ID` | `livekit-agent` | Default agent id |
+| `VAANI_UPLOAD` | `true` | Upload after `finish()` |
+
+<Callout type="warn">
+  These defaults are **more permissive than the core SDK's** —
+  `VAANI_CAPTURE_HTTP_BODIES` and `VAANI_CAPTURE_STT_CONTENT` default to `true`.
+  Set them to `false` for production traffic unless you have reviewed the privacy
+  implications.
+</Callout>
+
+`from_env()` never raises: on failure it returns an **inert** recorder whose
+methods are no-ops and whose `enabled` is `False`. Check `recorder.enabled` at
+startup if you want a misconfiguration to be visible.
+
+## Dashboard
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `VAANI_DATA_DIR` | `./data` | SQLite file and uploaded objects |
+| `ELEVENLABS_API_KEY` | — | Challenger transcription; required to evaluate |
+| `OPENAI_API_KEY` | — | Semantic risk judge |
+| `STT_EVAL_JUDGE_MODEL` | `gpt-4o-mini` | Judge model |
+| `VAANI_ENV_FILE` | `./.env` | `os.pathsep`-separated dotenv paths |
+
+Fixed limits, not configurable:
+
+| Constant | Value |
+| --- | --- |
+| `MAX_UPLOAD_BYTES` | 128 MiB |
+| `ALLOWED_OBJECTS` | `events.jsonl`, `call.audio`, `caller.audio`, `agent.audio` |
+| Challenger worker pool | 2 threads |
+| `COHORT_SAMPLE_LIMIT` | 25 sessions |
+| `CHALLENGER_MODELS` | `elevenlabs_scribe_v2` |
+
+## Recommended postures
+
+| Setting | Production | Staging |
+| --- | --- | --- |
+| `audio` | On, with consent + retention sweep | On |
+| `http_bodies` | Off | On |
+| `stt_content` | Off unless evaluating STT | On |
+| `websocket_text_frames` | Off | On while debugging |
+| `payload_max_bytes` | `16384` | `65536` |
+| `strict` | `False` | `True` |
+| SDK source | Pinned tag or commit | Branch is fine |
+| Spool cleanup | Required | Optional |
+
+<Callout type="warn">
+  Two things neither SDK does for you: **cleaning up spool directories after
+  upload**, and **enforcing a retention policy**. Both will fill a disk if left
+  alone. Add a sweep of `.vaani-spool` on your agent hosts and of
+  `$VAANI_DATA_DIR/objects` on the dashboard host.
+</Callout>
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/reference/troubleshooting"
+    title="Troubleshooting"
+    description="Symptoms, causes and fixes."
+  />
+  <Card
+    href="/docs/concepts/capture-and-privacy"
+    title="Capture and privacy"
+    description="What each capture flag costs you."
+  />
+</Cards>

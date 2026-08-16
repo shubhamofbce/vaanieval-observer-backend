@@ -1,0 +1,11 @@
+{
+  "title": "Reference",
+  "icon": "Library",
+  "pages": [
+    "session-package",
+    "http-api",
+    "metrics",
+    "configuration",
+    "troubleshooting"
+  ]
+}

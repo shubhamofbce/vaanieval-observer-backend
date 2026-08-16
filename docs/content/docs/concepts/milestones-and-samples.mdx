@@ -1,0 +1,242 @@
+---
+title: Milestones and samples
+description: The named moments inside an operation that every latency in VaaniEval is derived from — and why a missing one is reported as unmeasurable rather than estimated.
+---
+
+An operation's duration tells you how long a provider took. It does not tell you
+what the caller experienced. **Milestones** close that gap.
+
+## The problem with durations
+
+Consider a turn where transcription took 3.3 seconds. Two very different things
+could have happened:
+
+1. The recognizer produced text quickly but took 2.5 s to decide the caller had
+   stopped talking.
+2. The recognizer decided quickly but took 2.5 s to produce final text.
+
+Same duration. Different team, different fix. A milestone timeline separates
+them:
+
+<Mermaid
+  chart={`
+gantt
+  dateFormat X
+  axisFormat %Ss
+  title One turn, milestone by milestone
+  section Caller
+  speaking                :0, 1800
+  section STT
+  first partial transcript :milestone, 900, 0
+  speech marked final      :milestone, 2100, 0
+  final transcript         :milestone, 2400, 0
+  section LLM
+  request sent             :milestone, 2450, 0
+  first token              :milestone, 3100, 0
+  section TTS
+  text handed to the voice :milestone, 3900, 0
+  first audio byte         :milestone, 4300, 0
+  section Caller hears
+  reply starts             :milestone, 4300, 0
+`}
+/>
+
+The caller-visible reply wait is *caller stops speaking* → *first audio byte*.
+Everything else explains it.
+
+## Recording a milestone
+
+<Tabs items={['Python', 'Node.js']}>
+
+<Tab value="Python">
+
+```python
+op.event("first_token")
+op.event("first_partial", {"text_length": 12})
+op.event("first_byte", occurred_at_ms=session.now())
+```
+
+</Tab>
+
+<Tab value="Node.js">
+
+```js
+op.event('first_token');
+op.event('first_partial', { textLength: 12 });
+op.event('first_byte', { occurredAtMs: session.now() });
+```
+
+</Tab>
+
+</Tabs>
+
+If you do not pass `occurred_at_ms` / `occurredAtMs`, the SDK stamps it with the
+session clock at the moment of the call — so record milestones at the moment they
+happen, not in a batch at the end.
+
+### Repeats accumulate
+
+Calling `event()` twice with the same name does **not** overwrite. It merges:
+
+```json
+{
+  "received_frame": {
+    "occurred_at_ms": 1240,
+    "last_at_ms": 8830,
+    "count": 214,
+    "total_bytes": 918_400
+  }
+}
+```
+
+You keep the first occurrence, the most recent one, and how many there were, for
+a fixed cost. That is what makes it safe to call `event()` from a websocket frame
+handler running hundreds of times per call.
+
+## Samples
+
+`sample()` retains a bounded series of low-frequency observations. Partial
+transcripts are the motivating case: worth keeping for a latency timeline, but an
+unbounded list would turn an audio stream into an unbounded event stream.
+
+<Tabs items={['Python', 'Node.js']}>
+
+<Tab value="Python">
+
+```python
+op.sample("partial_transcript", {"text": "how do i change"}, limit=100)
+```
+
+</Tab>
+
+<Tab value="Node.js">
+
+```js
+op.sample('partial_transcript', { text: 'how do i change' }, { limit: 100 });
+```
+
+</Tab>
+
+</Tabs>
+
+At the limit (default **100** per name), further samples are dropped and the
+bucket is marked `truncated: true`. The truncation is visible in the package
+rather than silent.
+
+<Callout type="warn">
+  Sample payloads go through the same size bound as request and response bodies
+  (`payload_max_bytes`, default **16 KiB**). An oversized value is replaced with
+  `{"_truncated": true, "_original_bytes": N, "_preview": "…"}`. A value that
+  cannot be serialised becomes `{"_capture_error": "…"}` — the event is still
+  written.
+</Callout>
+
+## The vocabulary the dashboard reads
+
+These are the milestone names the demo surfaces. Emit them with these names and
+the console labels your turns automatically; emit your own and they still appear
+in the trace, just without the derived latency.
+
+### STT
+
+| Milestone | Meaning |
+| --- | --- |
+| `speech_started` | Voice activity detected on the inbound track |
+| `first_partial` | The recognizer produced its first text |
+| `speech_ended` | Voice activity ended |
+| `speech_final` | The provider's endpointer fired |
+| `final_transcript` | Final text delivered |
+| `end_of_utterance` | The recognizer closed the utterance |
+| `turn_report` | The transcript reached your agent code |
+
+### LLM
+
+| Milestone | Meaning |
+| --- | --- |
+| `request_body_captured` | The request left your process |
+| `first_token` | First streamed token received |
+
+### TTS
+
+| Milestone | Meaning |
+| --- | --- |
+| `speak` | Text submitted for synthesis |
+| `first_byte` | First synthesised audio received |
+| `audio_chunk` | Subsequent audio chunks (accumulates) |
+| `turn_report` | Playback handed to the transport |
+
+### Websocket connection spans
+
+| Milestone | Meaning |
+| --- | --- |
+| `connected` | Socket opened |
+| `sent_frame` | Outbound frame (accumulates; byte counts only) |
+| `received_frame` | Inbound frame (accumulates; byte counts only) |
+
+## Missing milestones are unmeasurable, not zero
+
+This is the single most important convention in the product.
+
+If a turn is missing any milestone in the chain the dashboard needs, that turn is
+**excluded from the percentile** and counted in the denominator as unmeasurable.
+It is never:
+
+- estimated from the operation's start and end times,
+- inferred from a batch HTTP round trip,
+- or rendered as `0`.
+
+That is why the STT review header shows `ENDPOINTING  —  unavailable` rather than
+`0.00s`, and why the fleet cards publish *"68% of 111 turns measurable"*
+alongside every percentile.
+
+<Callout type="info">
+  A low measurable percentage is itself a finding. It usually means an
+  integration is not emitting milestones — a provider wrapper you have not
+  instrumented, or a framework path that bypasses your endpoint rules.
+</Callout>
+
+## A worked example
+
+```python
+turn = session.start_turn()
+
+stt = turn.start_operation(type="stt", provider="deepgram", model="nova-3")
+stt.event("speech_started")
+# ... streaming frames arrive
+stt.sample("partial_transcript", {"text": partial})
+stt.event("first_partial")
+stt.event("speech_ended")
+stt.event("speech_final")
+stt.event("final_transcript")
+stt.end(status="ok", response={"transcript": text})
+
+llm = turn.start_operation(type="llm", provider="openai", model="gpt-4o-mini")
+llm.event("request_body_captured")
+llm.event("first_token")
+llm.end(status="ok", response={"tokens": 128})
+
+tts = turn.start_operation(type="tts", provider="elevenlabs")
+tts.event("speak")
+tts.event("first_byte")
+tts.end(status="ok")
+
+turn.end()
+```
+
+That turn is fully measurable: every card in the dashboard has what it needs, and
+the waveform's silence annotation can name which stage owned the gap.
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/concepts/endpoints-and-instrumentation"
+    title="Endpoints and instrumentation"
+    description="How automatic capture decides which calls belong to which provider."
+  />
+  <Card
+    href="/docs/reference/metrics"
+    title="Metrics glossary"
+    description="Every number in the dashboard, and the milestones it needs."
+  />
+</Cards>

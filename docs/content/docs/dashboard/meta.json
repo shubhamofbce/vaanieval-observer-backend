@@ -1,0 +1,5 @@
+{
+  "title": "Dashboard",
+  "icon": "LayoutDashboard",
+  "pages": ["self-hosting", "call-detail", "fleet-and-alerts", "stt-evaluation"]
+}

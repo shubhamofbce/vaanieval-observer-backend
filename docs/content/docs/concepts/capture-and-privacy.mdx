@@ -1,0 +1,229 @@
+---
+title: Capture and privacy
+description: Everything VaaniEval can record, what it records by default, and what it never records — with the compliance implications stated plainly.
+---
+
+Voice agents handle some of the most sensitive data a company holds: recorded
+speech, transcripts of that speech, and the prompts built from it. VaaniEval's
+defaults are deliberately conservative, and every expansion beyond them is a
+decision you make explicitly.
+
+## Defaults
+
+<Tabs items={['Python', 'Node.js']}>
+
+<Tab value="Python">
+
+```python
+VaaniObserver(
+    capture={
+        "audio": True,
+        "http_bodies": False,
+        "websocket_text_frames": False,
+        "stt_content": False,
+        "payload_max_bytes": 16384,
+    },
+)
+```
+
+</Tab>
+
+<Tab value="Node.js">
+
+```js
+new VaaniObserver({
+  capture: {
+    audio: true,
+    httpBodies: false,
+    websocketTextFrames: false,
+    sttContent: false,
+    payloadMaxBytes: 16384,
+  },
+});
+```
+
+</Tab>
+
+</Tabs>
+
+| Flag | Default | What it controls |
+| --- | --- | --- |
+| `audio` | **on** | Recording caller and agent PCM |
+| `http_bodies` | **off** | Request and response bodies on instrumented HTTP calls |
+| `websocket_text_frames` | **off** | Text frame contents on observed sockets |
+| `stt_content` | **off** | Transcript text inside STT operations |
+| `payload_max_bytes` | `16384` | Size bound on every captured payload |
+
+<Callout type="warn">
+  **Audio is on by default.** It is the one setting most likely to surprise you.
+  A recorded call is personal data in most jurisdictions and may require consent,
+  a retention policy and a deletion path that VaaniEval does not provide for you.
+  Set `audio: False` if you want timing without recordings — every latency metric
+  still works, because latency comes from milestones, not from audio.
+</Callout>
+
+## What is never captured
+
+Regardless of settings, the SDK does not record:
+
+- **Authentication headers or credentials.** Not on HTTP calls, not on websocket
+  handshakes.
+- **Streaming response bodies read by draining the stream.** Doing so would hold
+  back your first token.
+- **Frame-by-frame websocket contents.** Only byte counts, frame counts and
+  timings are recorded.
+- **Anything from a URL that does not match one of your endpoint rules.** Calls
+  to your own services pass through untouched.
+
+## Size bounding
+
+Every captured payload — request, response and sample data — passes through a
+bound of `payload_max_bytes` (16 KiB by default). Oversized values are replaced:
+
+```json
+{ "_truncated": true, "_original_bytes": 184320, "_preview": "{\"messages\":[{\"role\"…" }
+```
+
+Values that cannot be serialised become `{"_capture_error": "…"}`, and the event
+is still written. Capture never fails an operation.
+
+<Callout type="info">
+  Truncation is *visible*, never silent. If you see `_truncated` in a trace, the
+  span is real and its timings are correct — only its payload was clipped.
+</Callout>
+
+## Turning capture up
+
+Debugging a specific problem usually justifies temporarily capturing more. Do it
+narrowly:
+
+```python
+vaani = VaaniObserver(
+    capture={
+        "http_bodies": True,       # see the exact prompt sent
+        "stt_content": True,       # see the transcript the model received
+        "payload_max_bytes": 65536,
+    },
+)
+```
+
+<Callout type="warn">
+  `stt_content: True` means **caller speech in plain text** lands in
+  `events.jsonl` and in the dashboard's SQLite database. `http_bodies: True`
+  means prompts — which typically embed that transcript plus retrieved customer
+  records — land there too. Both are usually the reason a deployment needs a DPA
+  review. Prefer enabling them in staging against synthetic calls.
+</Callout>
+
+Note that **STT evaluation requires transcript content**. You cannot compute an
+estimated WER against a challenger model without the production transcript to
+compare. If you want the [STT evaluation](/docs/dashboard/stt-evaluation)
+workspace, `stt_content` must be on for the calls you intend to review.
+
+## Where the data goes
+
+<Steps>
+
+<Step>
+
+### Local disk, during the call
+
+`spool_directory` (default `./.vaani-spool`). Nothing crosses the network while
+the caller is on the line.
+
+</Step>
+
+<Step>
+
+### Your dashboard, after the call
+
+Only when you call `upload_package()`. If you never call it, the package stays on
+disk and you can delete it, encrypt it, or ship it somewhere else entirely.
+
+</Step>
+
+<Step>
+
+### Nowhere else
+
+There is no telemetry, no phone-home, and no third-party service in the SDK. It
+has no runtime dependencies.
+
+</Step>
+
+</Steps>
+
+## Failure behaviour, and why it matters here
+
+By default `strict` is `False`. Instrumentation errors are swallowed so that a
+bug in observability cannot break a call.
+
+```python
+VaaniObserver(strict=True)   # raise instead of degrading, for staging
+```
+
+The cost is that capture can silently degrade. Two things make that visible:
+
+**`capture_status` in the manifest:**
+
+```json
+{
+  "capture_status": {
+    "events_complete": true,
+    "audio_complete": false,
+    "http_instrumentation": "active",
+    "websocket_instrumentation": "active",
+    "dropped_event_count": 0,
+    "dropped_audio_chunk_count": 37
+  }
+}
+```
+
+**The *unverifiable* class in the dashboard.** A call whose capture is incomplete
+is ranked separately from failed and slow calls, because "we do not know what the
+caller heard" is a different statement from "the caller heard an error". It is
+never quietly folded into the healthy bucket.
+
+## Retention and deletion
+
+Stated plainly, because the gap matters:
+
+<Callout type="warn">
+  **The self-hosted dashboard has no retention policy, no deletion API and no
+  authentication.** Sessions accumulate in SQLite and audio accumulates on the
+  filesystem until you remove them yourself. There is no per-caller deletion
+  endpoint, so a right-to-erasure request has to be serviced by deleting the
+  session directory and row directly. Plan for this before you point production
+  traffic at it. See [Self-hosting](/docs/dashboard/self-hosting).
+</Callout>
+
+Spool directories are also **not** cleaned up automatically after a successful
+upload. On a busy agent host this is a disk-space concern; add a sweep of
+`.vaani-spool` for completed sessions to your deployment.
+
+## A reasonable production posture
+
+| Setting | Production | Staging |
+| --- | --- | --- |
+| `audio` | On, with consent and a retention sweep | On |
+| `http_bodies` | Off | On |
+| `stt_content` | Off, unless you need STT evaluation | On |
+| `websocket_text_frames` | Off | On while debugging a transport |
+| `payload_max_bytes` | `16384` | `65536` |
+| `strict` | `False` | `True` |
+| Upload | Explicit, post-call | Explicit, post-call |
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/reference/configuration"
+    title="Configuration reference"
+    description="Every option and environment variable, with defaults."
+  />
+  <Card
+    href="/docs/dashboard/self-hosting"
+    title="Self-hosting"
+    description="Running the dashboard, and its operational limits."
+  />
+</Cards>

@@ -1,0 +1,208 @@
+---
+title: STT evaluation
+description: Comparing a production transcript against a stronger challenger model — estimated WER, endpointing latency, a semantic risk judge, and what switching would cost.
+---
+
+Latency tells you whether the agent felt fast. STT evaluation tells you whether
+it heard correctly — and whether the mistakes it made could have changed the
+conversation.
+
+![The STT review tab showing coverage 3 of 4 recorded turns, 3 of 3 transcripts available, first partial p50 of 2.90s, finalization p50 of 3.30s, and endpointing shown as an em dash marked unavailable, above a per-turn table.](/screenshots/stt-review.png)
+
+## The two questions it answers
+
+1. **Where did production STT disagree with a stronger challenger transcript, and
+   should I listen to the audio?**
+2. **Did the production model detect and finalize caller turns quickly and
+   reliably enough for a live agent?**
+
+Open it at `/stt-evaluation?session=<id>`, or from the **STT review** tab on a
+call.
+
+## Streaming timing
+
+Available immediately, from milestones captured during the call:
+
+| Metric | Measured from |
+| --- | --- |
+| **First partial** | Caller speech start → first partial transcript |
+| **Finalization** | Last word → final transcript |
+| **Endpointing** | Caller stops speaking → provider marks speech final |
+| **Coverage** | Recorded turns with usable STT evidence |
+
+<Callout type="warn">
+  **`—` means unavailable, and it always carries a reason.** In the screenshot,
+  `ENDPOINTING` is `—  unavailable`. It is never rendered as `0`, never inferred
+  from an operation's start and end times, and never derived from a batch HTTP
+  round trip. If the milestones that define a metric were not captured, the metric
+  does not exist for that call.
+</Callout>
+
+The engine is unusually careful about what counts as evidence:
+
+- **Two identical timestamps are not a measurement.** Half of real STT spans
+  stamp `speech_ended` and `final_transcript` from the same underlying framework
+  event, so the milestones exist, look independent, and are byte-identical.
+  Subtracting them would manufacture a zero. The engine requires the two instants
+  to have been observed separately.
+- **`speech_started` is a listening window, not speech.** It marks when the
+  recognizer opened its window, which on real data can precede the first word by
+  more than ten seconds. Word timestamps are the only evidence of when the caller
+  actually spoke.
+- **Capture capability is tracked per session.** A privacy-redacted build that
+  records only a character count is distinguished from a build that never
+  captured a transcript at all — so "no transcript" and "transcript withheld" are
+  not conflated.
+
+## Accuracy needs a challenger
+
+<Callout type="info">
+  The banner says it explicitly: *"Streaming timing and transcripts. Accuracy
+  appears after a challenger comparison."* Until you replay the recorded caller
+  audio against a challenger model, there is nothing to compare the production
+  transcript against.
+</Callout>
+
+Queue a run from the UI, or:
+
+```http
+POST /v1/sessions/{session_id}/challenger-evaluation
+Content-Type: application/json
+
+{ "model": "elevenlabs_scribe_v2" }
+```
+
+Poll the same path with `GET`. Jobs run off the request thread on a two-worker
+in-process pool, with status tracked in SQLite. An unsupported model key is a
+`422`. Requires `ELEVENLABS_API_KEY`.
+
+`CHALLENGER_MODELS` currently contains one entry: **ElevenLabs Scribe v2**.
+
+### What a run produces
+
+<Steps>
+
+<Step>
+
+### Word alignment
+
+Deterministic normalization and alignment of the production and challenger
+transcripts, producing substitution, deletion and insertion counts.
+
+</Step>
+
+<Step>
+
+### Estimated WER
+
+Per turn and for the call. Every displayed value can be recomputed from the
+stored call — the scoring module has no clock, no provider and no global state.
+
+</Step>
+
+<Step>
+
+### Word-to-turn mapping
+
+Each disagreement is attributed to the turn it occurred in, so you can jump
+straight to the audio.
+
+</Step>
+
+<Step>
+
+### A semantic risk judge
+
+An LLM pass that classifies whether a disagreement could have **changed the
+conversation** — a misheard account number matters, a dropped "um" does not.
+Cached by content fingerprint, so re-running does not re-bill. Requires
+`OPENAI_API_KEY`; the model defaults to `gpt-4o-mini` via `STT_EVAL_JUDGE_MODEL`.
+
+</Step>
+
+<Step>
+
+### A cost model
+
+Per-minute list pricing with a provenance flag, batch→streaming substitution for
+switch decisions, and a monthly savings estimate.
+
+</Step>
+
+</Steps>
+
+## The three interpretation rules
+
+These are enforced throughout the engine, not just in the copy.
+
+<Callout type="warn">
+  **1. The challenger is a pseudo-reference, not ground truth.** The score is
+  labelled *estimated WER* / *model disagreement*, never *accuracy*. A stronger
+  model is still a model; where the two disagree, either could be wrong. It is a
+  disagreement score until a human-reviewed reference transcript exists — which is
+  why the risk judge exists, to tell you which disagreements are worth a human
+  listening.
+</Callout>
+
+<Callout type="warn">
+  **2. Unavailable is shown as `—` with a reason.** Never `0`, never inferred from
+  an operation's start and end times, never derived from a batch round trip. A
+  challenger that was only run as a batch transcription genuinely has no streaming
+  milestones, and the UI says so rather than reporting zeros.
+</Callout>
+
+<Callout type="warn">
+  **3. A session-long STT websocket is a connection span, not an utterance.** It
+  is never scored as a turn. Otherwise a five-minute call would report a
+  five-minute transcription latency.
+</Callout>
+
+## Cost
+
+<Callout type="warn">
+  **Evaluation bills real money per run.** Challenger transcription and the judge
+  both charge per call, and there is no spend cap in the service. Published cost
+  figures are **list prices with provenance** (`estimated_list_price` versus
+  `configured`), not invoices — they are for comparing options, not for
+  reconciling a bill. Override the rates at `PUT /v1/pricing`.
+</Callout>
+
+The cohort comparison is computed against a **25-session sample**
+(`COHORT_SAMPLE_LIMIT`), not your full history, which keeps a comparison cheap
+but means it is a sample estimate.
+
+## Verification
+
+`scripts/validate-latency.py` is a deliberate **second implementation**. It
+re-derives every published latency value straight from `events.jsonl` with its
+own arithmetic and asserts the served payload agrees. It is wired into the test
+suite, so a change that reintroduces a fabricated measurement fails the build.
+
+That is the strongest statement the project makes about its own numbers, and it
+is worth knowing it exists before you act on one.
+
+## Limits
+
+- **One challenger model** is currently supported.
+- **Post-call and manual.** Nothing is evaluated automatically on ingest.
+- **Requires transcript capture.** `stt_content` must have been enabled for the
+  call. See [Capture and privacy](/docs/concepts/capture-and-privacy).
+- **Requires caller audio.** The challenger replays the recorded caller track; a
+  call captured without audio cannot be evaluated.
+- **Two workers, in-process.** A queue of long calls competes with request
+  serving and makes the console sluggish.
+
+## Next
+
+<Cards>
+  <Card
+    href="/docs/reference/metrics"
+    title="Metrics glossary"
+    description="Every number, its definition, and when it is unavailable."
+  />
+  <Card
+    href="/docs/reference/http-api"
+    title="HTTP API"
+    description="The evaluation and pricing endpoints in full."
+  />
+</Cards>

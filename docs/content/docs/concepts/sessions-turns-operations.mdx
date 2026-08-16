@@ -39,7 +39,7 @@ session = vaani.start_session(
     metadata={"env": "prod", "version": "2026.08.1"},
 )
 ...
-finalized = session.end(outcome="completed")
+finalized = await session.end(outcome="completed")
 ```
 
 </Tab>

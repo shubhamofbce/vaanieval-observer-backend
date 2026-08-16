@@ -199,7 +199,7 @@ session.record_inbound_audio(chunk, {**FORMAT, "timestamp_ms": frame.captured_at
 ```python
 from vaani_observer import observe_websocket
 
-handle = observe_websocket(socket, session=session, url=url, endpoint_id="stt")
+handle = observe_websocket(vaani, socket, session=session, url=url, endpoint_id="stt")
 ...
 handle.detach()
 ```

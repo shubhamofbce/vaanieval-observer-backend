@@ -22,6 +22,12 @@ export const metadata: Metadata = {
   alternates: {
     canonical: '/',
   },
+  verification: {
+    google: 'wU-cu5B8qycWQOCJlqzbXWztln7o8y7dFQOPgxWI-Wc',
+    other: {
+      'msvalidate.01': '2DD28DA0A845FDF28E1BBB50CB9487E5',
+    },
+  },
   twitter: { card: 'summary_large_image' },
 };
 

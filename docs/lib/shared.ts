@@ -7,6 +7,7 @@ export const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? 'https://docs.vaaniev
 export const demoUrl = 'https://demo.vaanieval.com';
 export const marketingUrl = 'https://www.vaanieval.com';
 export const bookCallUrl = 'https://calendar.app.google/5cNH8hB13LoC39Qk7';
+export const contactEmail = 'shubham@vaanieval.com';
 
 /** The three private repositories that make up the platform. */
 export const repos = {

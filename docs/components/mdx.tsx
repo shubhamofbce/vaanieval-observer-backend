@@ -9,6 +9,7 @@ import { File, Files, Folder } from 'fumadocs-ui/components/files';
 import { TypeTable } from 'fumadocs-ui/components/type-table';
 import { ImageZoom } from 'fumadocs-ui/components/image-zoom';
 import { Mermaid } from './mermaid';
+import { BetaAccess } from './beta-access';
 
 export function getMDXComponents(components?: MDXComponents) {
   return {
@@ -27,6 +28,7 @@ export function getMDXComponents(components?: MDXComponents) {
     File,
     TypeTable,
     Mermaid,
+    BetaAccess,
     // Screenshots are dense product UI: clicking one should enlarge it.
     img: (props) => <ImageZoom {...(props as any)} />,
     ...components,

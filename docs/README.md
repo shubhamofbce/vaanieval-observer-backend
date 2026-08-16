@@ -51,8 +51,8 @@ generated OG image, so write the description as a real sentence.
 ### Available components
 
 `Callout`, `Tabs`/`Tab`, `Steps`/`Step`, `Cards`/`Card`, `Accordions`/`Accordion`,
-`Files`/`Folder`/`File`, `TypeTable` and `Mermaid` are registered globally in
-`components/mdx.tsx` — no imports needed in MDX.
+`Files`/`Folder`/`File`, `TypeTable`, `Mermaid` and `BetaAccess` are registered
+globally in `components/mdx.tsx` — no imports needed in MDX.
 
 Diagrams use the component, not a fenced block:
 
@@ -76,6 +76,11 @@ documentation has to match:
   `app/`, `python-sdk/src/`, or `nodejs-sdk/src/` before writing.
 - **Install instructions point at the private GitHub repositories.** Neither SDK
   is published to a public registry; do not add PyPI or npm-registry commands.
+- **Say why the repository is private, wherever the reader is about to hit it.**
+  Use `<BetaAccess />` (or `<BetaAccess compact />` where the page is already
+  callout-heavy) rather than writing the closed-beta message by hand. It is the
+  single source of truth for the access email and the booking link, both of
+  which live in `lib/shared.ts`.
 - **State limitations where they are relevant**, not in a footnote. The
   self-hosted dashboard has no authentication, no retention policy and no tenant
   isolation, and readers must not be able to miss that.

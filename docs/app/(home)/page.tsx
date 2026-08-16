@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import Image from 'next/image';
 import { ArrowRight, AudioLines, GitCompare, Timer } from 'lucide-react';
-import { bookCallUrl, demoUrl } from '@/lib/shared';
+import { bookCallUrl, contactEmail, demoUrl } from '@/lib/shared';
 
 const features = [
   {
@@ -75,6 +75,27 @@ export default function HomePage() {
           Python and Node.js SDKs · self-hosted dashboard · your audio never
           leaves your infrastructure
         </p>
+
+        <p className="mt-6 max-w-xl rounded-lg border border-fd-border bg-fd-card px-4 py-3 text-sm text-fd-muted-foreground">
+          <strong className="text-fd-foreground">Closed beta.</strong> The
+          repositories are private for now. Email{' '}
+          <a
+            href={`mailto:${contactEmail}?subject=${encodeURIComponent('VaaniEval closed beta access')}`}
+            className="font-medium text-fd-foreground underline underline-offset-4"
+          >
+            {contactEmail}
+          </a>{' '}
+          to request access, or{' '}
+          <a
+            href={bookCallUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="font-medium text-fd-foreground underline underline-offset-4"
+          >
+            book a call
+          </a>{' '}
+          so we can understand your use case and get you set up.
+        </p>
       </section>
 
       <section className="mx-auto w-full max-w-6xl px-4 pb-16">
@@ -117,6 +138,8 @@ export default function HomePage() {
           <p className="max-w-xl text-fd-muted-foreground">
             Install the SDK, point it at a locally running dashboard, and open the
             call you just made. No provider lock-in, no agent framework required.
+            Access to the private repositories is granted on request while we are
+            in closed beta.
           </p>
           <div className="mt-2 flex flex-wrap justify-center gap-3">
             <Link
@@ -130,6 +153,12 @@ export default function HomePage() {
               className="inline-flex h-10 items-center rounded-lg border border-fd-border px-4 text-sm font-medium transition-colors hover:bg-fd-accent"
             >
               Node.js quickstart
+            </Link>
+            <Link
+              href={`mailto:${contactEmail}?subject=${encodeURIComponent('VaaniEval closed beta access')}`}
+              className="inline-flex h-10 items-center rounded-lg border border-fd-border px-4 text-sm font-medium transition-colors hover:bg-fd-accent"
+            >
+              Request access
             </Link>
             <Link
               href={bookCallUrl}

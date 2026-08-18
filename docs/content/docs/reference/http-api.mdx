@@ -48,10 +48,36 @@ Creates a session from a manifest.
 **Response** `201`
 
 ```json
-{ "session_id": "9f2c…", "upload_urls": { "events.jsonl": "/v1/uploads/9f2c…/events.jsonl" } }
+{
+  "session_id": "9f2c…",
+  "upload_urls": { "events.jsonl": "/v1/uploads/9f2c…/events.jsonl" },
+  "accepted_encodings": ["gzip"]
+}
 ```
 
 Re-posting the same manifest is idempotent.
+
+#### `accepted_encodings`
+
+This field is the **compression contract**, and a client must treat it as
+mandatory input rather than decoration.
+
+| Value | Client must |
+| --- | --- |
+| `["gzip"]` | Send `Content-Encoding: gzip` for large objects, or not — both work |
+| `[]` or field absent | Send objects **identity-encoded only** |
+
+An absent field means identity. This matters in both directions:
+
+- A client that compresses unconditionally against an ingest that does not
+  decompress will get a `204` on the `PUT` — the bytes are stored verbatim —
+  and then fail digest verification at `/v1/sessions/{id}/complete`. The
+  upload appears to succeed and the recording is lost. This is not
+  hypothetical: it was observed against an older build of this API and is why
+  the field exists.
+- A server that omits the field will never receive a compressed upload from a
+  conforming client, so every recording transfers at full size. If you are
+  implementing this API and you decompress, you **must** advertise it.
 
 ### `PUT /v1/uploads/{session_id}/{object_name}`
 
@@ -61,13 +87,29 @@ credential.
 | Constraint | Value |
 | --- | --- |
 | Allowed `object_name` | `events.jsonl`, `call.audio`, `caller.audio`, `agent.audio` |
-| Max body | **128 MiB** |
+| Max body | **128 MiB** *(decompressed)* |
 | Success | `204 No Content` |
 | Unknown object name | `404` |
 | Over the cap | `413` |
+| Unsupported `Content-Encoding` | `415` |
+| Malformed gzip body | `400` |
 
 The body is streamed to a `.part` file and renamed on success, so a failed upload
 never leaves a partially written object in place.
+
+#### `Content-Encoding: gzip`
+
+The body may be gzip-compressed **only when the `201` advertised `gzip` in
+`accepted_encodings`**. The server decompresses as it streams and counts
+**decompressed** bytes against the cap, so compression buys transfer time, not
+headroom. Only `gzip`, `identity` and an absent or empty header are accepted;
+anything else is a `415`.
+
+The digest and `byte_size` you declare in
+[`POST /v1/sessions/{id}/complete`](#complete-a-session) describe the
+**uncompressed** object — they are a property of the object, never of the
+transfer. The Python SDK compresses objects of 64 KiB or more by default
+(`upload={"compress": False}` to turn it off).
 
 <Callout type="warn">
   The 128 MiB cap is a hard limit, not a soft one. Raw stereo PCM at 16 kHz is

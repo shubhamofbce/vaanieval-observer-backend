@@ -26,7 +26,7 @@ VaaniObserver(
 | `capture` | `dict` | see below | What to record |
 | `instrumentations` | `dict` | `{http: True, websocket: True}` | Which clients to patch |
 | `endpoints` | `list[dict]` | `[]` | Provider URL rules |
-| `upload` | `dict` | `{retries: 3}` | Upload behaviour |
+| `upload` | `dict` | see below | Upload behaviour |
 | `strict` | `bool` | `False` | Raise instead of degrading |
 
 ## Node.js SDK
@@ -82,6 +82,39 @@ An unknown `match` raises `TypeError`. A URL matching more than one rule at the
 same scheme precedence raises `Ambiguous Vaani endpoint rules for …`. See
 [Endpoints and instrumentation](/docs/concepts/endpoints-and-instrumentation).
 
+## `upload`
+
+Python only. The Node SDK accepts `{ retries }`.
+
+| Option | Environment | Default | Effect |
+| --- | --- | --- | --- |
+| `retries` | `VAANI_UPLOAD_RETRIES` | `3` | Retries per request on 5xx, 408, 425, 429 and dropped connections |
+| `timeout_s` | `VAANI_UPLOAD_TIMEOUT_S` | `30.0` | Socket timeout for the handshake |
+| `min_throughput_bps` | `VAANI_UPLOAD_MIN_THROUGHPUT_BPS` | `131072` | Assumed worst-case speed; extends the timeout by body size |
+| `compress` | `VAANI_UPLOAD_COMPRESS` | `True` | gzip objects of 64 KiB or more, when the ingest advertises `gzip` |
+
+The environment column matters because `from_env()` — the constructor every
+integration guide shows — builds the observer itself. Until these variables
+existed, a value set from this table was silently discarded. An explicit
+`upload={...}` argument still wins over the environment.
+
+<Callout type="warn">
+  `timeout_s` bounds the handshake, **not** idle time: `urlopen` applies its
+  deadline to the entire send, so a single flat value would make any object
+  above `timeout_s x throughput` permanently unshippable. Each request gets
+  `timeout_s + len(body) / min_throughput_bps` seconds. Set
+  `min_throughput_bps` to `0` to disable the allowance.
+</Callout>
+
+`upload_package(finalized, timeout=...)` budgets the upload across every object
+and retry. It is checked between requests and retries, and it caps each socket
+timeout — so it bounds a dead or slow-to-accept peer, but **not** one that
+trickles bytes back indefinitely, because `urlopen` renews its timeout on every
+socket read. Read it as "stop starting new work after this", not as a hard
+wall-clock guarantee. Digests always describe the uncompressed object,
+never the transfer encoding. A package that fails to upload stays on the spool;
+ship it later with `python -m vaani_observer.drain`.
+
 ## `strict`
 
 | Value | Behaviour | Use it |
@@ -112,6 +145,11 @@ Read by `VaaniLiveKitRecorder.from_env()`.
 | `VAANI_PAYLOAD_MAX_BYTES` | `16384` | Payload bound |
 | `VAANI_AGENT_ID` | `livekit-agent` | Default agent id |
 | `VAANI_UPLOAD` | `true` | Upload after `finish()` |
+| `VAANI_UPLOAD_TIMEOUT_S` | `30.0` | Socket timeout for the handshake |
+| `VAANI_UPLOAD_RETRIES` | `3` | Retries per request |
+| `VAANI_UPLOAD_MIN_THROUGHPUT_BPS` | `131072` | Assumed worst-case upload speed |
+| `VAANI_UPLOAD_COMPRESS` | `true` | gzip large objects in transit |
+| `VAANI_ENDPOINTS` | `[]` | JSON array of `endpoints` rules; enables connection capture |
 
 <Callout type="warn">
   These defaults are **more permissive than the core SDK's** —
@@ -122,7 +160,12 @@ Read by `VaaniLiveKitRecorder.from_env()`.
 
 `from_env()` never raises: on failure it returns an **inert** recorder whose
 methods are no-ops and whose `enabled` is `False`. Check `recorder.enabled` at
-startup if you want a misconfiguration to be visible.
+startup if you want a misconfiguration to be visible; `recorder.last_error`
+carries the reason. When `VAANI_ENABLED` is set but recording ends up off, the
+reason is also logged at `ERROR` — silence there was a bug, not a design.
+
+When `VAANI_ENDPOINTS` is empty, HTTP and WebSocket instrumentation is not
+installed at all: patching clients with no rules to match is pure cost.
 
 ## Dashboard
 

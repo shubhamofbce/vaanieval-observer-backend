@@ -16,6 +16,18 @@ def test_returns_an_upload_url_for_every_allowed_object(client, api):
         assert url.startswith("http://")
 
 
+def test_advertises_the_encodings_it_can_decompress(client):
+    """The SDK must not compress unless told to.
+
+    A dashboard predating gzip ingest returns `204` for a compressed PUT, stores
+    the compressed bytes, and only fails at `/complete` -- losing the recording.
+    This field is the handshake that prevents a newer SDK from doing that to an
+    older server.
+    """
+    body = create(client, "call-1").json()
+    assert body["accepted_encodings"] == ["gzip"]
+
+
 def test_stores_the_session_as_uploading(client):
     create(client, "call-1")
     summary = client.get("/v1/sessions").json()

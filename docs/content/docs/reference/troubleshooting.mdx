@@ -14,11 +14,17 @@ Check, in order:
 1. **Was the observer constructed?** Instrumentation is installed in the
    constructor. A lazily created observer that never runs records nothing.
 2. **Did `session.end()` run?** The package directory exists during the call, but
-   `manifest.json` is only written by `end()`. Put it in a `finally` block.
+   `manifest.json` is only written by `end()`. Put it in a `finally` block. With
+   the LiveKit integration, pass `job_ctx=ctx` to `observe_agent_session()`
+   instead — a `finally` there fires mid-call.
 3. **Is `spool_directory` writable?** With `strict=False` a write failure is
    swallowed. Set `strict=True` to see it.
 4. **LiveKit only:** `VAANI_ENABLED` defaults to **`false`**. `from_env()` returns
-   an inert recorder when disabled. Check `recorder.enabled`.
+   an inert recorder when disabled. Check `recorder.enabled`, and read
+   `recorder.last_error` — when `VAANI_ENABLED` is set but recording is off, the
+   reason is also logged at ERROR.
+5. **Did the upload run out of time?** The package is kept on the spool and the
+   directory is logged. Ship it with `python -m vaani_observer.drain`.
 
 </Accordion>
 
@@ -49,8 +55,10 @@ as a span with no outcome, which would skew every duration percentile.
 
 - Ensure every `start_operation()` has a matching `end()`.
 - `session.end()` closes anything still open — a hard process kill does not.
-- With the LiveKit integration, call `await recorder.finish()` in a `finally`
-  block.
+- With the LiveKit integration, pass `job_ctx=ctx` to `observe_agent_session()`
+  so the recording is finalized in the job's shutdown hook. **Do not** call
+  `finish()` in a `finally` around `session.start()`: on livekit-agents 1.x
+  `start()` returns when the session starts, so that truncates the call.
 
 </Accordion>
 
@@ -178,6 +186,44 @@ The object exceeds **128 MiB**. Raw stereo PCM at 16 kHz is roughly 3.8 MB per
 minute, so this is a very long call. There is no chunked upload path — reduce the
 sample rate, disable audio capture for that agent, or split the call.
 
+gzip does **not** help here: the cap is enforced on decompressed bytes.
+
+</Accordion>
+
+<Accordion title="The upload times out, or is killed at shutdown">
+
+The upload is bounded twice: `upload.timeout_s` (default `30.0`) per request, and
+the `timeout=` argument to `upload_package()` for the whole upload. Retries cover
+5xx, 408, 425, 429 and dropped connections.
+
+Nothing is lost when it fails — the package stays on the spool and the directory
+is logged. Ship it out of band:
+
+```bash
+python -m vaani_observer.drain --verbose
+```
+
+On LiveKit, an upload inside the job shutdown hook competes with
+`shutdown_process_timeout`, which defaults to **10 seconds**. Raise it, or leave
+the upload to the drainer. See
+[LiveKit → Uploading takes time](/docs/python/livekit).
+
+</Accordion>
+
+<Accordion title="415 or 400 on PUT /v1/uploads/...">
+
+`415` means a `Content-Encoding` the server does not implement was sent. `gzip`,
+`identity` and an absent header are all accepted; anything else is a `415`.
+`400` means the body claimed to be gzip and was malformed — most often a proxy
+that decompressed the body but left the header in place.
+
+Set `VAANI_UPLOAD_COMPRESS=0` (or `upload={"compress": False}`) if something
+between the SDK and the dashboard rewrites bodies.
+
+The SDK only compresses when the ingest advertised `gzip` in
+`accepted_encodings` on the `201`, so against a conforming server neither of
+these should be reachable. Seeing them points at something in the middle.
+
 </Accordion>
 
 <Accordion title="400 on POST .../complete">
@@ -270,9 +316,39 @@ letting it record as an error.
 
 <Accordion title="Disk is filling up on the agent hosts">
 
-Spool directories are **not** removed after a successful upload. Add a sweep of
+Spool directories are **not** removed by `upload_package()`. Either add a sweep of
 `.vaani-spool` for directories containing a `manifest.json` older than your
-retention window.
+retention window, or run the drainer, which uploads what is pending and removes
+what the dashboard has verified:
+
+```bash
+python -m vaani_observer.drain --watch 300
+```
+
+A 5-minute call is roughly 28 MB of raw PCM, so an agent host recording all day
+fills a disk quickly.
+
+The case that catches people out is the package the **recorder itself** already
+uploaded from `finish()`. It carries an `uploaded.json` receipt, so the drainer
+correctly refuses to re-ship it — and for a long time nothing removed it either,
+so a healthy, fully-uploaded worker still filled its disk. Those packages are
+now removed once their receipt is older than `--delivered-ttl` hours
+(default **24**).
+
+```bash
+# Keep delivered packages for an hour instead of a day
+python -m vaani_observer.drain --watch 300 --delivered-ttl 1
+
+# Never remove anything
+python -m vaani_observer.drain --watch 300 --keep
+```
+
+Use `--keep` if you want every package left behind with its receipt.
+
+Age is read from the `uploaded_at` field inside `uploaded.json`, not from the
+file's modification time, because anything that copies a spool — `cp -R`,
+`rsync` without `-a`, a container image build, a backup restore — resets mtime
+and would make every package look brand new forever.
 
 </Accordion>
 

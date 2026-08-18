@@ -215,7 +215,7 @@ depend on the dashboard.
 | --- | --- | --- |
 | SQLite metadata | Single file, single writer | Concurrent ingestion serialises; write contention grows with volume |
 | Audio storage | Local filesystem | No replication; the host's disk is the ceiling |
-| Upload size | 128 MiB per object | `413`; a very long call cannot be uploaded |
+| Upload size | 128 MiB per object, decompressed | `413`; a very long call cannot be uploaded. `Content-Encoding: gzip` reduces transfer time, not the cap |
 | Challenger evaluation | 2-worker thread pool, in-process | Replays compete with request serving; a queue of long calls makes the console sluggish |
 | Cohort comparison | 25-session sample (`COHORT_SAMPLE_LIMIT`) | Comparisons are computed against a sample, not the full history |
 
@@ -230,8 +230,9 @@ directory would corrupt SQLite.
     the session directory and the SQLite rows by hand.
   - **No backup.** `vaani.db` and `objects/` are ordinary files; back them up
     yourself.
-  - **SDK spool directories are not cleaned up** after upload either, so audio
-    accumulates on your agent hosts as well.
+  - **SDK spool directories are not cleaned up** by `upload_package()` either, so
+    audio accumulates on your agent hosts as well. Run
+    `python -m vaani_observer.drain --watch 300` there.
 </Callout>
 
 ### Operations

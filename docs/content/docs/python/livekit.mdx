@@ -9,6 +9,15 @@ milestones and audio tracks you would otherwise write by hand.
 
 ## Install
 
+<Callout type="error">
+  **Do not install from `git+https://` on LiveKit Cloud.** The build image has no
+  `git` binary and no credentials for a private repository, so the deploy fails
+  before your agent ever starts. Vendor the wheel instead — see
+  [Deploying to LiveKit Cloud](#deploying-to-livekit-cloud).
+</Callout>
+
+For local development, where you have `git` and repository access:
+
 ```bash
 pip install "vaanieval-observer[livekit] @ git+https://github.com/shubhamofbce/vaanieval-observer-python-sdk.git"
 ```
@@ -18,7 +27,7 @@ pip install "vaanieval-observer[livekit] @ git+https://github.com/shubhamofbce/v
 ## Wire it up
 
 ```python title="agent.py"
-from livekit.agents import Agent, AgentSession
+from livekit.agents import Agent, AgentSession, WorkerOptions, cli
 from vaani_observer.integrations.livekit import (
     VaaniAudioTapMixin,
     VaaniLiveKitRecorder,
@@ -35,25 +44,44 @@ async def entrypoint(ctx):
     recorder = VaaniLiveKitRecorder.from_env(agent_id="support-bot")
 
     agent = MyAgent()
-    agent.vaani = recorder            # required for audio and LLM turn scoping
-
     session = AgentSession(...)
-    observe_agent_session(session, recorder)
 
-    try:
-        await session.start(agent=agent, room=ctx.room)
-    except BaseException as error:
-        recorder.fail(error)
-        raise
-    finally:
-        await recorder.finish(outcome="completed")
+    # Binds agent.vaani, subscribes to the session, and registers the shutdown
+    # hook that finalizes the recording when the job actually ends.
+    observe_agent_session(session, recorder, agent=agent, job_ctx=ctx)
+
+    await session.start(agent=agent, room=ctx.room)
+
+
+if __name__ == "__main__":
+    cli.run_app(
+        WorkerOptions(
+            entrypoint_fnc=entrypoint,
+            # The default is 10 seconds, which is not enough to finalize and
+            # upload a call of any length. See "Uploading takes time".
+            shutdown_process_timeout=120.0,
+        )
+    )
 ```
 
-<Callout type="warn">
-  `VaaniAudioTapMixin` must come **before** `Agent` in the base class list, and
-  `agent.vaani` must be set. Without both you still get spans and milestones, but
-  no audio and no `turn_id` on automatically instrumented LLM HTTP calls.
+<Callout type="error">
+  **Never call `finish()` in a `finally` around `session.start()`.** On
+  livekit-agents 1.x, `start()` returns as soon as the session *starts*, not when
+  the call ends. A `finally` therefore fires seconds into a live call: you get a
+  truncated recording, and every event after that point is discarded.
+
+  Passing `job_ctx=ctx` registers a shutdown callback instead, which runs when
+  the job genuinely ends. That is the only correct place to finalize.
 </Callout>
+
+<Callout type="warn">
+  `VaaniAudioTapMixin` must come **before** `Agent` in the base class list. Pass
+  `agent=` to `observe_agent_session` and it wires `agent.vaani` for you; if you
+  set it by hand and forget, you get spans and milestones but **no audio** and no
+  `turn_id` on instrumented LLM HTTP calls. The recorder warns when it is enabled
+  and no agent was bound.
+</Callout>
+
 
 ## Configure from the environment
 
@@ -72,6 +100,13 @@ works for both:
 | `VAANI_PAYLOAD_MAX_BYTES` | `16384` | Payload size bound |
 | `VAANI_AGENT_ID` | `livekit-agent` | Default agent id |
 | `VAANI_UPLOAD` | `true` | Upload after `finish()` |
+| `VAANI_ENDPOINTS` | *(unset)* | JSON array of connection-capture rules |
+
+<Callout>
+  If `VAANI_ENABLED` is `true` but recording cannot start, the recorder logs at
+  **ERROR** and `recorder.last_error` says why. It never raises: a broken
+  observability config must not be the reason a call fails to connect.
+</Callout>
 
 <Callout type="warn">
   The integration's defaults are **more permissive than the core SDK's**:
@@ -128,6 +163,25 @@ reached it emits `partial_samples_truncated` rather than growing without bound.
 `metrics_collected` produces an LLM span with a `first_token` milestone placed at
 `started_at + ttft`, and token counts when the provider reports them.
 
+If your agent's LLM emits no `llm_metrics` at all — a custom `llm_node`, or a
+provider plugin without a metrics implementation — the span is instead derived
+from `conversation_item_added`. A derived span carries
+`request.derived_from: "conversation_item_added"` and `response.estimated: true`,
+has approximate timings, and reports **no token counts** rather than inventing
+zeros. The recorder warns once when it falls back.
+
+<Callout type="warn">
+  **Check the model label.** `openai.LLM.with_azure()` defaults its `model`
+  argument to `"gpt-4o"` regardless of which deployment you point it at, so the
+  plugin reports `gpt-4o` for a `gpt-5-mini` deployment. The integration detects
+  the real Azure deployment name and records that, keeping the plugin's claim as
+  `request.reported_model`. If the label is still wrong, set it explicitly:
+
+  ```python
+  VaaniLiveKitRecorder.from_env(model_overrides={"llm": "gpt-5-mini"})
+  ```
+</Callout>
+
 </Step>
 
 <Step>
@@ -135,9 +189,24 @@ reached it emits `partial_samples_truncated` rather than growing without bound.
 ### TTS spans, with real audio accounting
 
 A `speak` milestone with the character count, a `first_byte` milestone at
-`started_at + ttfb`, and a response carrying `audio_bytes` and `audio_ms` computed
-from the captured PCM. A reply that was cut off is ended with status
-`cancelled`, not `error` — barge-in is correct behaviour.
+`started_at + ttfb`, and a response carrying three separate numbers. A reply
+that was cut off is ended with status `cancelled`, not `error` — barge-in is
+correct behaviour.
+
+| Field | Source | Means |
+| --- | --- | --- |
+| `audio_ms` | the TTS provider's own metric | how much audio it **synthesized** |
+| `played_ms` | the PCM captured in `tts_node` | how much actually **reached the caller** |
+| `audio_bytes` | the PCM captured in `tts_node` | the raw byte count behind `played_ms` |
+
+<Callout>
+  On a `cancelled` span `played_ms` is normally **lower** than `audio_ms`, and
+  that gap is the useful part: it is how much of the answer the caller never
+  heard. They come from independent sources, so treat them as two measurements
+  rather than one number reported twice. `played_ms` is omitted entirely — not
+  reported as `0` — when no audio was captured, so that "none reached the
+  caller" is never confused with "we did not measure".
+</Callout>
 
 </Step>
 
@@ -225,6 +294,174 @@ from vaani_observer.integrations.livekit import (
 )
 ```
 
+## Uploading takes time
+
+This is the part that most often goes wrong in production, so it is worth
+understanding before you deploy.
+
+Audio is recorded as raw `pcm_s16le`. At 24 kHz stereo that is **94 KB/s**, so a
+five-minute call is about **28 MB**. The SDK gzips it in transit, but how much
+that helps depends entirely on the audio:
+
+| Content | Measured ratio |
+| --- | --- |
+| Real call audio (speech with silence) | **~38%** of the original |
+| Dense or noisy audio | as little as **93%** — effectively no gain |
+
+Plan for the pessimistic case. On a 10 Mbps uplink, 28 MB is still over twenty
+seconds, and a longer call is proportionally worse.
+
+LiveKit's default `shutdown_process_timeout` is **10 seconds**. If the upload has
+not finished by then, the process is killed mid-transfer.
+
+| Setting | Why |
+| --- | --- |
+| `shutdown_process_timeout=120.0` | Gives the upload room to finish |
+| `VAANI_SPOOL_DIR` on a persistent volume | So a killed upload can be retried |
+| `python -m vaani_observer.drain` | Ships whatever was left behind |
+
+<Callout type="warn">
+  **On LiveKit Cloud the spool is ephemeral.** It disappears with the container,
+  so a package that misses the shutdown budget there is gone for good. Either
+  raise the timeout enough to cover your longest call, or run the drainer as a
+  sidecar sharing a volume with the worker.
+</Callout>
+
+Nothing is lost quietly. If the upload fails or runs out of budget, the package
+stays on the spool and the recorder logs the directory it kept:
+
+```bash
+# One-shot, after a batch of calls
+python -m vaani_observer.drain --verbose
+
+# Or as a sidecar, re-scanning every 60 seconds
+python -m vaani_observer.drain --watch 60
+```
+
+The drainer reads `VAANI_ENDPOINT`, `VAANI_API_KEY` and `VAANI_SPOOL_DIR`, uploads
+every finalized package it finds, and removes each one once the backend has
+verified its digests. Pass `--keep` to leave them on disk instead.
+
+Each package gets `--timeout` seconds (default **1800**) to ship. A pass is
+sequential, so without a budget one stalled upload holds up every recording
+queued behind it. Pass `--timeout 0` to remove the bound.
+
+Receipts are scoped to the endpoint that issued them. If you repoint
+`VAANI_ENDPOINT` — staging to production, self-hosted to cloud — packages
+already delivered elsewhere are treated as pending again and re-uploaded to the
+new destination, which is idempotent. Nothing is ever removed on the strength of
+a receipt from a backend that is no longer the one you are writing to.
+
+It also removes packages that were uploaded **in-process** by `finish()` — those
+carry an `uploaded.json` receipt and are otherwise skipped by every pass, which
+at ~28 MB per five-minute call fills a busy worker's disk. They are kept for
+`--delivered-ttl` hours (default **24**) first, because during an incident the
+local package is the only evidence you have. Pass a negative value to keep them
+indefinitely.
+
+Removing one is not data loss: a receipt means the backend verified the digests,
+so the recording is already stored remotely. Age comes from the `uploaded_at`
+field inside the receipt rather than the file's mtime, which any copy resets.
+
+### Upload tuning
+
+```python
+recorder = VaaniLiveKitRecorder.from_env()
+observe_agent_session(session, recorder, agent=agent, job_ctx=ctx,
+                      upload_timeout=90.0)  # budget for the whole upload
+```
+
+`from_env()` builds the observer for you, so these are set through the
+environment:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `VAANI_UPLOAD_TIMEOUT_S` | `30.0` | Socket timeout for the handshake, before the size allowance below |
+| `VAANI_UPLOAD_RETRIES` | `3` | Retries on 5xx, 429 and dropped connections |
+| `VAANI_UPLOAD_COMPRESS` | `1` | gzip objects of 64 KiB or more in transit |
+| `VAANI_UPLOAD_MIN_THROUGHPUT_BPS` | `131072` | Assumed worst-case upload speed |
+
+<Callout type="warn">
+  **`timeout_s` is not an idle timeout.** Python's `urlopen` takes its deadline
+  once and applies it to the whole send, so a flat value caps *total* transfer
+  time even on a perfectly healthy connection. Left flat, every recording above
+  `timeout_s x throughput` would be permanently unshippable — the drainer would
+  hit the identical cap on every retry, forever.
+
+  So the SDK adds `len(body) / VAANI_UPLOAD_MIN_THROUGHPUT_BPS` seconds on top
+  for each request. At the 128 KB/s default a 28 MB upload gets about 4m 14s
+  (`30s + 28 MiB / 128 KiB`) before it is abandoned. Raise the floor if your
+  uplink is fast and you would rather fail quickly; lower it if it is slow and
+  you would rather wait.
+</Callout>
+
+<Callout>
+  **Hard ceiling: 128 MiB per object**, which is about **23 minutes** of 24 kHz
+  stereo audio. A longer call is rejected at upload time, when the recording is
+  already unrecoverable. If your calls run longer than that, record at a lower
+  sample rate or turn audio capture off and keep the spans.
+</Callout>
+
+## Deploying to LiveKit Cloud
+
+The `git+https://` install **cannot work** in LiveKit Cloud's build image: there
+is no `git` binary, and the repository is private during closed beta, so there
+are no credentials for it either. Build a wheel and vendor it:
+
+```bash
+# From a checkout of the SDK
+python -m build --wheel
+cp dist/vaanieval_observer-*.whl /path/to/your/agent/vendor/
+```
+
+```txt title="requirements.txt"
+livekit-agents[openai,deepgram,silero]~=1.6
+./vendor/vaanieval_observer-0.1.0-py3-none-any.whl[livekit]
+```
+
+Then set `VAANI_ENABLED=true`, `VAANI_ENDPOINT` and `VAANI_API_KEY` in your
+LiveKit Cloud environment, and raise `shutdown_process_timeout` as above.
+
+### Keep the spool out of your repo and your images
+
+The spool holds **raw call audio and transcripts** — the most sensitive data
+your agent touches. It defaults to `.vaani-spool/` in the working directory,
+which is usually your project root, so add it to both ignore files before the
+first recording:
+
+```txt title=".gitignore"
+.vaani-spool/
+```
+
+```txt title=".dockerignore"
+.vaani-spool/
+```
+
+<Callout type="warn">
+  Without the `.dockerignore` entry, any packages left on the spool from a local
+  test run are copied into your image by `COPY . .` and ship to production —
+  and to anyone who can pull the image. Without the `.gitignore` entry they are
+  one `git add .` away from your history.
+</Callout>
+
+## Capturing provider connections
+
+By default the integration records spans from LiveKit's own metrics and does
+**not** patch `httpx` or `aiohttp`. Point `VAANI_ENDPOINTS` at an endpoint to
+capture its connections too:
+
+```bash
+VAANI_ENDPOINTS='[{"id":"deepgram","type":"stt","url":"wss://api.deepgram.com","match":"origin"}]'
+```
+
+<Callout type="warn">
+  Do not add a rule of type `llm` for the endpoint your agent's LLM plugin
+  already uses. You would get **two** LLM spans per turn — one from
+  `metrics_collected` and one from the HTTP capture — and every token and latency
+  aggregate built on the recording would double-count. Use this for endpoints
+  LiveKit metrics do not already describe.
+</Callout>
+
 ## Limits worth knowing
 
 <Callout type="warn">
@@ -233,11 +470,16 @@ from vaani_observer.integrations.livekit import (
   - **Span quality depends on what the provider reports.** TTFT and TTFB come from
     LiveKit metrics; a provider plugin that does not report them yields a span
     with duration but no milestones, and those turns count as unmeasurable.
-  - **A hard crash loses open spans.** `finish()` in a `finally` block is what
-    guarantees they close.
+  - **Finalization happens in the job's shutdown hook.** A `SIGKILL` — an OOM, or
+    a shutdown budget too small for the upload — still loses whatever had not
+    reached disk. Everything that *did* reach disk survives on the spool.
   - **The recorder is per-session.** Reusing one across concurrent
     `AgentSession`s will interleave turns into one recording.
+  - **A degraded recording says so.** If audio is dropped mid-call, the manifest
+    reports `audio_complete: false` rather than claiming a complete recording
+    over a gap.
 </Callout>
+
 
 ## Next
 

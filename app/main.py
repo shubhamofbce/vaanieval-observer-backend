@@ -8,6 +8,7 @@ import struct
 import sys
 import threading
 import uuid
+import zlib
 from array import array
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -209,7 +210,15 @@ def create_session(manifest: SessionCreate, request: Request) -> dict[str, Any]:
                 (session_id, manifest.model_dump_json(), now(), now()),
             )
     base_url = str(request.base_url).rstrip("/")
-    return {"session_id": session_id, "upload_urls": {name: f"{base_url}/v1/uploads/{session_id}/{name}" for name in ALLOWED_OBJECTS}}
+    return {
+        "session_id": session_id,
+        "upload_urls": {name: f"{base_url}/v1/uploads/{session_id}/{name}" for name in ALLOWED_OBJECTS},
+        # Capability advertisement. An SDK must not compress unless the server
+        # says it can decompress: a dashboard predating gzip support stores the
+        # compressed bytes verbatim and then fails verification at /complete,
+        # losing the whole recording. Absent field means "identity only".
+        "accepted_encodings": ["gzip"],
+    }
 
 
 @app.put("/v1/uploads/{session_id}/{object_name}", status_code=204)
@@ -219,23 +228,71 @@ async def upload_object(session_id: str, object_name: str, request: Request) -> 
         raise HTTPException(404, "Unsupported object name")
     target_dir = safe_session_dir(session_id)
     target_dir.mkdir(parents=True, exist_ok=True)
+    # Call audio is raw PCM, which is both the largest object and the most
+    # compressible. Accepting it gzipped cuts the upload roughly threefold
+    # without changing a single byte of what lands on disk, so every consumer
+    # that seeks by sample offset keeps working unchanged.
+    encoding = (request.headers.get("content-encoding") or "").strip().lower()
+    if encoding not in ("", "identity", "gzip"):
+        raise HTTPException(415, f"Unsupported Content-Encoding: {encoding}")
+    decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS) if encoding == "gzip" else None
     declared = request.headers.get("content-length")
-    if declared and declared.isdigit() and int(declared) > MAX_UPLOAD_BYTES:
+    # Only meaningful when the body is the object itself; a compressed body is
+    # bounded by the decompressed count below instead.
+    if (
+        decompressor is None
+        and declared
+        and declared.isdigit()
+        and int(declared) > MAX_UPLOAD_BYTES
+    ):
         raise HTTPException(413, "Object exceeds the 128 MiB local MVP limit")
     # Reading the whole body first would let an oversized upload exhaust memory
     # before the ceiling could reject it, so it is streamed and counted as it
     # lands. The partial file is named apart so a rejected upload can never be
-    # mistaken for a complete one.
+    # mistaken for a complete one, and uniquely so two uploaders racing on the
+    # same object -- an in-process upload and a spool drainer, say -- cannot
+    # interleave their writes into one temp file or delete each other's.
     target = target_dir / object_name
-    partial = target.with_name(f"{object_name}.part")
+    partial = target.with_name(f"{object_name}.{uuid.uuid4().hex}.part")
     written = 0
     try:
         with partial.open("wb") as handle:
             async for chunk in request.stream():
+                if decompressor is not None:
+                    try:
+                        # Bounded so one chunk of a gzip bomb cannot be expanded
+                        # in memory before the ceiling below gets to reject it;
+                        # zlib's ratio tops out near 1032:1, which turns a 64 KiB
+                        # socket read into ~66 MB.
+                        chunk = decompressor.decompress(chunk, MAX_UPLOAD_BYTES - written + 1)
+                    except zlib.error as error:
+                        raise HTTPException(400, f"Malformed gzip body: {error}") from error
+                    if decompressor.unconsumed_tail:
+                        raise HTTPException(413, "Object exceeds the 128 MiB local MVP limit")
+                if not chunk:
+                    continue
                 written += len(chunk)
                 if written > MAX_UPLOAD_BYTES:
                     raise HTTPException(413, "Object exceeds the 128 MiB local MVP limit")
                 handle.write(chunk)
+            if decompressor is not None:
+                try:
+                    tail = decompressor.flush()
+                except zlib.error as error:
+                    raise HTTPException(400, f"Malformed gzip body: {error}") from error
+                if tail:
+                    written += len(tail)
+                    if written > MAX_UPLOAD_BYTES:
+                        raise HTTPException(413, "Object exceeds the 128 MiB local MVP limit")
+                    handle.write(tail)
+                # `flush()` does not raise on a stream that simply stops early:
+                # the CRC and length trailer are never reached, so nothing
+                # disagrees. Without this check a truncated body is answered 204
+                # and renamed over a previously verified object -- destroying
+                # good data with unverified data, which is worse than the
+                # identity path, where a short body dies as a ClientDisconnect.
+                if not decompressor.eof:
+                    raise HTTPException(400, "Truncated gzip body")
         partial.replace(target)
     finally:
         partial.unlink(missing_ok=True)

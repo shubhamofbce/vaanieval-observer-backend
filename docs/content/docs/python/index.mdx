@@ -114,9 +114,9 @@ vaani = VaaniObserver(
       default: '[]',
     },
     upload: {
-      description: 'Upload behaviour.',
+      description: 'Upload behaviour: retries, per-request timeout_s, and gzip compress.',
       type: 'dict',
-      default: 'retries=3',
+      default: 'retries=3, timeout_s=30.0, compress=True',
     },
     strict: {
       description: 'Raise on instrumentation errors instead of degrading silently.',
@@ -176,12 +176,17 @@ Closes open spans, composes stereo audio, writes `manifest.json` last.
 ### Upload
 
 ```python
-await vaani.upload_package(finalized)     # async
-vaani.upload_package_sync(finalized)      # sync
+await vaani.upload_package(finalized)               # async
+vaani.upload_package_sync(finalized)                # sync
+await vaani.upload_package(finalized, timeout=90)   # budget for the whole upload
 ```
 
 Both require `endpoint` and `api_key`. If you skip this, the package simply stays
 on disk.
+
+`timeout` bounds the *entire* upload — every object and every retry — so a slow
+network cannot hang a shutdown hook indefinitely. Whatever fails stays on the
+spool; ship it out of band with `python -m vaani_observer.drain`.
 
 </Step>
 
@@ -228,8 +233,9 @@ Observer methods:
 | `rule_for(endpoint_id)` | Look up a configured rule |
 | `observe_websocket(...)` | Observe a socket |
 | `uninstall_instrumentation()` | Restore original client methods |
-| `upload_package(finalized)` | Async upload |
-| `upload_package_sync(finalized)` | Blocking upload |
+| `upload_package(finalized, timeout=None)` | Async upload |
+| `upload_package_sync(finalized, timeout=None)` | Blocking upload |
+| `VaaniObserver.from_env(**overrides)` | Build from `VAANI_*`, or `None` when disabled |
 
 ## Async and sync
 
@@ -254,9 +260,10 @@ Recording problems surface as `capture_status` counters in the manifest —
 Set `strict=True` in staging so those failures raise.
 
 <Callout type="warn">
-  Spool directories are **not** removed after a successful upload. Add a cleanup
-  sweep of `.vaani-spool` to your deployment, or audio will accumulate on your
-  agent hosts indefinitely.
+  Spool directories are **not** removed after a successful `upload_package()`.
+  Add a cleanup sweep of `.vaani-spool` to your deployment, or run
+  `python -m vaani_observer.drain` — it ships anything still pending and purges
+  what the dashboard has verified.
 </Callout>
 
 ## Next

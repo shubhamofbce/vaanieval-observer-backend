@@ -634,7 +634,7 @@ def test_rollup_failure_call_counts_are_flagged_as_an_upper_bound(client, api, m
         assert item["calls"] <= total_calls, item["fingerprint"]
 
 
-def test_only_one_process_can_hold_the_maintenance_lease(api):
+def test_only_one_process_can_hold_the_maintenance_lease(api, data_dir):
     """Two workers starting together both saw an empty lease and both claimed it.
 
     Read-then-write is not a claim, it is a suggestion. Every uvicorn worker

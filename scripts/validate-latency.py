@@ -38,6 +38,10 @@ TOLERANCE_MS = 0.51
 ENDPOINT_POSITION_TOLERANCE_MS = 1000
 TURN_FINAL_REASONS = {"endpointing", "utterance_end", "speech_final", "final"}
 FORCED_FLUSH_REASONS = {"timeout", "flush", "forced", "close", "eof"}
+# Mirrors `app.latency.WORD_CLOCK_TOLERANCE_MS`. Restated rather than imported:
+# this script is an independent recomputation, so it deliberately shares no code
+# with the module it checks - only the documented rule.
+WORD_CLOCK_TOLERANCE_MS = 250
 
 # Every production aggregate the payload publishes, mapped to the per-turn field
 # it must be derivable from. Listing them explicitly means a newly added block
@@ -352,6 +356,14 @@ def validate_session(session: str, findings: Findings) -> dict:
         if listen_start is None:
             listen_start = op.get("started_at_ms")
         declared_end = speech_end_at if speech_end_at is not None else op.get("ended_at_ms")
+        # A word cannot start before the recognizer began listening. When it
+        # appears to, the word timestamps are on a different clock than the
+        # milestones and their difference is not a measurement. Kept identical
+        # to `latency.speech_window`, since this file's job is to recompute the
+        # published numbers from raw evidence, not to invent a second rule.
+        if (first_word is not None and isinstance(listen_start, (int, float))
+                and first_word < listen_start - WORD_CLOCK_TOLERANCE_MS):
+            first_word = None
         start = first_word if first_word is not None else listen_start
         end = last_word if last_word is not None else declared_end
         from_words = first_word is not None and last_word is not None
@@ -489,7 +501,13 @@ def validate_session(session: str, findings: Findings) -> dict:
                     # independent evidence, so a genuine zero there stands.
                     reported_zero = (field == "endpoint_delay_ms"
                                      and milestone_field(op, "end_of_utterance", "transcription_delay_ms") == 0)
-                    findings.check((from_words and speech_end_at is not None) or reported_zero, session,
+                    # `endpoint_position_error_ms` compares the declared end of
+                    # speech to the LAST word, so a rejected first-word clock
+                    # does not weaken it. Requiring the full word region here
+                    # would flag a genuinely evidenced zero.
+                    words_independent = (last_word is not None if field == "endpoint_position_error_ms"
+                                         else from_words)
+                    findings.check((words_independent and speech_end_at is not None) or reported_zero, session,
                                    "invariant", f"turn[{turn_id}].{field}",
                                    "reports exactly 0 ms without word timestamps and a recorded "
                                    "speech-end to prove it - both operands most likely collapsed "

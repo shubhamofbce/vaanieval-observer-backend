@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>Vaani Observer</title>
+  <title>Dashboard · Vaani Observer</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230d1526'/%3E%3Cg fill='%2359d3ab'%3E%3Crect x='6' y='13' width='3' height='6' rx='1.5'/%3E%3Crect x='12' y='8' width='3' height='16' rx='1.5'/%3E%3Crect x='18' y='11' width='3' height='10' rx='1.5'/%3E%3Crect x='24' y='14' width='3' height='4' rx='1.5'/%3E%3C/g%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -16,9 +16,10 @@
     (function(){try{var t=localStorage.getItem('vaani.theme');if(!t)t=matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';document.documentElement.setAttribute('data-theme',t);}catch(e){}})();
   </script>
   <link rel="stylesheet" href="/assets/styles.css">
+  <link rel="stylesheet" href="/assets/dashboard.css">
 </head>
-<body>
-  <a class="skip-link" href="#call">Skip to call detail</a>
+<body class="board-page">
+  <a class="skip-link" href="#main">Skip to dashboard</a>
 
   <div class="workspace" data-workspace>
   <aside class="sidebar" id="sidebar" aria-label="Vaani Observer">
@@ -40,34 +41,31 @@
       </button>
     </div>
   </aside>
-  <div class="shell" id="shell">
-    <nav class="rail" aria-label="Recorded calls">
-      <div class="rail-head">
-        <h2>Calls <span class="chip" id="session-count" aria-live="polite"></span></h2>
-        <button type="button" class="rail-toggle" id="rail-toggle" aria-expanded="true" aria-controls="rail-panel" title="Hide the call list  ·  b" aria-label="Hide the call list">
-          <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path fill="currentColor" d="M10.03 3.47a.75.75 0 0 1 0 1.06L6.56 8l3.47 3.47a.75.75 0 1 1-1.06 1.06L4.97 8.53a.75.75 0 0 1 0-1.06l4-4a.75.75 0 0 1 1.06 0Z"/></svg>
-        </button>
-      </div>
-      <div class="rail-panel" id="rail-panel">
-        <div class="rail-search">
-          <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path fill="currentColor" d="M7 2a5 5 0 1 1-3.2 8.85l-2.32 2.33a.75.75 0 0 1-1.06-1.06l2.33-2.33A5 5 0 0 1 7 2Zm0 1.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"/></svg>
-          <input type="search" id="session-search" placeholder="Filter by agent or id" aria-label="Filter calls by agent or session id" title="j / k move between calls  ·  / focuses this box  ·  b hides the list" autocomplete="off">
+    <main class="board" id="main" tabindex="-1">
+      <form class="filters" id="filters" aria-label="Dashboard filters"></form>
+      <div class="board-body" id="board-body"></div>
+    </main>
+  </div>
+
+  <div class="drawer" id="drawer" hidden role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+    <div class="drawer-backdrop" data-close></div>
+    <div class="drawer-panel">
+      <header class="drawer-head">
+        <div>
+          <h2 id="drawer-title">Calls</h2>
+          <p class="drawer-sub" id="drawer-sub"></p>
         </div>
-        <div id="sessions" class="session-list" role="group" aria-label="Recorded calls"></div>
-        <p class="rail-agent" id="rail-agent" hidden></p>
-        <p class="rail-note" id="rail-note" hidden></p>
-      </div>
-    </nav>
-
-    <main id="call" class="call" tabindex="-1"></main>
-  </div>
+        <button type="button" class="btn ghost" data-close aria-label="Close">Close</button>
+      </header>
+      <div class="drawer-body" id="drawer-body"></div>
+    </div>
   </div>
 
-  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
   <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
   <script src="/assets/nav.js"></script>
-  <script src="/assets/app.js"></script>
+  <script src="/assets/dashboard.js"></script>
   <script src="/assets/theme.js"></script>
 </body>
 </html>

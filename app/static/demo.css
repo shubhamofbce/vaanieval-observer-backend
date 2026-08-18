@@ -1,0 +1,376 @@
+/* The public demo's own chrome.
+ *
+ * This file loads only when VAANI_DEMO_MODE is on, so nothing here can change
+ * what a customer's own deployment looks like. It carries two jobs: say plainly
+ * that this is sample data on a fixed date, and keep a visitor who arrived from
+ * vaanieval.com inside the same brand — same typeface, same green, same mark,
+ * and a way back.
+ */
+
+:root {
+  /* Matches the landing header exactly. The two are seen seconds apart, and a
+     22px difference in header height is the kind of mismatch that reads as
+     "different product" without the visitor being able to say why. */
+  --demo-bar-h: 58px;
+  /* The landing page's own button treatment, so the CTA a visitor clicked on
+     the marketing site is visually the same control here. */
+  --demo-cta: linear-gradient(180deg, var(--accent-2), var(--accent));
+}
+
+body {
+  font-family: var(--sans);
+  padding-top: var(--demo-bar-h);
+}
+
+/* One face across both surfaces. Clinic carries hierarchy with weight and
+   size rather than a second display family, so headings stay in --sans. */
+:where(h1, h2, h3, .brand-name, .demo-word) {
+  font-family: var(--sans);
+  letter-spacing: -0.01em;
+}
+
+.demo-bar {
+  position: fixed;
+  inset: 0 0 auto;
+  z-index: 60;
+  height: var(--demo-bar-h);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  /* Deliberately not the landing page's centred 1200px inset: the console
+     below is full-bleed, so centring only the bar would leave the mark
+     floating away from the app's own left edge. Matching the height, the mark
+     and the type is what carries the brand here; matching the gutter would
+     break the alignment it is meant to create. */
+  padding: 0 16px;
+  background: var(--float-bg-soft);
+  backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--line);
+}
+
+.demo-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  text-decoration: none;
+  color: var(--text);
+  flex: none;
+}
+
+.demo-logo {
+  width: 27px;
+  height: 27px;
+  border-radius: 7px;
+  background: var(--scrim-solid);
+  overflow: hidden;
+  flex: none;
+}
+
+/* The source mark is a square logo with its own padding baked in; the landing
+   header scales it up inside the clip so the glyph, not the margin, fills the
+   tile. Matching that transform is what makes the two headers read as one. */
+.demo-logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scale(1.75);
+  display: block;
+}
+
+.demo-word { font-size: 17px; font-weight: 800; letter-spacing: -0.015em; }
+.demo-word span { color: var(--accent); }
+
+.demo-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* Must be allowed to collapse: it is the only element in the bar that can
+     give up width, and without an explicit shrink the CTA is pushed past the
+     right edge on any viewport narrower than the full sentence. */
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.demo-tag {
+  flex: none;
+  font: 600 10.5px/1 var(--sans);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--banner-info-ink);
+  background: var(--pill-accent-bg);
+  border: 1px solid var(--pill-accent-line);
+  border-radius: 999px;
+  padding: 4px 8px;
+}
+
+.demo-note-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.demo-actions { margin-left: auto; display: flex; align-items: center; gap: 9px; flex: none; }
+/* The switch is a setting, not one of the bar's actions, so it gets room to
+   sit apart from the links and the booking button beside it. */
+.demo-actions .theme-switch { margin-right: 7px; }
+
+.demo-link {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-decoration: none;
+  padding: 6px 9px;
+  border-radius: 9px;
+}
+
+.demo-link:hover { color: var(--text); background: var(--bg-hover); }
+
+.demo-cta {
+  font-size: 12.5px;
+  font-weight: 750;
+  color: var(--accent-ink);
+  text-decoration: none;
+  padding: 7px 13px;
+  border-radius: 10px;
+  background: var(--demo-cta);
+  box-shadow: 0 10px 30px rgb(var(--accent-rgb) / 22%);
+  white-space: nowrap;
+}
+
+.demo-cta:hover { filter: brightness(1.06); }
+
+.demo-bar :where(a):focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 2px;
+}
+
+/* The two app shells size themselves against the viewport, so the bar has to
+   be taken out of their height rather than laid over their content. */
+body { height: 100dvh; }
+.workspace, .shell { max-height: calc(100dvh - var(--demo-bar-h)); }
+
+/* Controls that would write to an immutable snapshot. They are removed, not
+   disabled: a greyed-out button in a demo reads as a product that is broken,
+   where an absent one reads as a product that is scoped. */
+[data-demo-hidden] { display: none !important; }
+
+@media (width <= 860px) {
+  .demo-note-text, .demo-link { display: none; }
+  /* The tag and the CTA compete for the same row on a phone, and the CTA is
+     the one that must survive intact. */
+  .demo-tag { display: none; }
+  .demo-word { font-size: 17px; }
+  .demo-cta { padding: 8px 12px; font-size: 12.5px; }
+  .demo-bar { gap: 10px; padding: 0 12px; }
+  .demo-actions { margin-left: auto; }
+}
+
+/* Orientation control and dialog.
+   -------------------------------------------------------------------------
+   The framing that used to sit in a band above the KPIs now opens from the
+   header. The trigger is sized as a quiet tertiary control so it never
+   competes with "Book a call", and carries an unread dot until it is opened
+   once, which is what points a first-time visitor at it without spending any
+   of the page on the sentence. */
+.demo-guide-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 11px 6px 8px;
+  border: 1px solid rgb(var(--accent-rgb) / 26%);
+  border-radius: 999px;
+  background: rgb(var(--accent-rgb) / 8%);
+  color: var(--text);
+  font: 600 12.5px/1 var(--sans, system-ui, sans-serif);
+  cursor: pointer;
+}
+
+.demo-guide-btn:hover { background: rgb(var(--accent-rgb) / 15%); border-color: rgb(var(--accent-rgb) / 44%); }
+
+.demo-guide-icon {
+  display: grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.demo-guide-btn.is-new::after {
+  content: "";
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--demo-cta);
+  box-shadow: 0 0 0 3px rgb(var(--accent-rgb) / 22%);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .demo-guide-btn.is-new::after { animation: demo-guide-pulse 2.4s ease-in-out infinite; }
+}
+
+@keyframes demo-guide-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgb(var(--accent-rgb) / 22%); }
+  50% { box-shadow: 0 0 0 6px rgb(var(--accent-rgb) / 6%); }
+}
+
+.demo-guide-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--scrim-backdrop);
+  backdrop-filter: blur(2px);
+}
+
+.demo-guide-card {
+  position: relative;
+  width: min(560px, 100%);
+  padding: 24px 26px;
+  border: 1px solid rgb(var(--accent-rgb) / 24%);
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgb(var(--accent-rgb) / 7%), rgb(var(--accent-rgb) / 2%)),
+    var(--surface, var(--bg-raised));
+  box-shadow: 0 30px 80px rgb(var(--scrim-rgb) / 55%);
+}
+
+.demo-guide-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.demo-guide-close:hover { background: var(--bg-hover); color: var(--text); }
+
+.demo-guide-title {
+  margin: 0 34px 10px 0;
+  font-family: var(--sans);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.demo-guide-text {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--text-dim);
+}
+
+.demo-guide-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  margin-top: 18px;
+}
+
+.demo-guide-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 15px;
+  border-radius: 10px;
+  background: var(--demo-cta);
+  color: var(--accent-ink, var(--accent-ink));
+  font-size: 13px;
+  font-weight: 750;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.demo-guide-cta:hover { filter: brightness(1.06); }
+
+.demo-guide-hint {
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+/* Closing prompt on a call, at the point where the visitor has just seen the
+   proof: the waveform, the transcript and the trace that explains the flag. */
+.demo-close-cta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 18px;
+  margin: 18px 0 8px;
+  padding: 16px 20px;
+  border: 1px solid rgb(var(--accent-rgb) / 20%);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgb(var(--accent-rgb) / 6%), transparent);
+}
+
+.demo-close-text {
+  font-size: 13.5px;
+  color: var(--text);
+}
+
+@media (width <= 860px) {
+  .demo-close-cta { flex-direction: column; align-items: flex-start; }
+  /* The label would push the booking CTA off the bar, so the trigger keeps
+     only its icon — the same affordance every help control collapses to. */
+  .demo-guide-label { display: none; }
+  .demo-guide-btn { padding: 7px; }
+  .demo-guide-card { padding: 20px; }
+  .demo-guide-title { font-size: 16px; }
+}
+
+/* Keyboard focus.
+   -------------------------------------------------------------------------
+   Some controls in the console suppress the UA outline, which is survivable
+   for a daily user who knows the layout and not for a first-time visitor
+   tabbing through a public page. Scoped to :focus-visible so pointer users
+   never see a ring they did not ask for. */
+.demo-bar :where(a, button):focus-visible,
+body :where(a, button, input, select, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Small screens.
+   -------------------------------------------------------------------------
+   The console is a working instrument: a waveform, a transcript and a trace
+   read side by side. It degrades honestly on a phone rather than pretending,
+   so the visitor is told where the full thing lives instead of concluding the
+   product is cramped. */
+.demo-desktop-note {
+  display: none;
+  margin: 0 0 12px;
+  padding: 11px 14px;
+  border: 1px solid rgb(var(--accent-rgb) / 20%);
+  border-radius: 12px;
+  background: rgb(var(--accent-rgb) / 6%);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+@media (width <= 860px) {
+  .demo-desktop-note { display: block; }
+}
+
+/* The STT workspace carries its own product wordmark in its top bar. Under the
+   demo chrome that stacks two different brand marks in the first 100px, which
+   reads as two products bolted together rather than one. The outer VaaniEval
+   bar is the one that has to stay, so the inner one goes - in demo mode only,
+   since the shipped product has no bar above it. */
+.top .brand { display: none; }

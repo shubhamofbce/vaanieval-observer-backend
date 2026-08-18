@@ -227,7 +227,10 @@
     }
     if (ctx[1]) ctx[1].textContent = hasChallenger ? chalLabel : 'not run';
     if (ctx[2]) ctx[2].textContent = `${D.run.id} \u00b7 ${D.run.state}`;
-    setText('.mockflag', `Live recorded data \u00b7 run ${D.run.state}`);
+    // The pill sat above a body that says plainly the reference is another STT
+    // model rather than human ground truth. "run ready" read as a stronger
+    // claim than the page itself makes, so it names the method instead.
+    setText('.mockflag', 'Live recorded data \u00b7 challenger via replay');
     document.title = `STT evaluation \u00b7 ${prodLabel}${hasChallenger ? ` vs ${chalLabel}` : ''}`;
   }
 

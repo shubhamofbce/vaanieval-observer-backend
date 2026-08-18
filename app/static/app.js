@@ -137,7 +137,7 @@ function parseDate(value) {
 function relativeTime(value) {
   const date = parseDate(value);
   if (!date) return 'unknown time';
-  const seconds = Math.round((Date.now() - date.getTime()) / 1000);
+  const seconds = Math.round((window.vaaniNow() - date.getTime()) / 1000);
   if (Math.abs(seconds) < 45) return 'just now';
   const units = [['minute', 60], ['hour', 3600], ['day', 86400], ['week', 604800], ['month', 2629800], ['year', 31557600]];
   let [unit, size] = units[0];
@@ -149,15 +149,17 @@ function relativeTime(value) {
 /** A rail-width age. The full "28 minutes ago" gets clipped to "28 minutes" in
  *  a dense row, which reads as a duration — and the column beside it really is
  *  one. A compact form is unambiguous and leaves the agent name room to breathe. */
-function compactAge(value) {
+/** The day a call belongs to, as the rail's group heading. Naming the day once
+ *  per group is cheaper than stamping "1d" on all sixty-eight rows, and it is
+ *  the only thing that told two 21:40 calls apart. */
+function dayLabel(value) {
   const date = parseDate(value);
-  if (!date) return '—';
-  const seconds = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
-  if (seconds < 60) return 'now';
-  for (const [unit, size] of [['m', 60], ['h', 3600], ['d', 86400]]) {
-    if (seconds < size * (unit === 'm' ? 60 : unit === 'h' ? 24 : 7)) return `${Math.floor(seconds / size)}${unit}`;
-  }
-  return `${Math.floor(seconds / 604800)}w`;
+  if (!date) return 'Unknown date';
+  const start = (input) => new Date(input.getFullYear(), input.getMonth(), input.getDate()).getTime();
+  const days = Math.round((start(window.vaaniDate()) - start(date)) / 86400000);
+  if (days === 0) return 'Today';
+  if (days === 1) return 'Yesterday';
+  return date.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: days > 300 ? 'numeric' : undefined });
 }
 
 function absoluteTime(value) {
@@ -623,7 +625,7 @@ async function loadSessions({ keepSelection = true, reload = false } = {}) {
     // An overlapping refresh must not let the older response win.
     if (token !== listToken) return;
     state.sessions = sessions;
-    $('#conn-state').textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    $('#conn-state').textContent = `Updated ${window.vaaniDate().toLocaleTimeString()}`;
     $('#conn-state').dataset.state = 'ok';
     renderRail();
     const requested = readLocation();
@@ -676,29 +678,52 @@ function renderRail() {
   // as many as the screen allows; the full id and timestamp stay on the title
   // so nothing is lost, it is just no longer shouting.
   //
-  // Repeating one agent name down every row of a single-agent deployment spends
-  // the widest column on the one field that cannot tell two calls apart. When
-  // there is nothing to disambiguate, show the clock time instead, which is what
-  // a reviewer correlates against their own logs.
-  const agents = new Set(state.sessions.map((item) => item.agent_id || 'Untitled agent'));
-  const manyAgents = agents.size > 1;
+  // The clock time leads, because it is the field that actually tells two calls
+  // apart and the one a reviewer correlates against their own logs. The agent
+  // name is printed only on the calls that are *not* the deployment's usual
+  // agent: repeating "india-travel-agent" down sixty-three rows spends the
+  // widest column in the app to say nothing, and hides the five rows where the
+  // agent is the whole story. The usual one is named once, under the filter.
+  const counts = new Map();
+  for (const item of state.sessions) {
+    const name = item.agent_id || 'Untitled agent';
+    counts.set(name, (counts.get(name) || 0) + 1);
+  }
+  const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  const usual = ranked.length > 1 && ranked[0][1] > 1 ? ranked[0][0] : null;
+  const railAgent = $('#rail-agent');
+  if (railAgent) {
+    railAgent.hidden = !usual;
+    if (usual) {
+      railAgent.textContent = `mostly ${usual}`;
+      railAgent.title = ranked.map(([name, count]) => `${name} — ${count}`).join('\n');
+    }
+  }
 
+  let day = null;
   for (const item of list) {
     const started = item.started_at || item.created_at;
     const errors = item.error_count || 0;
+    const agent = item.agent_id || 'Untitled agent';
+    const odd = usual != null && agent !== usual;
+    const itemDay = dayLabel(started);
+    if (itemDay !== day) {
+      day = itemDay;
+      host.append(h('p', { class: 'session-day', text: itemDay }));
+    }
     host.append(h('button', {
       type: 'button',
       class: 'session',
+      dataset: { agents: odd ? 'many' : 'one' },
       'aria-current': String(item.id === state.sessionId),
-      title: `${item.agent_id || 'Untitled agent'}\n${item.id}\n${absoluteTime(started)}\n${item.status}${item.outcome ? ` · ${item.outcome}` : ''}${errors ? `\n${errors} failed operation${errors === 1 ? '' : 's'}` : ''}`,
+      title: `${agent}\n${item.id}\n${absoluteTime(started)}\n${item.turn_count ?? 0} turn${item.turn_count === 1 ? '' : 's'} · ${item.status}${item.outcome ? ` · ${item.outcome}` : ''}${errors ? `\n${errors} failed operation${errors === 1 ? '' : 's'}` : ''}`,
       onClick: () => selectSession(item.id),
     },
       h('span', { class: 'session-dot', dataset: { status: item.status } }),
-      h('span', { class: 'session-agent', text: manyAgents ? (item.agent_id || 'Untitled agent') : clockTime(started) }),
+      h('span', { class: 'session-time num', text: clockTime(started) }),
+      odd ? h('span', { class: 'session-agent', text: agent }) : null,
       h('span', { class: 'session-errs', text: errors ? String(errors) : '' }),
-      h('span', { class: 'session-turns', text: `${item.turn_count ?? 0}t` }),
       h('span', { class: 'session-dur num', text: duration(item.duration_ms) || '—' }),
-      h('span', { class: 'session-when', text: compactAge(started) }),
     ));
   }
 }
@@ -831,6 +856,11 @@ function applyViewState(requested = {}, { render = false } = {}) {
 function setSelection(kind, id, { scroll = false } = {}) {
   state.selection = id == null ? null : { kind, id };
   syncSelection({ scroll });
+  // Until the audio is actually running there is no playhead to follow, so the
+  // live panel shows what the reviewer picked instead. Refreshing it after
+  // `syncSelection` keeps its rows from being rebuilt out from under the marks
+  // that call has just written.
+  ui.liveTrace?.refresh();
   renderInspector();
   writeLocation();
 }
@@ -921,6 +951,12 @@ function teardownCall() {
   ui.transcriptScroller = null;
   ui.transcriptFollowButton = null;
   ui.transcriptList = null;
+  ui.transcriptCard = null;
+  ui.transcriptTools = null;
+  ui.deckTabs = null;
+  ui.deckTabTools = null;
+  ui.deckPanels = null;
+  ui.liveTrace = null;
   ui.liveTurnId = null;
   ui.togglePlay = null;
   ui.chooseAudioTrack = null;
@@ -962,70 +998,27 @@ function renderCall(session) {
   const slowest = turns.filter((turn) => turn.time_to_first_audio_ms != null)
     .sort((a, b) => b.time_to_first_audio_ms - a.time_to_first_audio_ms)[0];
 
+  // One line, because a header is wayfinding and wayfinding is not data. Who,
+  // when, how long, how it ended — everything else this used to carry (the
+  // relative time beside the absolute one, the word "outcome:", a 36-character
+  // uuid) said the same thing twice or said nothing.
+  const outcome = manifest.outcome || session.outcome || 'unknown';
   const head = h('div', { class: 'call-head' },
-    h('div', {},
+    h('div', { class: 'call-id' },
       h('h1', { text: manifest.agent_id || session.agent_id || 'Untitled agent' }),
       h('div', { class: 'call-sub' },
-        h('span', { text: absoluteTime(started) }),
+        h('span', { text: absoluteTime(started), title: relativeTime(started) }),
         h('span', { class: 'dot-sep' }),
-        h('span', { text: relativeTime(started) }),
-        h('span', { class: 'dot-sep' }),
-        h('span', { class: 'num', text: duration(manifest.duration_ms) || 'unknown length' }),
-        h('span', { class: 'dot-sep' }),
-        h('span', { text: `outcome: ${manifest.outcome || session.outcome || 'unknown'}` }),
+        h('span', {
+          class: 'status-pill', dataset: { status: outcome === 'completed' ? 'ready' : outcome },
+          title: 'How the call ended', text: outcome,
+        }),
+        // A capture status only earns pixels when it is not the happy path.
+        session.status && session.status !== 'ready'
+          ? h('span', { class: 'status-pill', dataset: { status: session.status }, text: session.status })
+          : null,
       ),
     ),
-    h('div', { class: 'card-tools' },
-      h('button', {
-        type: 'button', class: 'copy-id', title: 'Copy session id',
-        onClick: () => copy(session.id, 'Session id'),
-      },
-        h('span', { text: session.id }),
-        h('span', { text: '⧉' }),
-      ),
-      errors.length
-        ? h('button', {
-          type: 'button', class: 'status-pill', dataset: { status: 'failed' },
-          title: 'Show only failed operations',
-          onClick: () => jumpToOps({ errorsOnly: true, type: 'all' }),
-          text: `${errors.length} failed op${errors.length === 1 ? '' : 's'}`,
-        })
-        : null,
-      h('span', { class: 'status-pill', dataset: { status: session.status }, text: session.status }),
-    ),
-  );
-
-  // Providers actually exercised by the call — the API leaves `model` null on
-  // every span, so the endpoint id is the only honest identity we have.
-  const providers = [...new Set(operations.map((op) => op.endpoint_id || op.provider).filter(Boolean))];
-  // `model` is null on every span, but the streamed completion names it, so the
-  // reconstructed transcript is the only place the real model shows up.
-  const models = [...new Set([
-    ...operations.map((op) => op.model),
-    ...(state.transcript?.entries || []).map((entry) => entry.completion?.model),
-  ].filter(Boolean))];
-  const providerRow = providers.length ? h('div', { class: 'provider-row' },
-    h('span', { class: 'provider-label', text: 'Providers' }),
-    ...providers.map((id) => h('button', {
-      type: 'button', class: 'chip chip-action', text: id,
-      title: `Search operations for ${id}`,
-      onClick: () => jumpToOps({ query: id }),
-    })),
-    models.length
-      ? h('span', { class: 'provider-models', text: `models: ${models.join(', ')}` })
-      : h('span', { class: 'provider-models cell-missing', text: 'no model name recorded on any span' }),
-  ) : null;
-
-  const kpi = (label, value, unit, foot, options = {}) => h(options.onClick ? 'button' : 'div', {
-    type: options.onClick ? 'button' : null,
-    class: 'kpi',
-    dataset: options.tone ? { tone: options.tone } : {},
-    title: options.title || null,
-    onClick: options.onClick || null,
-  },
-    h('span', { class: 'kpi-label', text: label }),
-    h('span', { class: 'kpi-value' }, value, unit ? h('small', { text: unit }) : null),
-    h('span', { class: 'kpi-foot', text: foot }),
   );
 
   const jumpToOps = (patch) => {
@@ -1038,26 +1031,92 @@ function renderCall(session) {
     ui.workbenchBody?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
-  const kpis = h('div', { class: 'kpis' },
-    kpi('Turns', String(turns.length), null, turns.length ? `${operations.length} operations` : 'no turn spans captured'),
-    kpi('Call length', duration(manifest.duration_ms) || '—', null, `${session.recordings?.filter((r) => r.uploaded).length || 0} audio track(s)`),
-    kpi('Response p50', responses.length ? duration(percentile(responses, 0.5)) : '—', null,
-      responses.length ? 'user stops → first audio' : 'needs turns with a first-audio mark',
-      { tone: responses.length ? latencyTone(percentile(responses, 0.5)) : null }),
-    kpi('Response p95', responses.length ? duration(percentile(responses, 0.95)) : '—', null,
-      responses.length ? `over ${responses.length} turn${responses.length === 1 ? '' : 's'}` : 'needs turns with a first-audio mark',
-      { tone: responses.length ? latencyTone(percentile(responses, 0.95)) : null }),
-    kpi('Slowest turn', slowest ? duration(slowest.time_to_first_audio_ms) : '—', null,
-      slowest ? `turn #${slowest.turn_id} — inspect` : 'no timed turns',
-      slowest ? { tone: latencyTone(slowest.time_to_first_audio_ms), title: `Inspect turn #${slowest.turn_id}`, onClick: () => setSelection('turn', slowest.turn_id, { scroll: true }) } : {}),
-    kpi('Failures', String(errors.length), null,
-      errors.length ? 'filter operations' : interrupted.length ? `all ok · ${interrupted.length} interrupted` : 'all operations ok',
-      { tone: errors.length ? 'danger' : null, onClick: errors.length ? () => jumpToOps({ errorsOnly: true, type: 'all' }) : null }),
-    kpi('Tool calls', String(tools.length), null, tools.length ? 'filter operations' : 'none in this call',
-      { onClick: tools.length ? () => jumpToOps({ type: 'tool', errorsOnly: false }) : null }),
+  // Providers actually exercised by the call — the API leaves `model` null on
+  // every span, so the endpoint id is the only honest identity we have.
+  const providers = [...new Set(operations.map((op) => op.endpoint_id || op.provider).filter(Boolean))];
+  // `model` is null on every span, but the streamed completion names it, so the
+  // reconstructed transcript is the only place the real model shows up.
+  const models = [...new Set([
+    ...operations.map((op) => op.model),
+    ...(state.transcript?.entries || []).map((entry) => entry.completion?.model),
+  ].filter(Boolean))];
+
+  /* These seven numbers used to be a 204px grid of cards, each with a label, a
+     big number and a caption explaining itself — 204px of chrome above the
+     trace to carry about forty characters of information. As a strip they read
+     left to right in one pass, keep every drill-down they had, and the captions
+     move to the tooltip, where an explanation is only in the way if you ask
+     for it. */
+  const metric = (label, value, foot, options = {}) => h(options.onClick ? 'button' : 'div', {
+    type: options.onClick ? 'button' : null,
+    class: 'metric',
+    dataset: { metric: label.toLowerCase(), ...(options.tone ? { tone: options.tone } : {}) },
+    title: [options.title, foot].filter(Boolean).join(' — ') || null,
+    onClick: options.onClick || null,
+  },
+    h('span', { class: 'metric-label', text: label }),
+    h('span', { class: 'metric-value', text: value }),
   );
 
-  const legend = h('p', { class: 'kpi-legend' }, `Response: caller stops → first audio · thresholds ${duration(WARN_MS)} / ${duration(SLOW_MS)}`);
+  const p50 = responses.length ? percentile(responses, 0.5) : null;
+  const p95 = responses.length ? percentile(responses, 0.95) : null;
+  const strip = h('div', { class: 'metric-strip' },
+    metric('Turns', String(turns.length), turns.length ? `${operations.length} operations` : 'no turn spans captured'),
+    metric('Length', duration(manifest.duration_ms) || '—', `${session.recordings?.filter((r) => r.uploaded).length || 0} audio track(s)`),
+    metric('Typical wait', p50 != null ? duration(p50) : '—',
+      responses.length ? `median (p50) caller stops → first audio, thresholds ${duration(WARN_MS)} / ${duration(SLOW_MS)}` : 'needs turns with a first-audio mark',
+      { tone: p50 != null ? latencyTone(p50) : null }),
+    metric('Worst wait', p95 != null ? duration(p95) : '—',
+      responses.length ? `p95 over ${responses.length} turn${responses.length === 1 ? '' : 's'} — 1 in 20 waited at least this long` : 'needs turns with a first-audio mark',
+      { tone: p95 != null ? latencyTone(p95) : null }),
+    metric('Slowest', slowest ? duration(slowest.time_to_first_audio_ms) : '—',
+      slowest ? null : 'no timed turns',
+      slowest
+        ? { tone: latencyTone(slowest.time_to_first_audio_ms), title: `Inspect turn #${slowest.turn_id}`, onClick: () => setSelection('turn', slowest.turn_id, { scroll: true }) }
+        : {}),
+    metric('Failures', String(errors.length),
+      errors.length ? 'filter operations' : interrupted.length ? `all ok · ${interrupted.length} interrupted` : 'all operations ok',
+      { tone: errors.length ? 'danger' : null, onClick: errors.length ? () => jumpToOps({ errorsOnly: true, type: 'all' }) : null }),
+    metric('Tools', String(tools.length), tools.length ? 'filter operations' : 'none in this call',
+      { onClick: tools.length ? () => jumpToOps({ type: 'tool', errorsOnly: false }) : null }),
+    providers.length
+      ? h('div', { class: 'metric metric-providers', dataset: { metric: 'providers' } },
+        h('span', { class: 'metric-label', text: providers.length === 1 ? 'Provider' : 'Providers' }),
+        h('span', { class: 'metric-chips' },
+          ...providers.slice(0, 2).map((id) => h('button', {
+            type: 'button', class: 'chip chip-action', text: id,
+            title: `Search operations for ${id}${models.length ? ` · models: ${models.join(', ')}` : ' · no model name recorded on any span'}`,
+            onClick: () => jumpToOps({ query: id }),
+          })),
+          providers.length > 2
+            ? h('span', { class: 'chip', text: `+${providers.length - 2}`, title: providers.slice(2).join(', ') })
+            : null,
+        ),
+      )
+      : null,
+  );
+
+  // The metrics belong in the header band, not in a strip under it: a call is
+  // read "who, when, how well" in one pass, and a separate 48px row for the
+  // numbers pushed the waveform — the thing the reviewer came to use — below
+  // the fold to say nothing the header could not have said on the same line.
+  head.append(strip, h('div', { class: 'card-tools' },
+    errors.length
+      ? h('button', {
+        type: 'button', class: 'status-pill', dataset: { status: 'failed' },
+        title: 'Show only failed operations',
+        onClick: () => jumpToOps({ errorsOnly: true, type: 'all' }),
+        text: `${errors.length} failed`,
+      })
+      : null,
+    h('button', {
+      type: 'button', class: 'copy-id', title: `Copy session id — ${session.id}`,
+      onClick: () => copy(session.id, 'Session id'),
+    },
+      h('span', { text: `${session.id.slice(0, 8)}⋯` }),
+      h('span', { text: '⧉' }),
+    ),
+  ));
 
   const warnings = captureWarnings(session);
   const banner = warnings.length ? h('div', { class: 'banner', dataset: { tone: session.status === 'partial' ? 'danger' : 'warn' } },
@@ -1071,36 +1130,169 @@ function renderCall(session) {
     h('div', { class: 'col' }, buildWorkbenchCard(session)),
     h('div', { class: 'col col-side' }, buildInspectorCard()),
   );
+  // The inspector is a detail view of a selection, so with no selection it is
+  // 400px of "Nothing selected" pinned beside the table that makes selections.
+  // It appears when there is something to inspect and stands down when there
+  // is not; `renderInspector` owns the flag.
+  ui.columns = columns;
 
   const player = buildAudioCard(session);
   player.classList.add('call-player');
   const transcript = buildTranscriptSection(session);
-  // Player and transcript are one surface, not two stacked cards. Stacked, the
-  // sticky player pins itself over the transcript the moment the reviewer
-  // scrolls, so the words can never be read while the audio stays in reach.
-  // The slot lets the transcript fill the player's height without its own
-  // content setting the height of the row.
-  const deck = h('div', { class: 'review-deck' }, player, h('div', { class: 'transcript-slot' }, transcript));
-  clear($('#call')).append(...[head, deck, providerRow, banner, kpis, legend, columns].filter(Boolean));
-  trackDeckHeight(deck);
+  const liveTrace = buildLiveTraceCard(session);
+  // One review surface: what you can hear on the left, what was said and what
+  // the trace was doing at that instant on the right.
+  //
+  // The transcript used to sit under the player, which made the deck a stack of
+  // three panels and pushed the trace table, the KPIs and the inspector under
+  // the fold. Both right-hand answers now share one column as tabs: each gets
+  // the full height instead of a third of it, and the deck is two panels tall.
+  //
+  // Stacking all of that still costs height, and the deck is pinned, so it
+  // collapses to a single transport bar the moment the reviewer scrolls down to
+  // read anything else. See `wireDeck`.
+  const deck = h('div', { class: 'review-deck' },
+    h('div', { class: 'deck-main' }, player),
+    h('div', { class: 'deck-side' }, buildDeckTabs(transcript, liveTrace)),
+  );
+
+  const deckToggle = h('button', {
+    type: 'button', class: 'icon-btn deck-toggle',
+    onClick: () => ui.toggleDeck?.(),
+  }, glyph(PATH.chevronUp, 14));
+  ui.deckToggle = deckToggle;
+  // The transport bar is where a reviewer's eye already is while listening, so
+  // that is where the collapse control belongs. A call with no recording has no
+  // transport bar, and its deck still collapses, so the control falls back to
+  // the side tab strip rather than disappearing.
+  const playerBar = player.querySelector('.player-bar');
+  if (playerBar) playerBar.append(deckToggle);
+  else ui.deckTabTools?.append(deckToggle);
+  deck.dataset.transport = playerBar ? 'player' : 'transcript';
+
+  clear($('#call')).append(...[head, deck, banner, columns].filter(Boolean));
+  wireDeck(deck);
   renderWorkbench(session);
   renderInspector();
   drawTurnGuides(null);
 }
 
-/** The sticky inspector has to start below the sticky deck, and the deck's
- *  height changes with the player (a live turn chip, a drift note, wrapped
- *  provider chips). CSS cannot read one element's height into another's offset,
- *  so the measurement is published as a variable on the scrollport. It is 0
- *  below 1240px, where the deck stops sticking and nothing needs the offset. */
-function trackDeckHeight(deck) {
+/** How the review deck was last left. This is a view preference rather than
+ *  call state, so it outlives the session and never touches the URL. */
+const DECK_KEY = 'vaani.deck';
+function readDeckPrefs() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(DECK_KEY) || '{}');
+    return { compact: saved.compact === true, sideTab: saved.sideTab === 'turns' ? 'turns' : 'transcript' };
+  } catch { return { compact: false, sideTab: 'transcript' }; }
+}
+function writeDeckPrefs(patch) {
+  try { localStorage.setItem(DECK_KEY, JSON.stringify({ ...readDeckPrefs(), ...patch })); } catch { /* private mode */ }
+}
+
+/** The deck is the scrollport's own sticky header, and a header that keeps a
+ *  waveform, a transcript and a live trace open is a third of the viewport that
+ *  the reviewer cannot scroll away from. Everything below it — the trace table,
+ *  the KPIs, the inspector — was being read through a slot.
+ *
+ *  So the deck has two shapes. At the top of the call it is the full review
+ *  surface. The moment the reviewer scrolls down to look at anything else it
+ *  folds to a single transport bar, roughly 54px, which still plays, still
+ *  scrubs and still names the turn and the span under the playhead. Scrolling
+ *  back to the top restores it.
+ *
+ *  The thresholds are deliberately asymmetric. Collapsing shortens the deck,
+ *  which pulls the content below it upward; with one threshold the resulting
+ *  clamp at the bottom of a short call can drop the scroller back under it and
+ *  the deck flaps open and shut on every frame.
+ *
+ *  A reviewer who overrides the state gets to keep it: an expand while scrolled
+ *  holds until they return to the top, and a collapse holds until they undo it,
+ *  because a reviewer who put the player away meant it. */
+function wireDeck(deck) {
   const host = $('#call');
   const wide = window.matchMedia('(min-width: 1240px)');
+  let compact = readDeckPrefs().compact;
+  let manual = compact ? 'compact' : null;
+
+  // CSS cannot read one element's height into another's offset, and the sticky
+  // inspector has to start below whichever shape the deck is currently in.
+  // It is 0 below 1240px, where the deck stops sticking and nothing needs it.
   const publish = () => host.style.setProperty('--deck-h', wide.matches ? `${Math.round(deck.getBoundingClientRect().height)}px` : '0px');
+
+  const paint = () => {
+    deck.dataset.compact = String(compact);
+    // Folded, the side column is only the "what is playing" line, so the turn
+    // ladder is shown whichever tab was left selected. A global
+    // `[hidden] { display: none !important }` means CSS cannot reveal it —
+    // the fold has to move the panel flags itself.
+    if (ui.deckPanels) {
+      if (compact) {
+        ui.deckPanels.turns.hidden = false;
+        ui.deckPanels.transcript.hidden = true;
+      } else {
+        showDeckTab(readDeckPrefs().sideTab, { silent: true });
+      }
+    }
+    const button = ui.deckToggle;
+    if (!button) return;
+    const label = compact ? 'Expand the player' : 'Collapse the player';
+    button.setAttribute('aria-expanded', String(!compact));
+    button.setAttribute('aria-label', label);
+    button.title = `${label}  ·  c`;
+    button.querySelector('path')?.setAttribute('d', compact ? PATH.chevronDown : PATH.chevronUp);
+  };
+
+  const setCompact = (next) => {
+    if (next === compact) return;
+    compact = next;
+    paint();
+    publish();
+  };
+
+  const onScroll = () => {
+    if (manual === 'compact') return;
+    // Below 1240px the deck scrolls away with the page, so there is nothing to
+    // fold out of the way — folding would only shrink a card as it leaves.
+    if (!wide.matches) return;
+    const top = host.scrollTop;
+    if (manual === 'expanded') {
+      if (top < 40) manual = null;
+      return;
+    }
+    if (compact) { setCompact(top >= 40); return; }
+    // Folding removes its own height from the page, and if that leaves the
+    // scroller clamped back above the unfold threshold the deck flaps open and
+    // shut on every wheel notch. So fold only when what remains still scrolls
+    // clear of that threshold. Comparing against the deck's *whole* height was
+    // too blunt — the folded deck is only about 60px, so most of it comes back
+    // as scrollable page.
+    const maxScroll = host.scrollHeight - host.clientHeight;
+    const reclaimed = Math.max(0, deck.getBoundingClientRect().height - 60);
+    if (top > 120 && maxScroll - reclaimed > 60) setCompact(true);
+  };
+
+  ui.toggleDeck = () => {
+    manual = compact ? 'expanded' : 'compact';
+    setCompact(!compact);
+    // Only a deliberate collapse is remembered. Remembering an expand would
+    // reopen a deck the reviewer only wanted open for one call.
+    writeDeckPrefs({ compact: manual === 'compact' });
+  };
+
+  host.addEventListener('scroll', onScroll, { passive: true });
   const observer = new ResizeObserver(publish);
   observer.observe(deck);
   wide.addEventListener('change', publish);
-  ui.deckMetrics = () => { observer.disconnect(); wide.removeEventListener('change', publish); host.style.removeProperty('--deck-h'); };
+  ui.deckMetrics = () => {
+    observer.disconnect();
+    wide.removeEventListener('change', publish);
+    host.removeEventListener('scroll', onScroll);
+    host.style.removeProperty('--deck-h');
+    ui.toggleDeck = null;
+    ui.deckToggle = null;
+  };
+  paint();
   publish();
 }
 
@@ -1140,8 +1332,29 @@ function buildWorkbenchCard(session) {
     }));
   }
   ui.workbenchTabs = tabs;
+  // The card below used to repeat the selected tab's name and then hang its
+  // filters on a second bar underneath it — two rows of chrome, one of which
+  // said "Trace" directly under a tab reading "Trace". The tools ride on the
+  // tab row instead; `renderWorkbench` lifts them out of whichever card it
+  // just built.
+  ui.workbenchTools = h('div', { class: 'card-tools view-tools' });
   ui.workbenchBody = h('div', { class: 'workbench-body' });
-  return h('section', { class: 'workbench' }, tabs, ui.workbenchBody);
+  return h('section', { class: 'workbench' },
+    h('div', { class: 'view-bar' }, tabs, ui.workbenchTools),
+    ui.workbenchBody,
+  );
+}
+
+/** Moves a workbench card's header controls onto the shared tab bar and drops
+ *  the header itself. A card whose title is the tab you are already on is a
+ *  row of pixels spent saying where you are. */
+function hoistCardTools(card) {
+  clear(ui.workbenchTools);
+  const head = card.querySelector(':scope > .card-head');
+  if (!head) return;
+  const tools = head.querySelector('.card-tools');
+  if (tools) ui.workbenchTools.append(...tools.childNodes);
+  head.remove();
 }
 
 function renderWorkbench(session) {
@@ -1155,11 +1368,13 @@ function renderWorkbench(session) {
   for (const button of ui.workbenchTabs?.querySelectorAll('button') || []) {
     button.setAttribute('aria-selected', String(button.dataset.view === state.callView));
   }
+  let card;
   switch (state.callView) {
-    case 'spans': host.append(buildOperationsCard()); renderOperationRows(); break;
-    case 'stt': host.append(buildSttQualityCard(session)); break;
-    default: host.append(buildTraceCard(session)); renderTraceRows(); break;
+    case 'spans': card = buildOperationsCard(); host.append(card); renderOperationRows(); break;
+    case 'stt': card = buildSttQualityCard(session); host.append(card); break;
+    default: card = buildTraceCard(session); host.append(card); renderTraceRows(); break;
   }
+  hoistCardTools(card);
   syncSelection();
 }
 
@@ -1382,13 +1597,18 @@ function buildTranscriptSection(session) {
     return transcriptSection(body, 0, null, session);
   }
 
-  if (systemPrompt) {
-    body.append(h('details', { class: 'system-prompt' },
+  // The prompt is reference material, not conversation: a permanent 26px row
+  // reading "System prompt · 2970 chars" above every transcript spends deck
+  // height on a fact that belongs in the header. It lives in the body so it
+  // scrolls with the dialogue it precedes, but stays out of the flow until the
+  // header chip asks for it.
+  const prompt = systemPrompt
+    ? h('details', { class: 'system-prompt' },
       h('summary', {}, 'System prompt', h('span', { class: 'tag', text: `${systemPrompt.length} chars` })),
       h('pre', { text: systemPrompt }),
-    ));
-  }
-
+    )
+    : null;
+  if (prompt) body.append(prompt);
   const firstTurn = (session.turns || [])[0];
   if (firstTurn && !(firstTurn.operations || []).some((op) => op.type === 'llm')) {
     body.append(h('p', { class: 'notice', style: { marginBottom: '8px' } },
@@ -1409,10 +1629,10 @@ function buildTranscriptSection(session) {
   }
 
   body.append(transcript);
-  return transcriptSection(body, entries.length, transcript, session);
+  return transcriptSection(body, entries.length, transcript, session, prompt);
 }
 
-function transcriptSection(body, count, transcript, session) {
+function transcriptSection(body, count, transcript, session, prompt = null) {
   // Both the follow toggle and the "click to hear it" promise are about audio.
   // On a package whose recording never arrived they offer something that cannot
   // happen, which is worse than not offering it.
@@ -1430,7 +1650,7 @@ function transcriptSection(body, count, transcript, session) {
     class: 'btn tiny follow-toggle',
     'aria-pressed': 'true',
     title: 'Keep the playing turn in view',
-    text: 'Follow playback',
+    text: 'Follow',
     onClick: () => setFollow(!ui.transcriptFollow, { recentre: true }),
   });
 
@@ -1455,17 +1675,122 @@ function transcriptSection(body, count, transcript, session) {
     });
   }
 
-  return h('section', { class: 'card transcript-card' },
-    h('div', { class: 'card-head' },
-      h('h3', {}, 'Transcript', h('span', { class: 'hint',
-        text: `reconstructed from model requests and responses${playable ? ' · click a line to hear it' : ''}` })),
-      h('div', { class: 'card-tools' },
-        transcript && playable ? follow : null,
-        h('span', { class: 'chip', text: `${count} message${count === 1 ? '' : 's'}` }),
-      ),
-    ),
-    body,
+  // The prompt is one click away rather than a permanent row above the
+  // dialogue, so the chip is what advertises it and what reports its state —
+  // including when the reader closes the disclosure from inside the body.
+  const promptChip = prompt
+    ? h('button', {
+      type: 'button', class: 'chip chip-action', 'aria-pressed': 'false',
+      title: 'Show the system prompt this call ran with',
+      text: 'prompt',
+      onClick: () => {
+        prompt.open = !prompt.open;
+        if (prompt.open) {
+          showDeckTab('transcript');
+          prompt.scrollIntoView({ block: 'nearest' });
+        }
+      },
+    })
+    : null;
+  prompt?.addEventListener('toggle', () => promptChip.setAttribute('aria-pressed', String(prompt.open)));
+
+  // The transcript is a panel of the deck's side tabs, so the tab is its name,
+  // its count and its affordance all at once. Repeating "Transcript 52" in a
+  // header directly under a selected tab reading the same thing spent a row on
+  // nothing, so the card keeps only its dialogue and hands its two controls up
+  // to the tab strip, which is where the reviewer is already looking.
+  const card = h('section', { class: 'card transcript-card' }, body);
+
+  ui.transcriptCard = card;
+  ui.transcriptCount = count;
+  ui.transcriptTools = h('div', { class: 'card-tools transcript-tools' },
+    promptChip,
+    transcript && playable ? follow : null,
   );
+  return card;
+}
+
+/** The deck's right-hand column. Two answers to "what happened here" — the
+ *  words and the spans behind them — compete for the same slot, and stacking
+ *  both is what pushed the transcript under the fold in the first place. Tabs
+ *  give each the full column at full height and cost one row.
+ *
+ *  Transcript leads because it is what a reviewer reads first: the audio names
+ *  the moment, the transcript says what was said in it, and the turn ladder is
+ *  the follow-up question about why it took so long.
+ */
+const DECK_TABS = [
+  { key: 'transcript', label: 'Transcript' },
+  { key: 'turns', label: 'Turns' },
+];
+
+function buildDeckTabs(transcriptCard, liveCard) {
+  const tabs = h('div', { class: 'tabs deck-tablist', role: 'tablist', 'aria-label': 'Call detail' });
+  for (const tab of DECK_TABS) {
+    tabs.append(h('button', {
+      type: 'button',
+      role: 'tab',
+      id: `deck-tab-${tab.key}`,
+      'aria-controls': `deck-panel-${tab.key}`,
+      dataset: { deckTab: tab.key },
+      'aria-selected': 'false',
+      tabindex: '-1',
+      onClick: () => showDeckTab(tab.key, { focus: false }),
+    },
+      h('span', { text: tab.label }),
+      tab.key === 'transcript'
+        ? h('span', { class: 'strip-count', text: String(ui.transcriptCount || 0) })
+        : null,
+    ));
+  }
+  // A tablist is a single tab stop; arrows move between the tabs inside it.
+  tabs.addEventListener('keydown', (event) => {
+    const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
+    const usable = [...tabs.querySelectorAll('button')];
+    let next = null;
+    if (step) next = usable[(usable.indexOf(event.target) + step + usable.length) % usable.length];
+    else if (event.key === 'Home') next = usable[0];
+    else if (event.key === 'End') next = usable[usable.length - 1];
+    if (!next) return;
+    event.preventDefault();
+    showDeckTab(next.dataset.deckTab);
+  });
+
+  transcriptCard.id = 'deck-panel-transcript';
+  transcriptCard.setAttribute('role', 'tabpanel');
+  transcriptCard.setAttribute('aria-labelledby', 'deck-tab-transcript');
+  liveCard.id = 'deck-panel-turns';
+  liveCard.setAttribute('role', 'tabpanel');
+  liveCard.setAttribute('aria-labelledby', 'deck-tab-turns');
+
+  const tools = h('div', { class: 'card-tools deck-tab-tools' }, ui.transcriptTools);
+  const card = h('section', { class: 'card side-deck' },
+    h('div', { class: 'card-head deck-tab-head' }, tabs, tools),
+    h('div', { class: 'side-panels' }, transcriptCard, liveCard),
+  );
+  ui.deckTabs = tabs;
+  ui.deckTabTools = tools;
+  ui.deckPanels = { transcript: transcriptCard, turns: liveCard };
+  showDeckTab(readDeckPrefs().sideTab, { silent: true });
+  return card;
+}
+
+/** Which panel the side column is showing. It is a view preference, so it
+ *  outlives the call and the reload, and never touches the URL. */
+function showDeckTab(key, { silent = false, focus = true } = {}) {
+  if (!ui.deckPanels || !ui.deckPanels[key]) key = 'transcript';
+  for (const tab of ui.deckTabs?.querySelectorAll('button') || []) {
+    const on = tab.dataset.deckTab === key;
+    tab.setAttribute('aria-selected', String(on));
+    tab.tabIndex = on ? 0 : -1;
+    if (on && focus && !silent) tab.focus();
+  }
+  for (const [name, panel] of Object.entries(ui.deckPanels)) panel.hidden = name !== key;
+  // Only the transcript owns tools; the turn ladder's own header is its label.
+  if (ui.transcriptTools) ui.transcriptTools.hidden = key !== 'transcript';
+  if (silent) return;
+  writeDeckPrefs({ sideTab: key });
+  if (key === 'transcript') scrollTranscriptTo(ui.liveTurnId, { force: true });
 }
 
 function setFollow(on, { recentre = false } = {}) {
@@ -1587,6 +1912,344 @@ function transcriptMessage(entry) {
   // stops toggling, so payloads are siblings of the line rather than children.
   if (!payloads.length) return line;
   return h('div', { class: 'msg-shell', dataset: { role: entry.role } }, line, ...payloads);
+}
+
+/* ------------------------------------------------------------ live trace */
+
+/** The turn a point on the call clock belongs to. Stated once here so the
+ *  player, the live trace and anything else that has to answer "where am I"
+ *  can never disagree about it. */
+function turnAtMs(ms) {
+  return (state.session?.turns || []).find((turn) => ms >= (turn.started_at_ms || 0) && ms <= (turn.ended_at_ms ?? turn.started_at_ms ?? 0)) || null;
+}
+
+/** Between two turns there is no turn, but there is still a most recent one,
+ *  and a panel that blanks during every silence is worse than one that keeps
+ *  describing what was just heard. */
+function lastTurnBeforeMs(ms) {
+  let found = null;
+  for (const turn of state.session?.turns || []) {
+    if ((turn.started_at_ms || 0) <= ms) found = turn; else break;
+  }
+  return found;
+}
+
+/** The end of a span on the call clock. Playout is authoritative where it was
+ *  recorded: a TTS span finishes generating long before the caller stops
+ *  hearing it, and the reviewer is listening to the audio, not the request. */
+function spanEndMs(op, fallback = 0) {
+  return op.presentation_window?.to_ms ?? op.ended_at_ms ?? op.started_at_ms ?? fallback;
+}
+
+/**
+ * The trace, read at the playhead.
+ *
+ * The trace table below answers "what happened in this call". It cannot answer
+ * "what is happening right now", which is the question a reviewer actually has
+ * while a recording is playing — three seconds of silence go by and they want
+ * to know whether the model was thinking, the tool was waiting or nothing was
+ * running at all. Scrolling a 76-row table to the right turn on every playhead
+ * move is not an answer.
+ *
+ * So this panel holds one turn: the spans that served it, drawn on that turn's
+ * own clock, with the playhead running across them. It re-renders only when the
+ * turn changes — the line and the active row are the only things that move on a
+ * frame, because this updates from `paintPlayer`, which runs sixty times a
+ * second while the audio plays.
+ *
+ * With no recording, or with a track that will not align to the call clock,
+ * there is no playhead to follow. It then shows whatever the reviewer has
+ * selected instead of pretending to be live.
+ */
+function buildLiveTraceCard(session) {
+  const { parentOf } = nestTransportAttempts(session.operations || []);
+  // Retries are folded into the call that owns them, exactly as in the trace
+  // table: three rows for one model call would read as three model calls.
+  const byTurn = new Map();
+  for (const op of session.operations || []) {
+    if (isSocket(op) || parentOf.has(op.event_id)) continue;
+    const key = String(op.turn_id);
+    if (!byTurn.has(key)) byTurn.set(key, []);
+    byTurn.get(key).push(op);
+  }
+  for (const list of byTurn.values()) list.sort((a, b) => (a.started_at_ms ?? 0) - (b.started_at_ms ?? 0));
+
+  const nowTag = h('span', { class: 'type-tag', dataset: { type: 'turn' }, text: '—' });
+  const nowTurn = h('span', { class: 'live-now-turn', hidden: true });
+  const nowLabel = h('span', { class: 'live-now-label', text: 'Nothing playing' });
+  const nowTime = h('span', { class: 'live-now-time num', text: '' });
+  // The one line that survives into the collapsed deck, so a reviewer reading
+  // the table below still knows what the audio is on. It is also this card's
+  // only header: a strip reading "Trace · follows the audio" above a chart
+  // that visibly follows the audio was a label for something already obvious,
+  // and it cost a row on the tallest panel of the deck.
+  const nowLine = h('button', {
+    type: 'button', class: 'live-now',
+    title: 'Inspect the turn now playing',
+    onClick: () => { if (shownTurn) setSelection('turn', shownTurn.turn_id, { scroll: true }); },
+  }, nowTag, nowTurn, nowLabel, nowTime);
+
+  const said = h('p', { class: 'live-said', hidden: true });
+  const scale = h('div', { class: 'live-scale' });
+  const rows = h('div', { class: 'live-rows' });
+  const playhead = h('div', { class: 'live-playhead', hidden: true });
+  const stack = h('div', { class: 'live-stack' }, rows, playhead);
+  const empty = h('div', { class: 'empty-block live-empty' },
+    h('b', { text: 'Nothing to follow yet' }),
+    h('p', { text: 'Play the recording and the spans behind each turn appear here, on the turn’s own clock. With no aligned audio, pick a turn or a span and it is shown here instead.' }),
+  );
+
+  const body = h('div', { class: 'card-body live-body' }, said, scale, stack, empty);
+  const card = h('section', { class: 'card live-card' },
+    nowLine,
+    body,
+  );
+
+  let shownTurn = null;
+  let shownKey = Symbol('none');
+  let shownWindow = null;
+  let shownActive = Symbol('none');
+  let lastAt = null;
+  let lastAligned = false;
+  const barsById = new Map();
+
+  /** The stretch of call clock a turn's row chart is drawn on. A turn's own end
+   *  mark stops at the caller's speech, so an agent reply that is still playing
+   *  would run off the right-hand edge of the chart it belongs to. */
+  function windowOf(turn, spans) {
+    const from = turn.started_at_ms ?? spans[0]?.started_at_ms ?? 0;
+    let to = turn.ended_at_ms ?? from;
+    for (const op of spans) to = Math.max(to, spanEndMs(op, from));
+    return { from, to: Math.max(to, from + 1) };
+  }
+
+  function drawTurn(turn) {
+    clear(rows);
+    barsById.clear();
+    const spans = turn ? (byTurn.get(String(turn.turn_id)) || []) : [];
+    shownTurn = turn;
+    card.dataset.empty = String(!turn || !spans.length);
+    if (!turn) { shownWindow = null; clear(scale); said.hidden = true; nowTurn.hidden = true; return; }
+
+    const reply = turn.time_to_first_audio_ms;
+    nowTurn.hidden = false;
+    nowTurn.textContent = `#${turnName(turn.turn_id)}`;
+
+    const window = windowOf(turn, spans);
+    shownWindow = window;
+    const span = window.to - window.from;
+    clear(scale).append(
+      h('span', { class: 'num', text: offset(window.from) }),
+      h('span', { class: 'live-scale-mid', dataset: { tone: latencyTone(reply) || 'none' },
+        text: reply != null ? `first audio back ${duration(reply)}` : `${duration(span)} of call` }),
+      h('span', { class: 'num', text: offset(window.to) }),
+    );
+
+    const spoken = transcriptLine('user', turn.turn_id);
+    said.hidden = !spoken;
+    if (spoken) said.textContent = `“${spoken}”`;
+
+    for (const op of spans) {
+      const from = op.started_at_ms ?? window.from;
+      const to = spanEndMs(op, from);
+      const left = clampPercent(((from - window.from) / span) * 100, 99);
+      const type = displayType(op);
+      const bar = h('span', {
+        class: 'live-bar',
+        style: {
+          left: `${left}%`,
+          width: `${clampPercent(((to - from) / span) * 100, 100 - left, 1.2)}%`,
+          background: COLOR[type] || 'var(--accent)',
+        },
+      });
+      const row = h('button', {
+        type: 'button',
+        class: 'live-row',
+        dataset: { opId: op.event_id, type, status: effectiveStatus(op) || 'ok' },
+        title: `${operationLabel(op)} · starts ${offset(from)} · ${duration(to - from) || 'no duration recorded'}`,
+        onClick: () => setSelection('op', op.event_id, { scroll: true }),
+      },
+        h('span', { class: 'live-row-head' },
+          h('span', { class: 'type-tag', dataset: { type }, text: (type || '').toUpperCase() }),
+          h('span', { class: 'live-label', text: operationLabel(op) }),
+          h('span', { class: 'live-dur num', text: duration(to - from) || '—' }),
+        ),
+        h('span', { class: 'live-track' }, bar),
+      );
+      rows.append(row);
+      barsById.set(op.event_id, { row, from, to });
+    }
+    syncSelection();
+  }
+
+  /* Before anything has played, the panel used to sit there saying "nothing
+   * running" beside a chart of one turn nobody had asked for — a third of the
+   * deck spent on an empty state. At rest it shows the whole call instead: one
+   * row per turn, the bar scaled to that turn's reply time, so the reviewer's
+   * first glance at a call already answers "which turn was slow" and every row
+   * is a way in. Playback takes the panel over the moment the playhead moves. */
+  function drawOverview() {
+    clear(rows);
+    barsById.clear();
+    shownTurn = null;
+    shownWindow = null;
+    said.hidden = true;
+    nowTurn.hidden = true;
+    const turns = state.session?.turns || [];
+    card.dataset.empty = String(!turns.length);
+    if (!turns.length) { clear(scale); return; }
+
+    const replies = turns.map((turn) => turn.time_to_first_audio_ms).filter((value) => value != null);
+    const worst = replies.length ? Math.max(...replies) : 0;
+    clear(scale).append(
+      h('span', { class: 'num', text: `${turns.length} turn${turns.length === 1 ? '' : 's'}` }),
+      h('span', { class: 'live-scale-mid', dataset: { tone: worst ? latencyTone(worst) : 'none' },
+        text: worst ? 'reply time per turn' : 'no first-audio marks' }),
+      h('span', { class: 'num', text: worst ? duration(worst) : '—' }),
+    );
+
+    for (const turn of turns) {
+      const reply = turn.time_to_first_audio_ms;
+      const tone = reply == null ? null : latencyTone(reply);
+      const spoken = transcriptLine('user', turn.turn_id);
+      rows.append(h('button', {
+        type: 'button',
+        class: 'live-row',
+        dataset: { turnId: String(turn.turn_id), status: turn.status || 'ok' },
+        title: `Turn ${turnName(turn.turn_id)}${reply != null ? ` · first audio back ${duration(reply)}` : ' · no first-audio mark'}`,
+        onClick: () => setSelection('turn', turn.turn_id, { scroll: true }),
+      },
+        h('span', { class: 'live-row-head' },
+          h('span', { class: 'type-tag', dataset: { type: 'turn' }, text: `#${turnName(turn.turn_id)}` }),
+          h('span', { class: 'live-label', text: spoken || `Turn ${turnName(turn.turn_id)}` }),
+          h('span', { class: 'live-dur num', dataset: tone ? { tone } : {}, text: reply != null ? duration(reply) : '—' }),
+        ),
+        h('span', { class: 'live-track' },
+          h('span', {
+            class: 'live-bar',
+            dataset: tone ? { tone } : {},
+            style: { left: '0%', width: `${reply != null && worst ? clampPercent((reply / worst) * 100, 100, 2) : 0}%` },
+          }),
+        ),
+      ));
+    }
+    syncSelection();
+  }
+
+
+  function activeAt(ms) {
+    let found = null;
+    for (const [, entry] of barsById) {
+      if (ms < entry.from || ms > entry.to) continue;
+      if (!found || entry.from >= found.from) found = entry;
+    }
+    return found;
+  }
+
+  function paintNowLine(ms) {
+    const active = ms == null ? null : activeAt(ms);
+    const key = active ? active.row.dataset.opId : ms == null ? 'idle' : 'gap';
+    const changed = key !== shownActive;
+    shownActive = key;
+
+    if (active) {
+      if (changed) {
+        for (const [, entry] of barsById) entry.row.classList.toggle('is-live', entry === active);
+        nowTag.dataset.type = active.row.dataset.type;
+        nowTag.textContent = (active.row.dataset.type || '').toUpperCase();
+        nowLabel.textContent = active.row.querySelector('.live-label').textContent;
+      }
+      nowTime.textContent = `${duration(ms - active.from) || '0ms'} in`;
+      return;
+    }
+
+    if (changed) for (const [, entry] of barsById) entry.row.classList.remove('is-live');
+    if (ms == null) {
+      if (changed) {
+        nowTag.dataset.type = 'turn';
+        nowTag.textContent = '—';
+        nowLabel.textContent = shownTurn ? `Turn #${turnName(shownTurn.turn_id)} — selected` : 'Nothing playing';
+      }
+      nowTime.textContent = '';
+      return;
+    }
+    // Silence is the reading a reviewer most often wants explained, so it is
+    // named as a state of its own rather than left as a blank line.
+    if (changed) {
+      nowTag.dataset.type = 'gap';
+      nowTag.textContent = 'GAP';
+      nowLabel.textContent = 'nothing running';
+    }
+    let since = null;
+    for (const [, entry] of barsById) if (entry.to <= ms && (since == null || entry.to > since)) since = entry.to;
+    nowTime.textContent = since == null ? '' : `${duration(ms - since) || '0ms'} of silence`;
+  }
+
+  function paintPlayhead(ms) {
+    if (ms == null || !shownWindow) { playhead.hidden = true; return; }
+    const fraction = (ms - shownWindow.from) / (shownWindow.to - shownWindow.from);
+    playhead.hidden = fraction < 0 || fraction > 1;
+    if (!playhead.hidden) playhead.style.setProperty('--live-x', String(fraction));
+  }
+
+  /** @param at seconds on the recording, or null when nothing is playing. */
+  function at(seconds, aligned) {
+    lastAt = seconds;
+    lastAligned = aligned;
+    const ms = aligned && seconds != null ? seconds * 1000 : null;
+    const turns = state.session?.turns || [];
+    // "At rest" is any moment the audio is not actually running: paused at the
+    // top, never started, or not alignable at all. The playhead cannot answer
+    // for the panel then, so the reviewer's selection does — and with no
+    // selection either, the panel shows the whole call rather than a turn
+    // nobody asked for.
+    const resting = ms == null || ms < 50;
+    if (resting && !state.selection) {
+      if (shownKey !== 'overview') {
+        shownKey = 'overview';
+        shownActive = Symbol('none');
+        drawOverview();
+      }
+      card.dataset.live = 'false';
+      playhead.hidden = true;
+      nowTag.dataset.type = 'turn';
+      nowTag.textContent = 'CALL';
+      nowLabel.textContent = turns.length ? 'Every turn, by reply time' : 'No turns captured';
+      nowTime.textContent = '';
+      nowLine.disabled = true;
+      return;
+    }
+    nowLine.disabled = false;
+    // At 0:00 the playhead is before the first turn, and an empty panel is a
+    // poor answer to "what is in this call" — the first turn is the one about
+    // to play, so it is the one shown.
+    const live = !resting;
+    const turn = resting
+      ? (selectedTurn() || turns[0] || null)
+      : (turnAtMs(ms) || lastTurnBeforeMs(ms) || turns[0] || null);
+    const key = turn ? String(turn.turn_id) : 'none';
+    if (key !== shownKey) {
+      shownKey = key;
+      shownActive = Symbol('none');
+      drawTurn(turn);
+    }
+    card.dataset.live = String(live);
+    paintPlayhead(live ? ms : null);
+    paintNowLine(live ? ms : null);
+  }
+
+  ui.liveTrace = { at, refresh: () => at(lastAt, lastAligned) };
+  at(null, false);
+  return card;
+}
+
+/** What one side of a turn said, for the panels that quote a line rather than
+ *  render the conversation. */
+function transcriptLine(role, turnId, limit = 130) {
+  const entry = (state.transcript?.entries || []).find((item) => item.role === role && String(item.turnId) === String(turnId) && item.text);
+  if (!entry) return null;
+  const text = entry.text.replace(/\s+/g, ' ').trim();
+  return text.length > limit ? `${text.slice(0, limit - 2)}…` : text;
 }
 
 /* ----------------------------------------------------------------- trace */
@@ -1946,7 +2609,7 @@ function traceCell(text, className = '') {
 
 /** One row of the trace, at any depth. Turns, spans and retries share a grid so
  *  the eye can compare a retry against the call that spawned it. */
-function traceRowNode({ depth, expandable, expanded, badge, badgeType, title, headline, startMs, durationMs, durationHint, tone, status, bar, dataset, onActivate }) {
+function traceRowNode({ depth, expandable, expanded, badge, badgeType, title, headline, chip, startMs, durationMs, durationHint, tone, status, bar, dataset, onActivate }) {
   const twisty = h('span', { class: 'trace-twisty', text: expandable ? (expanded ? '▾' : '▸') : '' });
   return h('button', {
     type: 'button',
@@ -1960,6 +2623,9 @@ function traceRowNode({ depth, expandable, expanded, badge, badgeType, title, he
     h('span', { class: 'trace-lead' }, twisty, h('span', { class: 'type-tag', dataset: { type: badgeType }, text: badge })),
     h('span', { class: 'trace-title' },
       title ? h('b', { text: title }) : null,
+      // The number that used to get its own full-width band under the row. It
+      // is one measurement about this turn, so it rides along with the turn.
+      chip ? h('span', { class: 'reply-chip', dataset: chip.tone ? { tone: chip.tone } : {}, title: chip.title || null, text: chip.text }) : null,
       headline ? traceCell(headline, 'trace-headline') : null,
     ),
     h('span', { class: 'num trace-start', text: startMs == null ? '—' : offset(startMs) }),
@@ -2071,10 +2737,8 @@ function buildTraceCard(session) {
 
   return h('section', { class: 'card' },
     h('div', { class: 'card-head' },
-      h('h3', {}, 'Trace', ui.traceCount),
-      h('div', { class: 'card-tools' }, seg, errorsToggle, toggleAll, search),
+      h('div', { class: 'card-tools' }, ui.traceCount, seg, errorsToggle, toggleAll, search),
     ),
-    h('p', { class: 'view-note' }, 'One row per turn. Open a turn to see the spans that served it; open a span to see exactly when each phase happened, and press ▶ to play that time range in the single call recording. Retried HTTP attempts sit underneath the model call that made them.'),
     h('div', { class: 'card-body flush scroll-cap' }, head, ui.traceRows),
   );
 }
@@ -2225,6 +2889,9 @@ function renderTraceRows() {
       badge: turn ? `#${turn.turn_id}` : '',
       badgeType: turn ? 'turn' : 'conn',
       title: turn ? (turnUtterance(group) ? `“${turnUtterance(group)}”` : `Turn ${turn.turn_id}`) : group.label,
+      chip: turn && response != null
+        ? { text: `↩ ${duration(response)}`, tone: latencyTone(response) || 'ok', title: 'Caller stops → first audio back' }
+        : null,
       headline: parts.join(' · '),
       startMs: from,
       durationMs: from != null && to != null ? to - from : null,
@@ -2240,13 +2907,6 @@ function renderTraceRows() {
         renderTraceRows();
       },
     }));
-
-    if (turn && response != null) {
-      host.append(h('div', { class: 'trace-response', style: { '--depth': '0' }, dataset: { tone: latencyTone(response) || 'ok' } },
-        h('span', { text: 'first audio back' }),
-        h('b', { class: 'num', text: duration(response) }),
-      ));
-    }
 
     if (!expanded) continue;
     for (const op of spans) appendSpan(op, 1);
@@ -2345,6 +3005,11 @@ function buildChallengerControl(session, comparisonUrl) {
       trigger.textContent = 'View comparison';
       trigger.onclick = () => { window.location.href = comparisonUrl; };
       stateText.textContent = job.status === 'completed' ? `${label} complete` : `${label} ready with limited results`;
+    } else if (window.__VAANI_DEMO__) {
+      // The demo serves a fixed snapshot and cannot start a new evaluation.
+      // Calls that already carry one keep the "View comparison" button above;
+      // the rest show nothing rather than a button that would 404.
+      control.remove();
     } else if (job.status === 'failed') {
       trigger.textContent = 'Retry comparison';
       trigger.onclick = openChooser;
@@ -2469,13 +3134,23 @@ function buildSttQualityCard(session) {
     }
   }
 
+  // The STT comparison page is turned off in the public demo: it is a separate
+  // deep-dive surface whose controls imply a run the snapshot cannot perform.
+  // The button stays visible but inert, so the capability is still legible.
+  const comparisonCta = window.__VAANI_DEMO__
+    ? h('button', {
+      type: 'button', class: 'btn', text: 'Open comparison', disabled: true,
+      title: 'The STT comparison is not part of this demo.',
+    })
+    : h('a', { class: 'btn', href: comparisonUrl, text: 'Open comparison' });
+
   return h('section', { class: 'card stt-card', id: 'stt-quality' },
     h('div', { class: 'card-head' },
       h('h3', {}, 'STT review', h('span', { class: 'chip', dataset: { tone: 'warn' }, text: 'Beta' })),
       h('div', { class: 'card-tools' },
         h('span', { class: 'chip', text: rows.length ? `${rows.length} captured STT turn${rows.length === 1 ? '' : 's'}` : 'not captured' }),
-        buildChallengerControl(session, comparisonUrl),
-        h('a', { class: 'btn', href: comparisonUrl, text: 'Open comparison' }),
+        window.__VAANI_DEMO__ ? null : buildChallengerControl(session, comparisonUrl),
+        comparisonCta,
       ),
     ),
     h('div', { class: 'card-body flush' }, notice, summary, table),
@@ -2546,8 +3221,7 @@ function buildOperationsCard() {
 
   ui.opsCard = h('section', { class: 'card' },
     h('div', { class: 'card-head' },
-      h('h3', {}, 'Operations', ui.opCount),
-      h('div', { class: 'card-tools' }, seg, errorsToggle, search),
+      h('div', { class: 'card-tools' }, ui.opCount, seg, errorsToggle, search),
     ),
     h('div', { class: 'card-body flush scroll-cap' }, head, ui.opRows),
   );
@@ -2558,7 +3232,15 @@ function syncOpFilterControls() {
   for (const button of ui.opSeg?.querySelectorAll('button') || []) {
     button.setAttribute('aria-pressed', String(button.dataset.opType === state.opFilter.type));
   }
-  if (ui.opErrors) ui.opErrors.setAttribute('aria-pressed', String(state.opFilter.errorsOnly));
+  if (ui.opErrors) {
+    ui.opErrors.setAttribute('aria-pressed', String(state.opFilter.errorsOnly));
+    // A call with nothing to filter to should say so before it is clicked. Left
+    // enabled, the control's only possible outcome is an empty list, which reads
+    // as a broken filter rather than as a clean call.
+    const anyFailed = (state.session?.operations || []).some((op) => effectiveStatus(op) === 'error');
+    ui.opErrors.disabled = !anyFailed && !state.opFilter.errorsOnly;
+    ui.opErrors.title = anyFailed ? '' : 'No failed operations in this call';
+  }
   if (ui.opSearch && ui.opSearch.value !== state.opFilter.query) ui.opSearch.value = state.opFilter.query;
 }
 
@@ -2704,8 +3386,20 @@ function buildInspectorCard() {
   ui.inspectorTitle = h('h3', { text: 'Inspector' });
   ui.inspectorTools = h('div', { class: 'card-tools' });
 
+  // Where the call pane is too narrow to give the inspector a column, it docks
+  // over the trace instead of reflowing it — a 400px column taken out of a
+  // 1000px pane crushes the step names in the table the selection came from.
+  // Docked, it needs a way out that is not the keyboard.
   return h('section', { class: 'card inspector' },
-    h('div', { class: 'card-head' }, ui.inspectorTitle, ui.inspectorTools),
+    h('div', { class: 'card-head' },
+      ui.inspectorTitle,
+      ui.inspectorTools,
+      h('button', {
+        type: 'button', class: 'icon-btn inspector-close',
+        title: 'Close the inspector  ·  esc', 'aria-label': 'Close the inspector',
+        onClick: () => setSelection(null, null),
+      }, glyph(PATH.close, 13)),
+    ),
     ui.inspectorTabs,
     ui.inspectorPanel,
   );
@@ -2722,6 +3416,7 @@ function renderInspector() {
   const turn = state.selection?.kind === 'turn' ? selectedTurn() : null;
   const subject = op || turn;
   const tabs = availableTabs(subject, Boolean(op));
+  if (ui.columns) ui.columns.dataset.inspector = subject ? 'open' : 'idle';
   if (!tabs.some((tab) => tab.key === state.inspectorTab)) state.inspectorTab = tabs[0].key;
 
   for (const button of ui.inspectorTabs.querySelectorAll('button')) {
@@ -3087,13 +3782,35 @@ const wantsCalm = () => !!calmMotion?.matches;
 // than a solid block, and keeps the bucket count a screen actually needs small.
 const WAVE_PITCH = 3;
 const WAVE_LANE_GAP = 8;
-const CHANNEL_TONE = {
-  agent: { ink: '#4fd6a5', dim: 'rgb(79 214 165 / 26%)', label: 'Agent' },
-  caller: { ink: '#62b4ff', dim: 'rgb(98 180 255 / 26%)', label: 'Caller' },
-  mixed: { ink: '#9bb8e8', dim: 'rgb(155 184 232 / 26%)', label: 'Mixed' },
-  call: { ink: '#9bb8e8', dim: 'rgb(155 184 232 / 26%)', label: 'Call' },
-};
-const toneFor = (name) => CHANNEL_TONE[name] || CHANNEL_TONE.call;
+/* Canvas cannot read a CSS variable, so the waveform palette is pulled off the
+   root element and cached until the theme changes. Without this the wave keeps
+   its dark-tuned pastels on a white card and reads as an empty rail. */
+const CHANNEL_TOKEN = { agent: 'agent', caller: 'caller', mixed: 'mixed', call: 'mixed' };
+const CHANNEL_LABEL = { agent: 'Agent', caller: 'Caller', mixed: 'Mixed', call: 'Call' };
+let wavePalette = null;
+
+const readToken = (name) =>
+  getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+function buildWavePalette() {
+  const alpha = Number(readToken('--wave-dim-a')) || 0.28;
+  const lift = readToken('--wave-lift-rgb') || '255 255 255';
+  const tones = {};
+  for (const [channel, token] of Object.entries(CHANNEL_TOKEN)) {
+    const ink = readToken(`--wave-${token}`) || '#9bb8e8';
+    const rgb = readToken(`--wave-${token}-rgb`) || '155 184 232';
+    tones[channel] = { ink, dim: `rgb(${rgb} / ${alpha * 100}%)`, label: CHANNEL_LABEL[channel] };
+  }
+  return { tones, lift };
+}
+
+const palette = () => (wavePalette ||= buildWavePalette());
+/* A lift is white on a dark theme and shade on a light one, so the same rule
+   reads as "raise this off the surface" in both. */
+const waveLift = (percent) => `rgb(${palette().lift} / ${percent}%)`;
+const toneFor = (name) => palette().tones[name] || palette().tones.call;
+
+window.addEventListener('vaani:themechange', () => { wavePalette = null; });
 
 const PATH = {
   play: 'M5.2 3.3a.8.8 0 0 1 1.2-.68l6 4.7a.8.8 0 0 1 0 1.36l-6 4.7A.8.8 0 0 1 5.2 12.7Z',
@@ -3103,11 +3820,13 @@ const PATH = {
   back: 'M7.7 2.2a.7.7 0 0 1 0 1.18l-.86.6A4.6 4.6 0 1 1 3.4 8.3a.7.7 0 1 1 1.4-.1 3.2 3.2 0 1 0 2.5-3.26l.83.58a.7.7 0 1 1-.8 1.15L5.1 5.24a.7.7 0 0 1 0-1.15l2.2-1.53a.7.7 0 0 1 .4-.36Z',
   forward: 'M8.3 2.2a.7.7 0 0 0 0 1.18l.86.6A4.6 4.6 0 1 0 12.6 8.3a.7.7 0 1 0-1.4-.1 3.2 3.2 0 1 1-2.5-3.26l-.83.58a.7.7 0 1 0 .8 1.15l2.23-1.43a.7.7 0 0 0 0-1.15L8.7 2.56a.7.7 0 0 0-.4-.36Z',
   loop: 'M4.8 3.2h5.1a2.9 2.9 0 0 1 2.9 2.9v.6a.7.7 0 1 1-1.4 0v-.6c0-.83-.67-1.5-1.5-1.5H4.8v1.05a.5.5 0 0 1-.8.4L1.7 4.3a.5.5 0 0 1 0-.8l2.3-1.75a.5.5 0 0 1 .8.4Zm6.4 9.6H6.1a2.9 2.9 0 0 1-2.9-2.9v-.6a.7.7 0 1 1 1.4 0v.6c0 .83.67 1.5 1.5 1.5h5.1v-1.05a.5.5 0 0 1 .8-.4l2.3 1.75a.5.5 0 0 1 0 .8l-2.3 1.75a.5.5 0 0 1-.8-.4Z',
-  link: 'M6.5 9.5a2.6 2.6 0 0 1 0-3.68l2.3-2.3a2.6 2.6 0 0 1 3.68 3.68l-.9.9a.7.7 0 1 1-.99-.99l.9-.9a1.2 1.2 0 0 0-1.7-1.7l-2.3 2.3a1.2 1.2 0 0 0 0 1.7.7.7 0 0 1-.99.99Zm3 -3a2.6 2.6 0 0 1 0 3.68l-2.3 2.3a2.6 2.6 0 0 1-3.68-3.68l.9-.9a.7.7 0 1 1 .99.99l-.9.9a1.2 1.2 0 0 0 1.7 1.7l2.3-2.3a1.2 1.2 0 0 0 0-1.7.7.7 0 0 1 .99-.99Z',
   download: 'M8 1.6a.7.7 0 0 1 .7.7v6.1l1.9-1.9a.7.7 0 1 1 1 1L8.5 10.6a.7.7 0 0 1-1 0L4.4 7.5a.7.7 0 1 1 1-1l1.9 1.9V2.3a.7.7 0 0 1 .7-.7ZM2.6 10.4a.7.7 0 0 1 .7.7v1.4h9.4v-1.4a.7.7 0 1 1 1.4 0v1.7a1.1 1.1 0 0 1-1.1 1.1H2.9a1.1 1.1 0 0 1-1.1-1.1v-1.7a.7.7 0 0 1 .7-.7Z',
   zoomIn: 'M7 1.8a5.2 5.2 0 0 1 4.1 8.42l3 3a.75.75 0 0 1-1.06 1.06l-3-3A5.2 5.2 0 1 1 7 1.8Zm0 1.5a3.7 3.7 0 1 0 0 7.4 3.7 3.7 0 0 0 0-7.4Zm0 1.2a.6.6 0 0 1 .6.6v1.3h1.3a.6.6 0 1 1 0 1.2H7.6v1.3a.6.6 0 1 1-1.2 0V7.6H5.1a.6.6 0 0 1 0-1.2h1.3V5.1a.6.6 0 0 1 .6-.6Z',
   zoomOut: 'M7 1.8a5.2 5.2 0 0 1 4.1 8.42l3 3a.75.75 0 0 1-1.06 1.06l-3-3A5.2 5.2 0 1 1 7 1.8Zm0 1.5a3.7 3.7 0 1 0 0 7.4 3.7 3.7 0 0 0 0-7.4ZM5.1 6.4h3.8a.6.6 0 1 1 0 1.2H5.1a.6.6 0 0 1 0-1.2Z',
   lanes: 'M2.2 3.1h7.3a.75.75 0 0 1 0 1.5H2.2a.75.75 0 0 1 0-1.5Zm4 4.15h7.6a.75.75 0 0 1 0 1.5H6.2a.75.75 0 0 1 0-1.5Zm-4 4.15h5.6a.75.75 0 0 1 0 1.5H2.2a.75.75 0 0 1 0-1.5Z',
+  chevronUp: 'M7.47 5.72a.75.75 0 0 1 1.06 0l4 4a.75.75 0 1 1-1.06 1.06L8 7.31l-3.47 3.47a.75.75 0 0 1-1.06-1.06Z',
+  chevronDown: 'M3.47 5.72a.75.75 0 0 1 1.06 0L8 9.19l3.47-3.47a.75.75 0 1 1 1.06 1.06l-4 4a.75.75 0 0 1-1.06 0l-4-4a.75.75 0 0 1 0-1.06Z',
+  close: 'M4.22 4.22a.75.75 0 0 1 1.06 0L8 6.94l2.72-2.72a.75.75 0 1 1 1.06 1.06L9.06 8l2.72 2.72a.75.75 0 1 1-1.06 1.06L8 9.06l-2.72 2.72a.75.75 0 0 1-1.06-1.06L6.94 8 4.22 5.28a.75.75 0 0 1 0-1.06Z',
 };
 
 function glyph(path, size = 14) {
@@ -3162,13 +3881,12 @@ function buildAudioCard(session) {
   const body = h('div', { class: 'card-body' });
   const tools = h('div', { class: 'card-tools' });
 
-  const card = h('section', { class: 'card player-card' },
-    h('div', { class: 'card-head' },
-      h('h3', {}, 'Call audio', h('span', { class: 'hint', text: 'drawn on the call clock' })),
-      tools,
-    ),
-    body,
-  );
+  // No header. A waveform, a play button and a clock do not need a card
+  // labelled "Call audio" above them, and the hint that it is drawn on the
+  // call clock was a caption on a chart that is the only chart here. The
+  // controls that lived in the header now sit in the transport bar, next to
+  // the playhead the reviewer is already watching.
+  const card = h('section', { class: 'card player-card' }, body);
 
   if (!tracks.length) {
     body.append(h('div', { class: 'empty-block' },
@@ -3348,31 +4066,19 @@ function buildAudioCard(session) {
     onClick: () => setSelectionRange(null),
   });
 
+  // The waveform is the scrubber while the deck is open. Folded to a transport
+  // bar it is gone, and a player you cannot seek is a player you have to open
+  // again to use — which is the whole thing the fold was meant to avoid.
+  const railFill = h('span', { class: 'mini-rail-fill' });
+  const miniRail = h('div', {
+    class: 'mini-rail', role: 'presentation', title: 'Drag to seek',
+  }, railFill);
+
   const zoomOut = h('button', { type: 'button', class: 'icon-btn', title: 'Zoom out  ·  −', 'aria-label': 'Zoom out', onClick: () => setZoom(-1) }, glyph(PATH.zoomOut, 15));
   const zoomIn = h('button', { type: 'button', class: 'icon-btn', title: 'Zoom in  ·  +', 'aria-label': 'Zoom in', onClick: () => setZoom(1) }, glyph(PATH.zoomIn, 15));
   const zoomLabel = h('button', { type: 'button', class: 'zoom-level num', title: 'Fit the whole call  ·  0', text: 'fit', onClick: () => setZoom(0, { absolute: 1 }) });
 
   const download = h('a', { class: 'icon-btn', download: '', title: 'Download this track as WAV', 'aria-label': 'Download WAV' }, glyph(PATH.download, 15));
-
-  // Evidence is only useful if it can leave the tab it was found in.
-  const share = h('button', {
-    type: 'button', class: 'icon-btn', title: 'Copy a link to this moment', 'aria-label': 'Copy a link to this moment',
-    onClick: async () => {
-      const query = new URLSearchParams();
-      query.set('t', playedSeconds().toFixed(1));
-      if (view.selection) query.set('range', `${view.selection.from.toFixed(1)}-${view.selection.to.toFixed(1)}`);
-      const link = `${location.origin}${location.pathname}#/call/${encodeURIComponent(session.id)}?${query}`;
-      try {
-        await navigator.clipboard.writeText(link);
-        share.classList.add('is-done');
-        setTimeout(() => share.classList.remove('is-done'), 1400);
-      } catch {
-        // Clipboard access is denied outside a secure context; showing the link
-        // is more use than a silent failure.
-        window.prompt('Copy this link', link);
-      }
-    },
-  }, glyph(PATH.link, 15));
 
   const trackChips = h('div', { class: 'seg', role: 'group', 'aria-label': 'Audio source' });
   if (tracks.length > 1) {
@@ -3404,14 +4110,15 @@ function buildAudioCard(session) {
         nudge(10, PATH.forward, 'Forward 10 seconds  ·  shift + →'),
       ),
       h('div', { class: 'player-time num' }, current, h('span', { class: 'time-sep', text: '/' }), total),
+      miniRail,
       h('div', { class: 'player-spacer' }, nowChip, selectionChip),
       h('div', { class: 'player-tools' },
+        tools,
         lanesButton,
         loopButton,
         h('div', { class: 'vol' }, muteButton, volumeSlider),
         speed,
         h('div', { class: 'zoom' }, zoomOut, zoomLabel, zoomIn),
-        share,
         download,
       ),
     ),
@@ -3626,9 +4333,9 @@ function buildAudioCard(session) {
     if (!channels) {
       // No envelope yet: a flat rail still shows position and keeps the control
       // usable while the summary is being computed.
-      context.fillStyle = 'rgb(255 255 255 / 6%)';
+      context.fillStyle = waveLift(6);
       context.fillRect(0, height / 2 - 3, width, 6);
-      context.fillStyle = 'rgb(76 154 255 / 55%)';
+      context.fillStyle = toneFor('caller').ink;
       context.fillRect(0, height / 2 - 3, Math.max(0, playedX), 6);
       return;
     }
@@ -3646,7 +4353,7 @@ function buildAudioCard(session) {
       const centre = top + laneHeight / 2;
       const reach = laneHeight / 2 - 1;
 
-      context.fillStyle = 'rgb(255 255 255 / 7%)';
+      context.fillStyle = waveLift(7);
       context.fillRect(0, centre - 0.5, width, 1);
 
       for (let x = 0; x < width; x += WAVE_PITCH) {
@@ -3677,7 +4384,7 @@ function buildAudioCard(session) {
     // Loaded ranges, so a reviewer scrubbing a long call can tell the difference
     // between silence and audio the browser has not fetched yet.
     if (length) {
-      context.fillStyle = 'rgb(255 255 255 / 12%)';
+      context.fillStyle = waveLift(12);
       for (let index = 0; index < audio.buffered.length; index += 1) {
         const from = (audio.buffered.start(index) / length) * total - offsetX;
         const to = (audio.buffered.end(index) / length) * total - offsetX;
@@ -4024,29 +4731,48 @@ function buildAudioCard(session) {
 
   /** What the caller said in a turn, for the marker tooltip and the live chip. */
   function callerLine(turnId) {
-    const entry = (state.transcript?.entries || []).find((item) => item.role === 'user' && String(item.turnId) === String(turnId) && item.text);
-    if (!entry) return null;
-    const text = entry.text.replace(/\s+/g, ' ').trim();
-    return text.length > 90 ? `${text.slice(0, 88)}…` : text;
+    return transcriptLine('user', turnId, 90);
   }
 
   /** The turn a point on the recording belongs to, for the hover read-out. */
   function lastTurnBefore(seconds) {
-    const ms = seconds * 1000;
-    let found = null;
-    for (const turn of state.session?.turns || []) {
-      if ((turn.started_at_ms || 0) <= ms) found = turn; else break;
-    }
-    return found;
+    return lastTurnBeforeMs(seconds * 1000);
   }
 
   function turnAt(seconds) {
-    if (!view.aligned) return null;
-    const ms = seconds * 1000;
-    return (state.session?.turns || []).find((turn) => ms >= (turn.started_at_ms || 0) && ms <= (turn.ended_at_ms ?? turn.started_at_ms ?? 0)) || null;
+    return view.aligned ? turnAtMs(seconds * 1000) : null;
   }
 
   /* ------------------------------------------------------------ pointing */
+
+  // The folded transport bar's own scrubber. Pointer capture rather than a
+  // window listener so a drag that leaves the 6px rail — which every drag does
+  // — keeps seeking instead of stopping dead at the edge.
+  let railDragging = false;
+  const railSeek = (event) => {
+    const box = miniRail.getBoundingClientRect();
+    seekTo(((event.clientX - box.left) / Math.max(1, box.width)) * clockLength());
+  };
+  bind('pointerdown', (event) => {
+    if (event.button !== 0 || !clockLength()) return;
+    railDragging = true;
+    // A pointer that is already gone — a synthetic event, or a button released
+    // outside the window — cannot be captured, and the throw would abandon the
+    // seek the reviewer actually asked for.
+    try { miniRail.setPointerCapture(event.pointerId); } catch { /* no live pointer */ }
+    miniRail.classList.add('is-scrubbing');
+    railSeek(event);
+    event.preventDefault();
+  }, miniRail);
+  bind('pointermove', (event) => { if (railDragging) railSeek(event); }, miniRail);
+  for (const type of ['pointerup', 'pointercancel']) {
+    bind(type, (event) => {
+      if (!railDragging) return;
+      railDragging = false;
+      miniRail.classList.remove('is-scrubbing');
+      try { miniRail.releasePointerCapture(event.pointerId); } catch { /* already released */ }
+    }, miniRail);
+  }
 
   let dragging = null;
   let miniDragging = false;
@@ -4299,6 +5025,7 @@ function buildAudioCard(session) {
     viewport.setAttribute('aria-valuetext', `${clockShort(at)} of ${clockShort(seconds)}`);
     current.textContent = clockShort(at, true);
     total.textContent = seconds ? clockShort(seconds) : '--:--';
+    railFill.style.width = `${Math.max(0, Math.min(100, fraction * 100))}%`;
     // A span play button drives this same element for its own window. Wrapping
     // it back into the waveform's loop would strand the span at zero and play
     // the wrong audio, so the loop yields while a span is on.
@@ -4306,6 +5033,9 @@ function buildAudioCard(session) {
       audio.currentTime = view.selection.from;
     }
     paintNow(at);
+    // The panel beside the player answers "what is running right now", so it
+    // moves on the same clock the playhead does.
+    ui.liveTrace?.at(at, view.aligned);
     followPlayhead();
     paintWave();
     paintReturn();
@@ -4419,6 +5149,18 @@ function buildAudioCard(session) {
       if (pendingResume.wasPlaying) audio.play().catch(() => {});
       pendingResume = null;
     }
+    refreshClock();
+  });
+
+  // Alignment decides whether there is a playhead to follow at all, and with it
+  // the turn marks, the live chip and the trace panel beside the player. It was
+  // settled only on `loadedmetadata` and at the end of a peaks render, and both
+  // of those bail when a queued response belongs to a track the reviewer has
+  // already left — leaving a perfectly good recording playing with nothing on
+  // the page following it. The length is the only input, so it is re-settled
+  // whenever the length changes.
+  bind('durationchange', () => {
+    if (state.audio !== audio) return;
     refreshClock();
   });
 
@@ -4538,6 +5280,10 @@ function buildAudioCard(session) {
 
   const resize = new ResizeObserver(() => { paintWave(); paintRuler(); paintMini(); loadPeaks(); });
   resize.observe(viewport);
+
+  // Canvas keeps whatever it was last painted with, so a theme switch has to
+  // repaint or the waveform stays in the previous theme's colours.
+  bind('vaani:themechange', () => { paintWave(); paintRuler(); paintMini(); }, window);
   listeners.signal.addEventListener('abort', () => { resize.disconnect(); if (raf) cancelAnimationFrame(raf); });
 
   // A background tab never runs `requestAnimationFrame`, and neither the
@@ -4919,6 +5665,16 @@ document.addEventListener('keydown', (event) => {
     if (!$('#refresh').disabled) loadSessions({ reload: true });
   } else if (event.key.toLowerCase() === 'b') {
     toggleRail();
+    event.preventDefault();
+  } else if (event.key.toLowerCase() === 'c' && ui.toggleDeck) {
+    ui.toggleDeck();
+    event.preventDefault();
+  } else if (event.key.toLowerCase() === 't' && ui.deckPanels) {
+    // The key used to open and close the transcript; it now brings it forward,
+    // which is the same intent in a tabbed column. It must not move focus onto
+    // the tab: a focused `role="tab"` is a control, and the guard above would
+    // then swallow the next press of the same key.
+    showDeckTab(ui.deckPanels.transcript.hidden ? 'transcript' : 'turns', { focus: false });
     event.preventDefault();
   } else if (event.key === ' ' && state.audio) {
     ui.togglePlay?.();

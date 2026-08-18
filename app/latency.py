@@ -22,6 +22,10 @@ FORCED_FLUSH_REASONS = {"manual_flush", "timeout", "forced_flush", "flush"}
 AGENT_SPAN_GAP_MS = 200
 # Overlap shorter than this is turn-boundary echo, not the caller interrupting.
 MIN_BARGE_IN_MS = 300
+# A recognizer may emit a word whose start sits marginally before its own
+# `speech_started` marker; beyond this the two values are not on the same clock
+# and their difference is arithmetic on unrelated numbers.
+WORD_CLOCK_TOLERANCE_MS = 250
 # Declaring a turn over more than this far from the caller's last word is a
 # real turn-shape defect rather than normal endpointing hangover.
 ENDPOINT_POSITION_TOLERANCE_MS = 1000
@@ -132,6 +136,21 @@ def speech_window(operation: dict[str, Any]) -> dict[str, Any]:
     if declared_end is None:
         declared_end = operation.get("ended_at_ms")
     first_word, last_word = word_bounds(operation)
+    # A word cannot begin before the recognizer opened its microphone. When it
+    # appears to, the word timestamps are on a different time base than the
+    # milestones (observed in production: every affected turn reported its first
+    # word starting at ~6 s regardless of when the turn actually happened, while
+    # the word END aligned with the recognizer clock). Subtracting a milestone
+    # instant from a word-clock instant fabricated first-partial values of 4-9 s
+    # and inflated the fleet P95 3.6x, so the word onset is rejected here and the
+    # milestone is used instead.
+    cross_clock = (
+        first_word is not None
+        and isinstance(listen_start, (int, float))
+        and first_word < listen_start - WORD_CLOCK_TOLERANCE_MS
+    )
+    if cross_clock:
+        first_word = None
     start = first_word if first_word is not None else listen_start
     end = last_word if last_word is not None else declared_end
     return {
@@ -140,6 +159,7 @@ def speech_window(operation: dict[str, Any]) -> dict[str, Any]:
         "listen_start_ms": round(listen_start) if isinstance(listen_start, (int, float)) else None,
         "declared_end_ms": round(declared_end) if isinstance(declared_end, (int, float)) else None,
         "from_word_timestamps": first_word is not None and last_word is not None,
+        "word_clock_mismatch": cross_clock,
     }
 
 

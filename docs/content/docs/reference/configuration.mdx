@@ -84,7 +84,10 @@ same scheme precedence raises `Ambiguous Vaani endpoint rules for …`. See
 
 ## `upload`
 
-Python only. The Node SDK accepts `{ retries }`.
+The environment column is Python only. The Node SDK accepts the same three
+transport options as camelCase constructor keys — `{ retries, timeoutMs,
+minThroughputBps }` — with the same defaults (`3`, `30000`, `131072`). It does
+not compress.
 
 | Option | Environment | Default | Effect |
 | --- | --- | --- | --- |

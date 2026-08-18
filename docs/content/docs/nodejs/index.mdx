@@ -85,9 +85,9 @@ const vaani = new VaaniObserver({
       default: '[]',
     },
     upload: {
-      description: 'Upload behaviour.',
+      description: 'Upload transport: how many times a failed request is retried, and how long each is given. The timeout scales with the body, so a large recording is not permanently unshippable behind a flat deadline.',
       type: 'object',
-      default: 'retries=3',
+      default: 'retries=3, timeoutMs=30000, minThroughputBps=131072',
     },
     strict: {
       description: 'Throw on instrumentation errors instead of degrading silently.',

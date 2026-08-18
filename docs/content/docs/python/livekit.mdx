@@ -349,8 +349,10 @@ queued behind it. Pass `--timeout 0` to remove the bound.
 Receipts are scoped to the endpoint that issued them. If you repoint
 `VAANI_ENDPOINT` — staging to production, self-hosted to cloud — packages
 already delivered elsewhere are treated as pending again and re-uploaded to the
-new destination, which is idempotent. Nothing is ever removed on the strength of
-a receipt from a backend that is no longer the one you are writing to.
+new destination, which is idempotent. A package is only ever removed when its
+receipt names the backend you are currently writing to. A receipt that names no
+backend — one written by an older version — still suppresses a re-upload, but is
+never treated as grounds for deleting the call.
 
 It also removes packages that were uploaded **in-process** by `finish()` — those
 carry an `uploaded.json` receipt and are otherwise skipped by every pass, which

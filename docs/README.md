@@ -25,6 +25,21 @@ npm run build
 The build is the test. It type-checks, compiles every MDX file, and pre-renders
 all pages, so a broken component reference or malformed MDX fails here.
 
+## Deploy
+
+Pushing to `main` deploys to <https://docs.vaanieval.com>. The Vercel project
+`vaanieval-docs` is connected to this repository with **root directory `docs`**,
+which is the setting the whole thing hangs on: this repo's root is the backend,
+so a project rooted at `.` finds no `package.json` and the build fails.
+
+A failed build is safe — Vercel leaves the previous production deployment
+serving — so a broken `main` takes the docs stale rather than down. That is also
+why `npm run build` passing locally is the gate before pushing.
+
+There is no need to run `vercel deploy` by hand. Doing so still works, but a
+CLI deploy uploads the local working tree, so it can publish content that is not
+in `main` and leave the site silently ahead of (or behind) the repository.
+
 ## Layout
 
 | Path | Contents |

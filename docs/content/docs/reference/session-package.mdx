@@ -136,7 +136,28 @@ number is always there to be audited even when it does not move the status.
 token — frames whose reply was chosen by timing at a turn boundary. Audio
 rendered through `tts_node` names the reply that produced it, so a residual on
 one of those streams is a lifecycle defect rather than jitter and is reported
-as unattributed instead of forgiven.
+as unattributed instead of forgiven. Two further limits: only the part that
+arrived *after* the reply's span was published can be forgiven, since anything
+earlier is already inside its `played_ms`; and a reply whose span was ended by
+a session error is never eligible, because such a span publishes no accounting
+to measure a residual against.
+
+### When a reply has no provider character count
+
+LiveKit tags each `llm` and `tts` metric with the id of the speech that
+produced it, taken from its own speech-handle context. When that tag is absent
+the framework itself could not say which reply the measurement belongs to, and
+neither can we: both stages are additive — one reply emits one metric per
+synthesis segment or tool-call round — so "the previous reply already reported"
+never proves it has finished reporting.
+
+Rather than guess, the SDK refuses the metric once a second reply exists, adds
+a `coverage_gaps` entry naming the stage, and rebuilds the reply's span from
+the captured audio and the transcript with `response.estimated` set. The reply,
+its words and its measured duration all survive; what is lost is the provider's
+own character count, and cost is billed off that. We would rather publish a
+disclosed gap than bill one reply for another reply's characters, which is a
+wrong invoice that looks exactly like a right one.
 
 `stream_ownership` records how that matching was done. Normally the SDK reads
 LiveKit's speech-handle context, so each `tts_node` call names the reply it is

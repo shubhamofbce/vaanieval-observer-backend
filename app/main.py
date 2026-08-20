@@ -877,7 +877,12 @@ def complete_session(session_id: str, completion: CompleteSession, request: Requ
         if len(payload) != info.byte_size or hashlib.sha256(payload).hexdigest() != info.sha256.lower():
             raise HTTPException(400, f"Checksum verification failed: {name}")
     operations = import_operations(session_id)
-    status = "ready" if operations else "partial"
+    # A call the SDK could prove it did not fully capture is not "ready". The
+    # check lives here, not only in the SDK, so an older SDK that learns to
+    # report a gap is believed without the dashboard needing to be redeployed
+    # in lockstep -- and so a gap can never be presented as a healthy call.
+    fully_covered = manifest.get("capture_status", {}).get("coverage_complete", True) is not False
+    status = "ready" if operations and fully_covered else "partial"
     with connect() as db:
         db.execute("DELETE FROM operations WHERE session_id = ?", (session_id,))
         db.executemany(

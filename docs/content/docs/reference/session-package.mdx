@@ -92,6 +92,71 @@ This is how degraded capture becomes visible when `strict` is off.
 | `websocket_instrumentation` | `"active"` when websocket observation is enabled, else `"disabled"` |
 | `dropped_event_count` | Events lost to write failures |
 | `dropped_audio_chunk_count` | Audio chunks lost to write failures |
+| `coverage_complete` | `false` when agent speech was rendered that no operation accounts for |
+| `coverage_gaps` | One entry per proven gap, naming the stage, the reason and the turns |
+| `measured` | What the recorder measured for itself, independently of any plugin |
+
+### `capture_status.measured`
+
+The LiveKit integration tees every frame on its way through `tts_node`, so it
+holds proof of what the agent actually said that does not depend on any plugin
+reporting anything. That is what makes "zero TTS spans" answerable: a silent
+agent and a failed capture look identical without it.
+
+| Field | Meaning |
+| --- | --- |
+| `agent_audio_ms` | Agent speech measured from the frames themselves |
+| `agent_audio_tapped` | `false` when no tap was installed, so nothing here was verified |
+| `derived_tts_op_count` | Spans rebuilt by the SDK because the TTS plugin reported no metrics |
+| `derived_tts_agent_audio_ms` | Speech covered by those rebuilt spans |
+| `derived_tts_share_pct` | Share of the agent's speech described by rebuilt spans |
+| `reconstructed_op_count` | Spans rebuilt from the captured audio alone, with no report from any stage |
+| `tail_written_off_ms` | Measured speech forgiven as turn-boundary jitter |
+| `tail_write_off_cap_ms` | The absolute ceiling on that write-off for any call |
+| `tail_written_off_turn_ids` | Which turns those forgiven milliseconds sat on |
+| `unattributed_agent_audio_ms` | Measured speech on no span and not written off |
+| `unattributed_tolerance_ms` | How much of that is tolerated before the call is called incomplete |
+| `stream_ownership` | `proved` when every reply's audio was matched to it by identity, `inferred` when by timing |
+
+<Callout type="info">
+  A rebuilt span is not a lost one. Every millisecond is still attributed, each
+  span carries `request.derived_from` and `response.estimated_fields`, and
+  `derived_tts_share_pct` says how much of the page is an estimate — on
+  Deepgram `aura-2`, roughly three replies in four emit no metric, so this is
+  routinely high on a perfectly healthy call. `coverage_complete` answers a
+  different question: whether any speech is missing from the record entirely.
+</Callout>
+
+`unattributed_agent_audio_ms` is published on every call, including when it is
+zero and when it sits under `unattributed_tolerance_ms`. A threshold that is
+applied but never shown is a second write-off stacked on the first, so the
+number is always there to be audited even when it does not move the status.
+
+`tail_written_off_ms` only ever covers audio that arrived without a stream
+token — frames whose reply was chosen by timing at a turn boundary. Audio
+rendered through `tts_node` names the reply that produced it, so a residual on
+one of those streams is a lifecycle defect rather than jitter and is reported
+as unattributed instead of forgiven.
+
+`stream_ownership` records how that matching was done. Normally the SDK reads
+LiveKit's speech-handle context, so each `tts_node` call names the reply it is
+rendering and attribution is an identity lookup. On a build that does not expose
+that context the SDK falls back to pinning the stream when `tts_node` is
+invoked, which is sound but weaker: per-turn talk time, latency and cost can
+move between adjacent replies, while call totals stay correct. The field says
+which of the two a per-turn number rests on, and the dashboard warns when it is
+`inferred`.
+
+Per-span fields worth knowing when a number looks surprising:
+
+| Field | Meaning |
+| --- | --- |
+| `response.played_ms` | Rendered to the caller, measured from the audio |
+| `response.audio_ms` | What the provider says it synthesized |
+| `response.provider_audio_ms_undercount_ms` | Set when the caller heard more than the provider billed |
+| `response.ended_at_source` | `"played_audio"` when the span was extended to cover playout |
+| `response.text_source` | `"tts_node"` when the words are what we asked for rather than what was confirmed |
+| `response.segment_count` | Provider metrics summed into this span |
 
 <Callout type="warn">
   A session with `events_complete: false` or a non-zero drop count is classified

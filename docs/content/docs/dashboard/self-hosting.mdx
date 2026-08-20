@@ -8,8 +8,9 @@ console, and runs the STT evaluation engine.
 
 <Callout type="warn">
   **Read the [limits](#operational-limits) before you point production traffic at
-  it.** There is no authentication, no tenant isolation and no retention policy.
-  It is a development and debugging tool, not a multi-tenant service.
+  it.** Ingest authentication is available but off by default, read endpoints are
+  always open, and there is no tenant isolation and no retention policy. It is a
+  development and debugging tool, not a multi-tenant service.
 </Callout>
 
 ## Requirements
@@ -41,7 +42,7 @@ cd dashboard
 ### Install
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 pip install -r requirements-dev.txt   # for tests
@@ -58,6 +59,9 @@ uvicorn app.main:app --reload --port 8000
 ```
 
 - Console: `http://localhost:8000/`
+- Sessions list: `http://localhost:8000/dashboard`
+- Alerts: `http://localhost:8000/alerts`
+- Setup checklist: `http://localhost:8000/onboarding`
 - STT evaluation workspace: `http://localhost:8000/stt-evaluation?session=<id>`
 - Health: `http://localhost:8000/health`
 
@@ -71,18 +75,55 @@ uvicorn app.main:app --reload --port 8000
 VaaniObserver(endpoint="http://localhost:8000", api_key="local-dev")
 ```
 
-Any non-empty API key works — the local service intentionally does not validate
-it.
+Any non-empty API key works by default — the local service records the key but
+does not check it. See [Authentication](#authentication) to turn the gate on.
 
 </Step>
 
 </Steps>
+
+## Authentication
+
+Off by default, and worth turning on before the service leaves your laptop.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `VAANI_REQUIRE_API_KEY` | `0` | `1` requires a bearer token on the two ingest endpoints |
+
+With the gate off, the `authorization` header on an ingest request is recorded
+(so `/onboarding` can tell "a key exists" from "an agent used it") but never
+checked. With it on, `POST /v1/sessions` and `POST /v1/sessions/{id}/complete`
+return `401` without a live key.
+
+Keys are managed over HTTP:
+
+```bash
+# Mint the first key. While enforcement is on and no active key exists, this is
+# allowed from loopback only — which is why you run it on the host itself.
+curl -sX POST http://localhost:8000/v1/api-keys \
+  -H 'content-type: application/json' -d '{"name":"agent-fleet"}'
+
+curl -s http://localhost:8000/v1/api-keys          # list (never returns secrets)
+curl -sX DELETE http://localhost:8000/v1/api-keys/<id> -H 'authorization: Bearer <key>'
+```
+
+Then set `VAANI_API_KEY` in the agent's environment to the returned token.
+
+<Callout type="warn">
+  **The gate covers writes only.** Every read path — the console, `GET
+  /v1/sessions`, and `GET /v1/sessions/{id}/audio/{track}` — stays open with
+  enforcement on. Object `PUT`s are also exempt by design: both SDKs strip the
+  `authorization` header from uploads so the key is never handed to a
+  third-party pre-signed URL. Treat `VAANI_REQUIRE_API_KEY` as protection
+  against anonymous ingest, not as a substitute for a private network.
+</Callout>
 
 ## Configuration
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `VAANI_DATA_DIR` | `./data` | Runtime data directory |
+| `VAANI_REQUIRE_API_KEY` | `0` | `1` requires a bearer token on ingest — see [Authentication](#authentication) |
 | `ELEVENLABS_API_KEY` | — | Challenger transcription; **required** to run an STT evaluation |
 | `OPENAI_API_KEY` | — | Semantic risk judge |
 | `STT_EVAL_JUDGE_MODEL` | `gpt-4o-mini` | Judge model |
@@ -165,8 +206,13 @@ The session becomes `ready` if operations were imported, or `partial` if not.
 
 <Callout type="info">
   `partial` is what surfaces as **unverifiable** in the dashboard. It means the
-  objects arrived but no operations could be read — usually a crash before
-  `session.end()`, or capture that was disabled mid-call.
+  objects arrived but no operations could be read — a crash before
+  `session.end()`, capture disabled mid-call, or an agent that never spoke.
+  Those need opposite responses, so the console reads
+  `capture_status.measured.agent_audio_ms`, which the recorder measures from
+  the audio it taped rather than from any span: `0` on a call with a talking
+  caller means the agent was mute, and points you at your agent instead of at
+  the SDK.
 </Callout>
 
 ## Restart behaviour
@@ -198,15 +244,20 @@ depend on the dashboard.
 ### Security
 
 <Callout type="warn">
-  - **No authentication.** Every endpoint is open. The API key is accepted and
-    ignored.
+  - **Ingest authentication is available but off by default.** Set
+    `VAANI_REQUIRE_API_KEY=1` and mint a key (`POST /v1/api-keys`) to require a
+    bearer token on `POST /v1/sessions` and `POST /v1/sessions/{id}/complete`.
+    Left off, any non-empty key is accepted and recorded but not checked.
+  - **Read endpoints are never authenticated.** The console, the session API and
+    `GET /v1/sessions/{id}/audio/{track}` stream a recorded call to any caller
+    who can reach the service and knows the session id — with or without
+    `VAANI_REQUIRE_API_KEY`.
   - **No tenant isolation.** Every session is visible to everyone who can reach
     the service.
-  - **No authorization on audio.** `GET /v1/sessions/{id}/audio/{track}` streams a
-    recorded call to any caller who knows the session id.
 
-  Bind it to localhost or put it behind an authenticating reverse proxy on a
-  private network. Do not expose it to the internet.
+  Enabling the key gate stops anonymous *writes*; it does not make the dashboard
+  safe to expose. Bind it to localhost or put it behind an authenticating reverse
+  proxy on a private network. Do not expose it to the internet.
 </Callout>
 
 ### Scale

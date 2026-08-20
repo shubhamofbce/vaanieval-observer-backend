@@ -112,7 +112,8 @@ Being clear about this saves you an evaluation cycle.
   result is labelled **estimated WER** / **model disagreement**, never accuracy.
   See [Metrics](/docs/reference/metrics).
 - **It is not multi-tenant SaaS in this release.** The dashboard you self-host
-  has no authentication and no tenant isolation. Read
+  has no tenant isolation, and its read endpoints are always open. Ingest can be
+  gated with `VAANI_REQUIRE_API_KEY=1`. Read
   [Self-hosting](/docs/dashboard/self-hosting) before you put it anywhere but a
   private network.
 - **It does not replace your agent framework's own tracing.** It complements it.

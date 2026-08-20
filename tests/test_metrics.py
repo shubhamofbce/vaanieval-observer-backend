@@ -178,3 +178,26 @@ def test_provider_names_collapse_to_one_vendor_per_row():
     # An unrecognised vendor keeps its own identity - onboarding a new provider
     # must not require a code change to appear on the dashboard.
     assert metrics.canonical_provider("Cartesia") == "cartesia"
+
+
+def test_a_derived_tts_span_is_not_charted_as_synthesis_latency():
+    """A reconstructed span's extent is playout, not provider work.
+
+    The SDK derives a TTS span when the plugin emits no metric at all, and its
+    duration is the reply's playout window -- seconds of the caller listening.
+    Reporting that in the synthesis column puts a number an order of magnitude
+    too large next to real measurements, indistinguishable from them.
+    """
+    derived = {"duration_ms": 9200, "request": {"derived_from": "conversation_item_added"}}
+    measured = {"duration_ms": 1100, "request": {}}
+    assert metrics.tts_synthesis_ms(derived) is None
+    assert metrics.tts_synthesis_ms(measured) == 1100
+
+
+def test_a_derived_tts_span_never_reports_zero_time_to_first_audio():
+    """A zero is read as instant; an absent value is read as unknown."""
+    derived_without_milestone = {
+        "started_at_ms": 0,
+        "request": {"derived_from": "conversation_item_added"},
+    }
+    assert metrics.tts_first_audio_ms(derived_without_milestone) is None

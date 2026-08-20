@@ -283,6 +283,22 @@ def tts_first_audio_ms(op: dict[str, Any]) -> int | None:
     return round(at - start)
 
 
+def tts_synthesis_ms(op: dict[str, Any]) -> int | None:
+    """How long the provider took to synthesize, or nothing.
+
+    A *derived* span is reconstructed by the SDK when the TTS plugin emitted no
+    metric at all, and its extent is the reply's playout window -- seconds of
+    the caller listening, not the provider working. Charting that as synthesis
+    latency would report a p95 an order of magnitude above the truth, in the
+    same column as real measurements and indistinguishable from them. A missing
+    value is read as "not measured", which is exactly what it is.
+    """
+    if (op.get("request") or {}).get("derived_from"):
+        return None
+    duration = op.get("duration_ms")
+    return duration if isinstance(duration, (int, float)) else None
+
+
 def turn_metrics(turn: dict[str, Any], call_started_epoch_ms: int | None) -> dict[str, Any]:
     """One flat, indexable row of measurements for a single turn.
 
@@ -344,7 +360,7 @@ def turn_metrics(turn: dict[str, Any], call_started_epoch_ms: int | None) -> dic
         "llm_output_tokens": _tokens(llm, "completion_tokens", "output_tokens") if llm else None,
         # TTS: synthesis is the provider span, never playback duration.
         "tts_first_audio_ms": tts_first_audio_ms(tts) if tts else None,
-        "tts_synthesis_ms": tts.get("duration_ms") if tts else None,
+        "tts_synthesis_ms": tts_synthesis_ms(tts) if tts else None,
         # Tools.
         "tool_count": len(tool_ops),
         "tool_total_ms": round(sum(tool_durations)) if tool_durations else None,

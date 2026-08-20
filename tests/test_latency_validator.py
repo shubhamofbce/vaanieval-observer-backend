@@ -45,9 +45,35 @@ def test_every_published_latency_value_is_supported_by_raw_evidence():
     totals = report["totals"]
     # Guard the strength of the check, not just its outcome: a validator that
     # stopped recomputing values would still "pass" while proving nothing.
-    assert totals["evidence"] > 400, totals
-    assert totals["aggregate"] > 200, totals
-    assert report["numeric"] > 300, report["numeric"]
+    #
+    # Expressed per *validated* session rather than as an absolute count.
+    # Absolute thresholds silently encoded "this developer has ~6 recorded
+    # calls on disk", so a correct validator run over correct data failed the
+    # build for anyone with fewer — a red suite that says nothing about the
+    # code is worse than no check, because it trains people to ignore it.
+    #
+    # A call with no operations is excluded, not tolerated: an agent that never
+    # spoke publishes no latency values, so there is nothing to re-derive and
+    # demanding evidence for it recreates exactly the false alarm above. The
+    # separate assertion that *some* session carries operations is what stops
+    # that exclusion from emptying the check.
+    sessions = report["sessions"]
+    measured = [s for s in sessions if s.get("operations")]
+    assert measured, (
+        "no recorded call carries any operation, so the validator re-derived "
+        "nothing; record a call with a responding agent before trusting this suite"
+    )
+    thin = [s["session"][:8] for s in measured if not s.get("evidence")]
+    assert not thin, (
+        "the validator recomputed nothing for these calls, so their published "
+        f"latency values are unchecked: {thin}"
+    )
+    for category in ("evidence", "aggregate"):
+        assert totals[category] >= len(measured), (
+            f"{category} checks ({totals[category]}) fell below one per validated "
+            f"session ({len(measured)}); the validator has stopped doing its job"
+        )
+    assert report["numeric"] >= len(measured), report["numeric"]
 
 
 def test_validator_rejects_a_fabricated_zero_duration():

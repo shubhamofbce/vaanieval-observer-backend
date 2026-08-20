@@ -7,10 +7,12 @@ The dashboard exposes a small HTTP API. The SDKs use the upload endpoints; the
 console uses the rest.
 
 <Callout type="warn">
-  **There is no authentication.** The `authorization` header is accepted and
-  ignored; any non-empty API key works. Every endpoint, including audio download,
-  is open to anyone who can reach the service. Bind it to localhost or put it
-  behind an authenticating proxy.
+  **Authentication is off by default.** With `VAANI_REQUIRE_API_KEY=1` the two
+  ingest endpoints (`POST /v1/sessions` and `POST /v1/sessions/{id}/complete`)
+  require a bearer token minted through `POST /v1/api-keys`; without it, the
+  `authorization` header is recorded but not checked and any non-empty key
+  works. Read endpoints, including audio download, are open either way. Bind it
+  to localhost or put it behind an authenticating proxy.
 </Callout>
 
 ## Upload protocol

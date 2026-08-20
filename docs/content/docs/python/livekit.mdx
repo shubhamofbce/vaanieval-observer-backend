@@ -354,6 +354,29 @@ receipt names the backend you are currently writing to. A receipt that names no
 backend — one written by an older version — still suppresses a re-upload, but is
 never treated as grounds for deleting the call.
 
+<Callout type="warn">
+  **Repointing requires `--yes`.** A spool records every endpoint it has been
+  used with, in `.vaani-destinations` at its root. A drain configured for a
+  destination that file has never seen refuses the whole pass, exits `2` and
+  uploads nothing:
+
+  ```
+  refusing to drain: /srv/spool has previously been used with
+  https://ingest.example.com but this pass is configured for
+  https://ingest.exmaple.com. 5 package(s) hold raw call audio and caller
+  speech; uploading them would disclose that to a host this spool has never
+  shipped to. Confirm with --yes if the change is intended, or correct
+  VAANI_ENDPOINT.
+  ```
+
+  Packages contain the caller's voice and whatever they said, and a successful
+  upload is what authorises deleting the local copy — so a mistyped hostname
+  would otherwise disclose the recordings *and* destroy the only other copy,
+  reporting a clean pass. A confirmed change uploads but keeps the local copies;
+  the next pass, once the new endpoint is a known one, reclaims the disk
+  normally.
+</Callout>
+
 It also removes packages that were uploaded **in-process** by `finish()` — those
 carry an `uploaded.json` receipt and are otherwise skipped by every pass, which
 at ~28 MB per five-minute call fills a busy worker's disk. They are kept for

@@ -554,7 +554,58 @@ function buildTranscript(operations) {
     }
   }
 
+  if (!entries.length) {
+    // No LLM bodies were captured. For a voice agent that is the normal case,
+    // and the spoken conversation is recorded on the STT and TTS spans.
+    const voice = buildVoiceTranscript(operations);
+    if (voice.entries.length) {
+      return { entries: voice.entries, systemPrompt, modelCallCount: calls.length, bodiesCaptured, source: 'voice' };
+    }
+    return { entries, systemPrompt, modelCallCount: calls.length, bodiesCaptured, voice };
+  }
   return { entries, systemPrompt, modelCallCount: calls.length, bodiesCaptured };
+}
+
+/** The conversation as it was actually spoken.
+ *
+ *  `buildTranscript` reconstructs the dialogue from LLM request/response
+ *  bodies, which is the only source an HTTP-instrumented agent has. A voice
+ *  agent recorded through the LiveKit integration captures no LLM bodies at
+ *  all, so that path produced a permanently empty Transcript tab even though
+ *  the STT and TTS spans carried both halves of the conversation verbatim.
+ *
+ *  These spans are also the better source where they exist: `stt.transcript` is
+ *  what the caller was heard to say and `tts.text` is what was actually played
+ *  to them, whereas the LLM bodies are what the model was asked and what it
+ *  proposed -- which on an interrupted reply is not what anyone heard. */
+function buildVoiceTranscript(operations) {
+  const entries = [];
+  let spokenOps = 0;
+  let contentCaptured = false;
+  for (const op of operations) {
+    const isUser = op.type === 'stt';
+    if (!isUser && op.type !== 'tts') continue;
+    const response = op.response || {};
+    const text = (isUser ? response.transcript : response.text) || '';
+    // A span with a character count but no characters is content capture being
+    // switched off, not a silent participant. Counted so the empty state can
+    // say which of the two it is.
+    if (text || response.char_count || response.characters_count) spokenOps += 1;
+    if (!text) continue;
+    contentCaptured = true;
+    entries.push({
+      role: isUser ? 'user' : 'assistant',
+      text,
+      toolCalls: [],
+      at: op.started_at_ms,
+      turnId: op.turn_id ?? null,
+      op,
+      latency: isUser ? null : op.duration_ms,
+      source: 'voice',
+    });
+  }
+  entries.sort((a, b) => (a.at || 0) - (b.at || 0));
+  return { entries, spokenOps, contentCaptured };
 }
 
 /* ----------------------------------------------------------------- state */
@@ -913,8 +964,7 @@ async function selectSession(id, restore = {}) {
     const session = await api(`/v1/sessions/${encodeURIComponent(id)}`);
     if (token !== state.requestToken) return;
     state.session = session;
-    state.transcript = buildTranscript(session.operations || []);
-    state.opsById = new Map((session.operations || []).map((op) => [op.event_id, op]));
+    state.transcript = buildTranscript(session.operations || []);    state.opsById = new Map((session.operations || []).map((op) => [op.event_id, op]));
     state.turnsById = new Map((session.turns || []).map((turn) => [turn.turn_id, turn]));
     state.selection = null;
     applyViewState(restore);
@@ -972,7 +1022,81 @@ function teardownCall() {
 function captureWarnings(session) {
   const capture = session.manifest?.capture_status || {};
   const warnings = [];
-  if (session.status === 'partial') warnings.push('No classified operations were imported, so the timeline and transcript are empty. Check that events.jsonl reached the observer.');
+  if (session.status === 'partial' && !(capture.coverage_gaps || []).length) {
+    // Zero operations has two very different causes and only the recorder's own
+    // audio tap can tell them apart. Reporting the measurement turns "the SDK
+    // looks broken" into "your agent never spoke" — which is the failure that
+    // actually cost the caller, and the one an operator would otherwise never
+    // be told about.
+    const measured = capture.measured || {};
+    const agentMs = measured.agent_audio_ms;
+    // `agent_audio_ms: 0` only means "the agent was silent" when the tap was
+    // actually running. With no tap installed it means nothing was ever
+    // measured, and telling an operator who mis-wired the SDK that their agent
+    // was mute sends them to debug the one thing that was working.
+    if (agentMs === 0 && measured.agent_audio_tapped === false) {
+      warnings.push('No operations were captured and no audio tap was installed, so the agent was never measured. Pass agent=<your Agent> to observe_agent_session() (and mix in VaaniAudioTapMixin) before concluding anything about this call.');
+    } else if (agentMs === 0) {
+      warnings.push('No operations were captured, and the recorder measured 0ms of agent audio: the agent never spoke on this call. This is a measurement of your agent, not a gap in capture.');
+    } else if (agentMs > 0) {
+      warnings.push(`No classified operations were imported, yet the recorder measured ${(agentMs / 1000).toFixed(1)}s of agent audio. The agent spoke but nothing was classified — check that events.jsonl reached the observer.`);
+    } else {
+      warnings.push('No classified operations were imported, so the timeline and transcript are empty. Check that events.jsonl reached the observer.');
+    }
+  }
+  // A stage that demonstrably ran but produced no span. Reported first and in
+  // the SDK's own words, because it is the one warning that says a number on
+  // this page is missing rather than merely uncertain.
+  for (const gap of capture.coverage_gaps || []) {
+    const detail = [
+      gap.turn_count ? `${gap.turn_count} turn(s)` : null,
+      gap.unattributed_agent_audio_ms ? `${(gap.unattributed_agent_audio_ms / 1000).toFixed(1)}s of agent audio unaccounted for` : null,
+      // Over-attribution is the direction that flatters the product, so it is
+      // named just as plainly as the direction that shortchanges it.
+      gap.overattributed_agent_audio_ms ? `${(gap.overattributed_agent_audio_ms / 1000).toFixed(1)}s more agent audio reported than was rendered` : null,
+    ].filter(Boolean).join(', ');
+    warnings.push(`Incomplete ${gap.stage} capture: ${gap.reason}${detail ? ` (${detail})` : ''}. Latency and cost for this stage are understated.`);
+  }
+  // Spans the provider never reported, rebuilt from LiveKit's turn report or
+  // from the recorder's own audio tape. On a real Deepgram `aura-2` call this
+  // is most of them, and every synthesis-latency number on this page is an
+  // estimate as a result. Saying so is the difference between a number a
+  // reader knows is approximate — which is useful — and one they believe was
+  // measured, which is worse than a gap.
+  const derivedOps = capture.measured?.derived_tts_op_count || 0;
+  if (derivedOps > 0) {
+    const derivedMs = capture.measured.derived_tts_agent_audio_ms || 0;
+    warnings.push(`${derivedOps} TTS span(s)${derivedMs ? ` covering ${(derivedMs / 1000).toFixed(1)}s of speech` : ''} were reconstructed because the TTS plugin emitted no metrics_collected for them. Their timings are estimates and provider character counts are unavailable; spans are labelled inferred on the timeline.`);
+  }
+  // The share is published on every call, so it says "most of this page is an
+  // estimate" even when the op count alone reads as a handful of spans.
+  const derivedShare = capture.measured?.derived_tts_share_pct;
+  if (derivedShare >= 50) {
+    warnings.push(`${derivedShare}% of the agent's speech on this call is described by reconstructed spans rather than provider measurements, so most synthesis timings here are estimates.`);
+  }
+  // Which reply an audio stream belonged to is normally proved from LiveKit's
+  // speech context. On a build that does not expose it the recorder falls back
+  // to timing, which is sound but weaker — and a per-turn number that rests on
+  // a guess should not look identical to one that rests on identity.
+  if (capture.measured?.stream_ownership === 'inferred') {
+    warnings.push('This livekit-agents build does not expose the speech-handle context, so each reply\'s audio was matched to it by timing rather than by identity. Per-turn talk time, latency and cost may have moved between adjacent replies; call totals are unaffected.');
+  }
+  // Boundary jitter the coverage audit forgave. Small by construction and
+  // capped, but a write-off nobody can see is indistinguishable from data that
+  // was never lost.
+  const writtenOff = capture.measured?.tail_written_off_ms || 0;
+  if (writtenOff > 0) {
+    const onTurns = capture.measured.tail_written_off_turn_ids || [];
+    warnings.push(`${writtenOff}ms of measured agent audio sits on no TTS span and was written off as turn-boundary jitter (cap ${capture.measured.tail_write_off_cap_ms}ms)${onTurns.length ? ` on ${onTurns.join(', ')}` : ''}.`);
+  }
+  // Audio that reached no span and was not written off. It sits under the
+  // tolerance, so it does not move the status — which is exactly why it has to
+  // be visible: a threshold that is applied but never shown is a second,
+  // invisible write-off stacked on the first.
+  const unattributed = capture.measured?.unattributed_agent_audio_ms || 0;
+  if (unattributed > 0) {
+    warnings.push(`${unattributed}ms of measured agent audio is on no TTS span, within the ${capture.measured.unattributed_tolerance_ms}ms tolerance that keeps it out of the capture verdict.`);
+  }
   if (capture.events_complete === false) warnings.push('The SDK reported an incomplete event stream.');
   if (capture.audio_complete === false) warnings.push('Stereo call audio capture was incomplete.');
   if (capture.caller_audio_complete === false) warnings.push('Caller audio capture was incomplete.');
@@ -1580,19 +1704,27 @@ function drawTurnGuides(turn) {
  *  Reading what was said and hearing it said are the same act of review, so the
  *  transcript stays on screen with the waveform and follows the playhead. */
 function buildTranscriptSection(session) {
-  const { entries, systemPrompt, modelCallCount, bodiesCaptured } = state.transcript || { entries: [], modelCallCount: 0 };
+  const { entries, systemPrompt, modelCallCount, bodiesCaptured, voice } = state.transcript || { entries: [], modelCallCount: 0 };
   const body = h('div', { class: 'card-body transcript-body' });
 
   if (!entries.length) {
+    // Naming the actual cause matters more here than anywhere else on the
+    // page: "nothing was said", "we did not record it" and "you turned
+    // recording off" look identical to a reader and mean completely different
+    // things about the call.
+    let explanation;
+    if (voice?.spokenOps) {
+      explanation = `${voice.spokenOps} speech operation(s) were recorded, but their words were not stored. Content capture is off; set VAANI_CAPTURE_STT_CONTENT=1 in the SDK to read the conversation here.`;
+    } else if (!modelCallCount) {
+      explanation = 'The transcript is read from the speech operations, falling back to model requests and responses. This call has no captured stt, tts or llm operations, so there is nothing to show.';
+    } else if (bodiesCaptured) {
+      explanation = `${modelCallCount} model call(s) were recorded but none carried readable message content.`;
+    } else {
+      explanation = `${modelCallCount} model call(s) were recorded without their request or response bodies, so their words were never stored. Enable body capture in the SDK to read the conversation here.`;
+    }
     body.append(h('div', { class: 'empty-block' },
       h('b', { text: 'No conversation captured' }),
-      h('p', {
-        text: !modelCallCount
-          ? 'The transcript is reconstructed from model requests and responses. This call has no captured llm operations, so there is nothing to show.'
-          : bodiesCaptured
-            ? `${modelCallCount} model call(s) were recorded but none carried readable message content.`
-            : `${modelCallCount} model call(s) were recorded without their request or response bodies, so their words were never stored. Enable body capture in the SDK to read the conversation here.`,
-      }),
+      h('p', { text: explanation }),
     ));
     return transcriptSection(body, 0, null, session);
   }

@@ -245,8 +245,18 @@ quietly missing turns.
 <Accordion title="The session shows as 'partial'">
 
 The objects verified, but no operations could be read from `events.jsonl`.
-Usually the process died before `session.end()`, or every operation was left
-unended. `partial` is what surfaces as **unverifiable** in the dashboard.
+`partial` is what surfaces as **unverifiable** in the dashboard.
+
+Check the capture warning on the call first — it distinguishes the three causes:
+
+| Warning says | Cause |
+| --- | --- |
+| the recorder measured **0ms of agent audio** | Your agent never spoke. Nothing is wrong with the recording; debug the agent. |
+| the agent spoke but **nothing was classified** | `events.jsonl` did not reach the observer, or every operation was left unended. |
+| neither (an older SDK) | Usually a crash before `session.end()`. |
+
+The measurement comes from the recorder's own tap in `tts_node`, so it does not
+depend on any provider emitting metrics.
 
 </Accordion>
 

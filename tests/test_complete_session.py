@@ -37,6 +37,56 @@ def test_marks_a_session_partial_when_events_contain_no_operations(client):
     assert complete(client, objects={"events.jsonl": object_info(events)}).json()["status"] == "partial"
 
 
+def test_a_measured_silent_agent_is_not_treated_as_a_capture_failure(client):
+    """Zero operations because the agent was mute is a finding, not a defect.
+
+    `measured` carries the recorder's own tap, so the console can name the real
+    story. It must not be mistaken for a coverage gap: silence is a complete
+    capture of a call in which nothing happened.
+    """
+    create(client, "call-mute", capture_status={
+        "events_complete": True,
+        "audio_complete": True,
+        "coverage_complete": True,
+        "measured": {"agent_audio_ms": 0, "agent_audio_bytes": 0},
+    })
+    events = jsonl({"type": "session_start"})
+    assert upload(client, "call-mute", "events.jsonl", events).status_code == 204
+    response = complete(client, session_id="call-mute", objects={"events.jsonl": object_info(events)})
+    assert response.status_code == 202, response.text
+    body = response.json()
+    assert body["operation_count"] == 0
+    # Still `partial`, because nothing was classified -- but the manifest now
+    # carries the evidence that says why, which is what the console reads.
+    assert body["status"] == "partial"
+
+
+def test_marks_a_session_partial_when_the_sdk_reported_a_coverage_gap(client):
+    """A call the SDK could prove it did not fully capture is not "ready".
+
+    Operations were imported, so the old rule would have called this healthy --
+    which is exactly how a stage that produced no spans at all came to sit
+    behind a green check while every latency and cost number derived from it
+    was understated."""
+    create(client, "call-1", capture_status={
+        "events_complete": True,
+        "audio_complete": True,
+        "coverage_complete": False,
+        "coverage_gaps": [{
+            "stage": "tts",
+            "reason": "agent audio was rendered on turns that carry no tts operation",
+            "turn_count": 4,
+            "unattributed_agent_audio_ms": 63400,
+        }],
+    })
+    events = jsonl(operation(started_at_ms=0))
+    upload(client, "call-1", "events.jsonl", events)
+    response = complete(client, objects={"events.jsonl": object_info(events)})
+    assert response.status_code == 202
+    assert response.json()["status"] == "partial"
+    assert response.json()["operation_count"] == 1
+
+
 def test_rejects_completion_for_an_unknown_session(client):
     assert complete(client, "missing").status_code == 404
 

@@ -26,7 +26,7 @@ audio you can play and a trace you can expand.
 ```bash
 git clone https://github.com/shubhamofbce/vaanieval-observer-backend.git dashboard
 cd dashboard
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
@@ -44,9 +44,10 @@ uvicorn app.main:app --reload --port 8000
 The console is at `http://localhost:8000/`.
 
 <Callout type="warn">
-  The local dashboard has **no authentication and no tenant isolation**, and it
-  accepts any non-empty API key without validating it. Keep it on localhost or a
-  private network. See [Self-hosting](/docs/dashboard/self-hosting).
+  Out of the box the local dashboard **accepts any non-empty API key without
+  checking it**, and has no tenant isolation. Set `VAANI_REQUIRE_API_KEY=1` to
+  make ingest require a real key; read endpoints stay open either way. Keep it on
+  localhost or a private network. See [Self-hosting](/docs/dashboard/self-hosting).
 </Callout>
 
 </Step>

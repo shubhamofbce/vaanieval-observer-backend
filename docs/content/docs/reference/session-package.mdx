@@ -92,9 +92,22 @@ This is how degraded capture becomes visible when `strict` is off.
 | `websocket_instrumentation` | `"active"` when websocket observation is enabled, else `"disabled"` |
 | `dropped_event_count` | Events lost to write failures |
 | `dropped_audio_chunk_count` | Audio chunks lost to write failures |
-| `coverage_complete` | `false` when agent speech was rendered that no operation accounts for |
+| `coverage_complete` | `false` when any reply is not fully accounted for by an operation |
 | `coverage_gaps` | One entry per proven gap, naming the stage, the reason and the turns |
 | `measured` | What the recorder measured for itself, independently of any plugin |
+
+A gap entry always carries `stage`, `reason` and `turn_ids`; the remaining
+fields depend on what the gap can actually support. Two reasons are easy to
+confuse and are deliberately reported apart:
+
+- **"agent audio was rendered that no tts operation accounts for"** — the caller
+  heard something the spans do not describe. It carries
+  `unattributed_agent_audio_ms`, and latency and cost for those turns are
+  understated by a measurable amount.
+- **"a reply's text was captured but it was never rendered as audio"** — the
+  reply was composed but nothing was played, usually because the call ended
+  while the agent was still speaking. There is no unaccounted audio to report,
+  so no audio total is published with it.
 
 ### `capture_status.measured`
 

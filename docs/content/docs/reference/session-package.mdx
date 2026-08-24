@@ -271,6 +271,8 @@ specifically, by which frame asked for the reply:
 | LiveKit **reissuing** a reply for a run that already exists — `RunResult._maybe_retry_output()` (`run_result.py:292`) after a structured output fails to validate, or `realtime_fallback_adapter.py:394`/`:445` when a realtime session drops to a text model | Whoever started that run; the event carries no run identity to say who | Its own turn, **not** joined by the following transcript, `reply_attribution: "inferred"` |
 | The public method was **replaced** — a subclass or wrapper stands in for `generate_reply`, so neither it nor `AgentActivity._generate_reply()` is on the stack with LiveKit above it | Unknowable | Its own turn, `reply_attribution: "inferred"` |
 | The stack could not be read — introspection blocked, the public method's code object unreachable, or `livekit.agents` imports but its modules have moved on this build | Unknowable | Its own turn, `reply_attribution: "inferred"` |
+| A **decorated or traced** `generate_reply` — `functools.wraps` copies the name but not the code object, so the stand-in frame is literally called `wrapper` and the override reaches a different internal path | Unknowable | Its own turn, `reply_attribution: "inferred"` |
+| A session that is **not** LiveKit's — a compatible or test double passed to `attach()` on a machine where `livekit.agents` is not importable at all | Unknowable | Its own turn, `reply_attribution: "inferred"` |
 
 Two rows stay judgements: the post-tool reply, and your own `generate_reply()`.
 Yours is scheduled and `user_initiated` exactly like the automatic answer —
@@ -283,9 +285,16 @@ rather than from a replaced method, which matters in two everyday cases: saving
 the bound method (`reply = session.generate_reply`) before recording starts does
 not hide the call, and LiveKit's own internal uses of the method — more than a
 dozen on 1.7.0 — are not reported as yours. A subclass or wrapper that replaces
-the method entirely is recognised too, because the reply is anchored on the
-function that *emits* the event (`AgentActivity._generate_reply()`) and, failing
-that, on a frame calling itself `generate_reply` on an `AgentSession`. LiveKit's own calls are still
+the method entirely is recognised too, but not by looking for it. LiveKit's
+automatic answer is emitted from inside `AgentActivity._generate_reply()`
+(`agent_activity.py:1559`), synchronously, so that frame is on the stack every
+single time the automatic answer is created. Its *absence* therefore rules the
+automatic answer out, whatever the reply turns out to be — which is what makes a
+decorated override safe: `functools.wraps` copies the name, so a wrapper frame
+is still literally called `wrapper`, and no amount of name matching would find
+it. A frame calling itself `generate_reply` on the recorded session is used as a
+weaker second reading, for builds where that anchor cannot be resolved at all.
+LiveKit's own calls are still
 flagged, because not all of them answer speech already under way: the
 `beta/workflows` and IVR helpers ask the caller a question before the caller has
 said anything, and the transcript that follows is the answer to it rather than

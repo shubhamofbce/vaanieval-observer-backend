@@ -450,24 +450,51 @@ def folds_into_present_parent(continues_turn: Any, present_turn_ids: Container[s
     return bool(continues_turn) and str(continues_turn) in present_turn_ids
 
 
-def _chain_root(row: dict[str, Any],
-                by_id: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def continuation_ids(rows: Sequence[dict[str, Any]]) -> "set[str]":
+    """The rows that genuinely fold into another row of the same call.
+
+    A row folds only into a parent we actually have, and only when following
+    the parents ever reaches a row that starts an exchange. A package claiming
+    `A continues B` and `B continues A` satisfies the first test in both
+    directions, so both rows were subtracted and the call was stored as ready
+    with zero turns -- and because ingest and the drift audit share this code by
+    design, the audit agreed with the wrong answer instead of reporting it. A
+    cycle has no first half, so no row in one is treated as a continuation: the
+    call keeps its turns, and the halves read as separate exchanges, which is
+    the honest reading of a package that cannot say which came first.
+    """
+    by_id = {str(row["turn_id"]): row for row in rows if row.get("turn_id")}
+    folds: "set[str]" = set()
+    for row in rows:
+        row_id = str(row.get("turn_id") or "")
+        if not row_id or not folds_into_present_parent(row.get("continues_turn"), by_id):
+            continue
+        seen = {row_id}
+        cursor = by_id[str(row["continues_turn"])]
+        while True:
+            cursor_id = str(cursor.get("turn_id") or "")
+            if cursor_id in seen:
+                break  # a cycle: this row starts nothing and folds into nothing
+            seen.add(cursor_id)
+            if not folds_into_present_parent(cursor.get("continues_turn"), by_id):
+                folds.add(row_id)
+                break
+            cursor = by_id[str(cursor["continues_turn"])]
+    return folds
+
+
+def _chain_root(row: dict[str, Any], by_id: dict[str, dict[str, Any]],
+                folds: "set[str]") -> dict[str, Any]:
     """Walk back to the row an exchange started on.
 
     A split can itself be split, so a parent may be someone else's
-    continuation. The walk stops at the first row that folds into nothing we
-    have -- that row is the one `turns` counts, so it is the only honest place
-    to record that the exchange has more halves. `seen` guards against a
-    corrupt package pointing two rows at each other, which would otherwise
-    spin here rather than fail a parse.
+    continuation. The walk stops at the first row that folds into nothing --
+    that row is the one `turns` counts, so it is the only honest place to record
+    that the exchange has more halves. Rows in a cycle are not continuations, so
+    the walk always terminates.
     """
-    seen = {str(row["turn_id"])} if row.get("turn_id") else set()
-    while folds_into_present_parent(row.get("continues_turn"), by_id):
-        parent_id = str(row["continues_turn"])
-        if parent_id in seen:
-            return row
-        seen.add(parent_id)
-        row = by_id[parent_id]
+    while str(row.get("turn_id") or "") in folds:
+        row = by_id[str(row["continues_turn"])]
     return row
 
 
@@ -475,45 +502,50 @@ def resolve_split_columns(rows: Sequence[dict[str, Any]]) -> Sequence[dict[str, 
     """Fill in the columns that can only be decided by looking at sibling rows.
 
     `turn_metrics` sees one turn at a time, but whether a row folds into
-    another -- and which stages that doubles -- are facts about a pair. Deriving
-    them at ingest and nowhere else meant the drift audit, which recomputes row
-    by row, reported every split call as permanently tampered. One function, so
-    the cache and the check that proves the cache still agree by construction.
+    another -- and which stages that doubles -- are facts about a chain.
+    Deriving them at ingest and nowhere else meant the drift audit, which
+    recomputes row by row, reported every split call as permanently tampered.
+    One function, so the cache and the check that proves the cache still agree
+    by construction.
     """
     by_id = {str(row["turn_id"]): row for row in rows if row.get("turn_id")}
+    folds = continuation_ids(rows)
+    chains: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         row["is_continuation"] = 0
         row["has_continuation"] = 0
         for stage in STAGES:
             row[f"{stage}_split"] = 0
     for row in rows:
-        if not folds_into_present_parent(row.get("continues_turn"), by_id):
+        if str(row.get("turn_id") or "") not in folds:
             continue
-        parent = by_id[str(row["continues_turn"])]
         row["is_continuation"] = 1
         # An exchange can be split more than once -- `A <- B <- C` is one
-        # exchange in three rows -- and the middle row is then both a
-        # continuation and a parent. Recording the split on it would put the
-        # flag on a row that is itself subtracted from `turns`, so a range
-        # holding only that row would report a split exchange and no exchange
-        # to split: exactly the contradiction anchoring was meant to end. The
+        # exchange in three rows -- and a middle row is then a continuation and
+        # a parent at once. Recording the split on it would put the flag on a
+        # row that is itself subtracted from `turns`, so a range holding only
+        # that row would report a split exchange and no exchange to split. The
         # facts go on the row the exchange started on, which is the only row in
         # the chain that `turns` still counts.
-        root = _chain_root(parent, by_id)
+        root = _chain_root(row, by_id, folds)
         # The split is recorded against the half the exchange started on, so
-        # that a range holding only the other half cannot report an exchange it
-        # is not also counting. Calls already follow this rule when they span an
+        # that a range holding only another half cannot report an exchange it is
+        # not also counting. Calls already follow this rule when they span an
         # hour; an exchange split across one is the same shape of problem.
         root["has_continuation"] = 1
-        # A stage inflates its own denominator only if it ran on more than one
-        # half. The first half of a split is usually speech-to-text and nothing
-        # else, but it can carry a filler reply, so which stages doubled is a
-        # fact about these rows rather than something to assume. The comparison
-        # is against the immediate parent, because that is the pair that was
-        # actually split; the flag is then filed on the root.
+        chains.setdefault(str(root["turn_id"]), [root]).append(row)
+    # A stage inflates its own denominator only if it ran on more than one half
+    # of the same exchange -- and those halves need not be adjacent. Comparing
+    # each row against its immediate parent missed a stage that ran on the first
+    # and third halves but not the middle one, which is what happens whenever a
+    # middle half carries only the caller's words: the dashboard then reported
+    # two measured turns, one logical turn, and no split to explain the
+    # difference. The question is about the whole chain, so ask the whole chain.
+    for members in chains.values():
+        root = members[0]
         for stage in STAGES:
-            if ((row.get(f"{stage}_ops") or 0) > 0
-                    and (parent.get(f"{stage}_ops") or 0) > 0):
+            if sum(1 for member in members
+                   if (member.get(f"{stage}_ops") or 0) > 0) > 1:
                 root[f"{stage}_split"] = 1
     return rows
 
@@ -529,11 +561,10 @@ def call_metrics(turns: Sequence[dict[str, Any]]) -> dict[str, Any]:
     # continuation unconditionally meant a package whose first half was missing
     # reported `turn_count: 0` for a call that plainly had a turn, which also
     # hid it from the unmeasured-call check -- that keys off `turn_count > 0`.
-    present = {str(turn["turn_id"]) for turn in turns if turn.get("turn_id")}
-    continuations = sum(
-        1 for turn in turns
-        if folds_into_present_parent(turn.get("continues_turn"), present)
-    )
+    # The same rule the ingest columns use, including its answer for a package
+    # whose continuations point at each other: one function, or the call page
+    # and the rail disagree about how many exchanges a call had.
+    continuations = len(continuation_ids(turns))
     return {
         "turn_count": len(turns) - continuations,
         "split_turn_count": continuations,

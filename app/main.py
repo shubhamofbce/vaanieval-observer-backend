@@ -925,9 +925,24 @@ def complete_session(session_id: str, completion: CompleteSession, request: Requ
     # continuation whose first half is missing must not claim to fold into it.
     # The raw `operation_json` is left exactly as recorded -- the SDK did say
     # the turn continues something, and that evidence is not ours to rewrite.
-    present_turn_ids = {
-        str(op["turn_id"]) for op in operations if op.get("turn_id") is not None
-    }
+    # One rule, asked once. The rail reads this column directly while the call
+    # page reads `call_metrics`, so anything the two decide separately is a
+    # disagreement waiting to be shipped -- a package whose halves point at each
+    # other was subtracted here and counted there, listing a ready call with no
+    # turns beside a rollup that had two.
+    # One row per turn the package contains, whether or not any of its
+    # operations claims to continue something: a turn that recognised nothing
+    # is still a turn another half can fold into.
+    turn_rows: dict[str, dict[str, Any]] = {}
+    for op in operations:
+        if op.get("turn_id") is None:
+            continue
+        row = turn_rows.setdefault(str(op["turn_id"]),
+                                   {"turn_id": str(op["turn_id"]), "continues_turn": None})
+        parent = (op.get("response") or {}).get("continues_turn")
+        if parent is not None and row["continues_turn"] is None:
+            row["continues_turn"] = parent
+    folded_turn_ids = metrics.continuation_ids(list(turn_rows.values()))
     # A call the SDK could prove it did not fully capture is not "ready". The
     # check lives here, not only in the SDK, so an older SDK that learns to
     # report a gap is believed without the dashboard needing to be redeployed
@@ -947,10 +962,7 @@ def complete_session(session_id: str, completion: CompleteSession, request: Requ
                     str(op["turn_id"]) if op.get("turn_id") is not None else None,
                     op.get("scope", "turn"),
                     int(has_failed(op)),
-                    int(metrics.folds_into_present_parent(
-                        (op.get("response") or {}).get("continues_turn"),
-                        present_turn_ids,
-                    )),
+                    int(str(op.get("turn_id")) in folded_turn_ids),
                 )
                 for op in operations
             ],

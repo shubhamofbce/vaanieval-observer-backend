@@ -1026,6 +1026,98 @@ def test_an_hour_holding_only_the_middle_of_a_twice_split_exchange_claims_nothin
         )
 
 
+def gapped_chain_events() -> bytes:
+    """`turn-1 <- turn-2 <- turn-3`, with the language model on the ends only.
+
+    A caller who pauses mid-sentence gets a half that carries nothing but
+    recognised words -- no reply is owed yet, so no model runs. The stage then
+    repeats on halves that are not neighbours.
+    """
+    events = []
+    for line in call_events(turns=3).decode().splitlines():
+        payload = json.loads(line)
+        if payload["turn_id"] == "turn-2" and payload["type"] != "stt":
+            continue
+        if payload["type"] == "stt" and payload["turn_id"] in ("turn-2", "turn-3"):
+            parent = "turn-1" if payload["turn_id"] == "turn-2" else "turn-2"
+            payload["response"] = {
+                **payload["response"],
+                "continues_turn": parent,
+                "split_reason": "earlier_words_already_published",
+            }
+        events.append(payload)
+    return jsonl(*events)
+
+
+def test_a_stage_that_skipped_the_middle_half_still_says_it_ran_twice(client):
+    """Two model samples, one exchange, and the halves are not adjacent.
+
+    Comparing each half against its immediate parent asks the wrong question:
+    it is true of no pair here, so the caveat that explains "2 measured, 1 turn"
+    was dropped and the panel showed a bare contradiction. Whether a stage
+    inflated its own denominator is a fact about the whole chain.
+    """
+    ingest(client, "call-1", gapped_chain_events())
+    with main.connect() as db:
+        rows = db.execute(
+            "SELECT turn_id, is_continuation, llm_ops, llm_split FROM turn_metrics "
+            "WHERE session_id = 'call-1' ORDER BY started_at_epoch_ms").fetchall()
+    assert [r["is_continuation"] for r in rows] == [0, 1, 1], (
+        "guard: this test needs one chain of three halves"
+    )
+    assert [r["llm_ops"] or 0 for r in rows] == [1, 0, 1], (
+        "guard: the model must skip the middle half, or the pair test would pass"
+    )
+    assert [r["llm_split"] or 0 for r in rows] == [1, 0, 0]
+
+    llm = summary(client, compare=False)["stages"]["llm"]["metrics"][0]["coverage"]
+    assert llm["measured"] == 2 and llm["eligible"] == 2
+    assert llm["split_turns"] == 1, (
+        "the panel reported two model measurements against one turn with "
+        "nothing to reconcile them"
+    )
+    assert "more than one" in llm["population"]
+
+
+def test_a_package_whose_halves_continue_each_other_keeps_its_turns(client):
+    """`turn-1 continues turn-2` and `turn-2 continues turn-1`.
+
+    Each row satisfies "my parent is here", so both were subtracted and the
+    call was stored ready with zero turns -- which also hid it from the
+    unmeasured-call check, since that keys off `turn_count > 0`. A cycle has no
+    first half, so neither row is anyone's continuation: the call keeps both
+    exchanges, and the rail and the rollup say the same number.
+    """
+    events = []
+    for line in call_events(turns=2).decode().splitlines():
+        payload = json.loads(line)
+        if payload["type"] == "stt":
+            payload["response"] = {
+                **payload["response"],
+                "continues_turn": ("turn-2" if payload["turn_id"] == "turn-1"
+                                   else "turn-1"),
+                "split_reason": "corrupt_cycle",
+            }
+        events.append(payload)
+    ingest(client, "call-1", jsonl(*events))
+
+    listed = next(row for row in client.get("/v1/sessions").json()
+                  if row["id"] == "call-1")
+    with main.connect() as db:
+        rows = db.execute(
+            "SELECT is_continuation FROM turn_metrics WHERE session_id = 'call-1'"
+        ).fetchall()
+        rollup = db.execute(
+            "SELECT turn_count FROM call_metrics WHERE session_id = 'call-1'"
+        ).fetchone()["turn_count"]
+
+    assert [r["is_continuation"] for r in rows] == [0, 0]
+    assert rollup == 2, "a ready call reported no exchanges at all"
+    assert listed["turn_count"] == rollup, (
+        "the session rail and the call rollup counted this call differently"
+    )
+
+
 def test_a_stage_panel_explains_why_it_measured_more_than_there_are_turns(client):
     """Excluding a split half from the STT percentiles would throw away a real
     recogniser latency measured on real audio - and it is systematically the

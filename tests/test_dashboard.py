@@ -829,6 +829,46 @@ def test_a_split_turn_does_not_push_a_range_over_the_exact_limit(client, monkeyp
     assert payload["coverage"]["turns_in_range"] == 1
 
 
+def test_every_schema_column_added_since_release_has_a_migration(client):
+    """The specific columns are less important than the class of mistake.
+
+    `CREATE TABLE IF NOT EXISTS` is a no-op on a database that already has the
+    table, so a column added to the schema string reaches new installs and never
+    reaches existing ones. Nothing fails until the first write - and a
+    METRICS_VERSION bump forces a full rebuild on exactly the upgrades where
+    that write happens with the console already serving traffic.
+
+    So this compares a database built from the schema as it *shipped*, then
+    upgraded, against a database built fresh. Any future column added without a
+    matching `ADDED_COLUMNS` entry fails here rather than in production.
+    """
+    import pathlib
+    import sqlite3
+
+    shipped = (pathlib.Path(__file__).parent / "fixtures" / "shipped_schema.sql").read_text()
+
+    upgraded = sqlite3.connect(":memory:")
+    upgraded.row_factory = sqlite3.Row
+    upgraded.executescript(shipped)
+    aggregate.ensure_schema(upgraded)
+
+    fresh = sqlite3.connect(":memory:")
+    fresh.row_factory = sqlite3.Row
+    aggregate.ensure_schema(fresh)
+
+    def columns(db):
+        return {row["name"]: {c["name"] for c in db.execute(f"PRAGMA table_info({row['name']})")}
+                for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+
+    want, got = columns(fresh), columns(upgraded)
+    missing = {table: sorted(cols - got.get(table, set()))
+               for table, cols in want.items() if cols - got.get(table, set())}
+    assert not missing, (
+        f"added to the schema string but not to ADDED_COLUMNS: {missing}. "
+        "An existing install would crash on the next rebuild."
+    )
+
+
 def test_an_existing_database_gains_the_split_columns_instead_of_crashing(client):
     """Every column added to the schema string has to be added to the migration
     list too. `CREATE TABLE IF NOT EXISTS` is a no-op on a database that already

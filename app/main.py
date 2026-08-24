@@ -211,6 +211,28 @@ def initialize() -> None:
                 "THEN 1 ELSE 0 END"
             )
             db.execute("PRAGMA user_version = 2")
+        # That backfill trusted the SDK's word that a turn continues another
+        # one. It does not follow that the other one is here: a call whose
+        # first half was recorded by a crashed process arrives with a
+        # continuation and nothing to fold it into, and the bit then subtracted
+        # an exchange that was never counted. Ingest has re-decided this since,
+        # but rows written before that keep the old answer, and the session rail
+        # reads them directly -- so an upgraded database showed no turns in the
+        # rail and one everywhere else. Re-decided here with the same rule,
+        # against the rows actually stored for that call.
+        if db.execute("PRAGMA user_version").fetchone()[0] < 3:
+            db.execute(
+                "UPDATE operations SET is_continuation = CASE WHEN "
+                "json_extract(operation_json, '$.response.continues_turn') IS NOT NULL "
+                "AND EXISTS (SELECT 1 FROM operations parent "
+                "            WHERE parent.session_id = operations.session_id "
+                "              AND parent.turn_id = json_extract("
+                "                  operations.operation_json, "
+                "                  '$.response.continues_turn')) "
+                "THEN 1 ELSE 0 END "
+                "WHERE is_continuation = 1"
+            )
+            db.execute("PRAGMA user_version = 3")
         db.execute(
             "CREATE INDEX IF NOT EXISTS operations_turns ON operations(session_id, turn_id, started_at_ms)"
         )

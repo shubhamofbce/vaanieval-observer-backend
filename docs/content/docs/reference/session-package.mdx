@@ -248,26 +248,33 @@ For how long the caller actually spoke, use `presentation_window` or the turn's
 
 If your agent speaks a filler from inside `on_user_turn_completed` — "let me
 check that for you" before a slow lookup — and a partial transcript arrives
-while that filler is playing, there are two readings and LiveKit does not let
-us tell them apart:
+while that filler is playing, the reply that follows may be the answer to the
+caller whose filler is playing, or the answer to whoever just started speaking
+over it. The `user_input_transcribed(is_final=False)` event is the same either
+way, so the events alone cannot separate them.
 
-1. The partial is an ordinary interim, and the reply that follows is the answer
-   to the caller whose filler is playing.
-2. The partial is a *preflight* transcript from a second speaker, which starts a
-   preemptive generation, and the reply that follows is **their** answer.
+The speech handle and the `speech_created` event can, for three of the four
+ways LiveKit creates a reply:
 
-Both surface as the same `user_input_transcribed(is_final=False)` event, and
-preemptive generation is on by default, so both really happen. The recorder
-keeps the reply in a turn of its own, because merging two exchanges would make a
-caller's words appear answered before they were spoken. It then sets
-`reply_attribution: "inferred"` on that turn's spans — including the LLM span,
-so an interrupted reply that reported tokens still carries the caveat.
+| How the reply was created | What it answers | Recorded as |
+| --- | --- | --- |
+| The automatic answer to a completed user turn — scheduled at once, `user_initiated`, audio input details | The turn that just finished | Merged into that turn, no flag |
+| A **preemptive** generation, started from a predicted end of speech — stays unscheduled until LiveKit validates the prediction | The caller now speaking | Its own turn, no flag |
+| A **realtime** model generating server-side while it transcribes — scheduled at once but not `user_initiated` | The speech being transcribed now, whose final transcript may arrive *after* the reply | Its own turn, joined by that transcript, no flag |
+| `AgentSession.generate_reply()` called by your own code | Unknowable | Its own turn, `reply_attribution: "inferred"` |
 
-The *events* cannot separate the two cases, but the speech handle can: a
-preemptive generation stays unscheduled until LiveKit validates its prediction,
-while an ordinary reply is marked scheduled immediately. Reading that requires
-deferring the binding by one event-loop iteration, which is planned work — so
-today this is disclosed rather than resolved.
+The last row is the only one that stays a guess. It is scheduled and
+`user_initiated` exactly like the automatic answer, and differs only in that its
+input modality defaults to `"text"` — and your application may call it to answer
+the caller or to say something unrelated. The recorder keeps such a reply in a
+turn of its own, because merging two exchanges would make a caller's words
+appear answered before they were spoken, and then says so. The flag is set on
+every span of that turn, including the LLM span, so an interrupted reply that
+reported tokens still carries the caveat.
+
+If you are running a build of `livekit-agents` that does not expose these
+signals, no reply is merged and the flag is set — the recorder never guesses
+silently because a field was missing.
 
 Treat a turn carrying this flag as unreliable for response latency specifically.
 Everything else on it — audio, durations, token counts — is measured, not

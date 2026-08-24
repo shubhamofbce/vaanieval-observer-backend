@@ -313,7 +313,7 @@ class ApiKeyCreate(BaseModel):
 # Reported in `/openapi.json`, so a support question can be tied to the build
 # that answered it. It sat at "0.1.0" through every fix in the LiveKit audit,
 # which made it worse than no version at all.
-SERVICE_VERSION = "0.5.0"
+SERVICE_VERSION = "0.5.1"
 
 app = FastAPI(title="Vaani Observer", version=SERVICE_VERSION)
 app.mount("/assets", StaticFiles(directory=STATIC), name="assets")

@@ -10,6 +10,7 @@ actually fills them was broken.
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -1520,3 +1521,270 @@ def _blank_turn_row(turn_id, continues_turn=None):
          "started_at_ms": 0, "duration_ms": 0, "operations": []},
         0,
     )
+
+
+def test_a_second_worker_starting_up_does_not_redo_the_first_worker_s_backfill(
+        api, data_dir, monkeypatch):
+    """The lease existed; startup was the one path that did not ask for it.
+
+    Every uvicorn worker runs the startup hook, and each one selected the same
+    stale calls and derived all of them. A version bump makes the whole archive
+    stale at once, so this is worst exactly when it is most expensive: three
+    workers measured 1,500 rebuilds for a 500-call archive, tripling the parse
+    work and the SQLite writer contention at the moment the workers are trying
+    to become ready.
+
+    The loser starting immediately, with the backlog reported as pending, is
+    the intended trade -- readiness now over every worker blocked on work only
+    one of them needed to do.
+    """
+    from app import main as app_main
+
+    with api.connect() as reset:
+        reset.execute("DELETE FROM rollup_meta WHERE key = ?",
+                      (app_main.MAINTENANCE_LEASE_KEY,))
+        reset.commit()
+
+    backfills: list[int | None] = []
+    monkeypatch.setattr(app_main, "backfill_metrics",
+                        lambda limit=None, renew=None: backfills.append(limit) or 0)
+    monkeypatch.setattr(app_main, "start_maintenance", lambda: None)
+    monkeypatch.setattr(app_main, "initialize", lambda: None)
+    monkeypatch.setattr(app_main.aggregate, "prune_facets", lambda db: None)
+
+    identities = iter(["host-a:1:aaaa", "host-b:2:bbbb"])
+    for _ in range(2):
+        monkeypatch.setattr(app_main, "MAINTENANCE_IDENTITY", next(identities))
+        app_main.startup()
+
+    assert len(backfills) == 1, (
+        f"{len(backfills)} of 2 workers ran the startup backfill; each one "
+        "derives the same stale calls, so the work and the writer contention "
+        "multiply by the worker count"
+    )
+
+
+def test_the_indexing_badge_separates_calls_that_are_absent_from_calls_that_are_merely_old(
+        api, data_dir):
+    """"Pending" meant two opposite things and the badge asserted only one.
+
+    A call with no `call_metrics` row contributes to nothing. A call whose row
+    was built by an earlier contract contributes to every count, duration and
+    latency panel on the page -- it is only outside figures the newer contract
+    added. The badge told the reader that all of them were "missing from every
+    number", which is false for the second kind, and false in the direction
+    that stops them from asking.
+    """
+    from app import aggregate
+
+    with api.connect() as db:
+        aggregate.ensure_schema(db)
+        for index, (session_id, version) in enumerate(
+                [("absent-1", None), ("absent-2", None), ("old-1", aggregate.METRICS_VERSION - 1),
+                 ("current-1", aggregate.METRICS_VERSION)]):
+            db.execute(
+                "INSERT INTO sessions (id, created_at, updated_at, status, manifest_json) "
+                "VALUES (?, ?, ?, 'ready', '{}')",
+                (session_id, 1_700_000_000 + index, 1_700_000_000 + index))
+            if version is not None:
+                db.execute(
+                    "INSERT INTO call_metrics (session_id, metrics_version, turn_count) "
+                    "VALUES (?, ?, 1)", (session_id, version))
+        db.commit()
+
+        pending = aggregate.stale_session_count(db)
+        unbuilt = aggregate.unbuilt_session_count(db)
+
+    assert pending == 3, f"expected two absent and one old to be pending, got {pending}"
+    assert unbuilt == 2, (
+        f"{unbuilt} calls reported as absent from every number; only the two with no "
+        "derived row are, and the third is counted in every total on the page"
+    )
+    assert pending - unbuilt == 1, "the old-contract call must be reported as its own kind"
+
+
+def test_a_call_indexed_by_a_newer_version_is_reported_rather_than_hidden(api, data_dir):
+    """A row from a contract this code does not know was invisible in both directions.
+
+    Rolling deployments and rollbacks put two versions on one database. The
+    backlog queries look for missing or *older* rows, and the contract-scoped
+    figures accept only the current version -- so a newer row counted toward
+    total turns and every latency panel, counted zero toward the scoped
+    figures, and counted zero toward pending. A real caveat became a clean zero
+    with nothing on the page willing to mention it.
+    """
+    from app import aggregate
+
+    with api.connect() as db:
+        aggregate.ensure_schema(db)
+        for index, (session_id, version) in enumerate(
+                [("ahead-1", aggregate.METRICS_VERSION + 1),
+                 ("current-1", aggregate.METRICS_VERSION),
+                 ("behind-1", aggregate.METRICS_VERSION - 1)]):
+            db.execute(
+                "INSERT INTO sessions (id, created_at, updated_at, status, manifest_json) "
+                "VALUES (?, ?, ?, 'ready', '{}')",
+                (session_id, 1_700_000_000 + index, 1_700_000_000 + index))
+            db.execute(
+                "INSERT INTO call_metrics (session_id, metrics_version, turn_count) "
+                "VALUES (?, ?, 1)", (session_id, version))
+        db.commit()
+
+        ahead = aggregate.incompatible_session_count(db)
+        pending = aggregate.stale_session_count(db)
+
+    assert ahead == 1, (
+        f"{ahead} calls reported as written by a newer version; the one v"
+        f"{aggregate.METRICS_VERSION + 1} row is counted in the totals but cannot be "
+        "read for version-scoped figures, and nothing else on the page names it"
+    )
+    assert pending == 1, "a newer row is not backlog: rebuilding it would destroy newer work"
+
+
+def test_a_contended_lease_answers_no_instead_of_failing_startup(api, data_dir):
+    """The claim is a write, so asking while the owner holds the lock used to raise.
+
+    "Someone else is already doing this" is the ordinary case at startup, and it
+    was turning into a full busy-timeout stall followed by a failed boot. Only
+    lock contention reads as a lost claim; any other database error still
+    surfaces, because a broken database must not look like a busy one.
+    """
+    import sqlite3 as _sqlite3
+
+    from app import aggregate as _aggregate
+    from app import main as app_main
+
+    def locked(*_args, **_kwargs):
+        raise _sqlite3.OperationalError("database is locked")
+
+    original = _aggregate.claim_lease
+    try:
+        _aggregate.claim_lease = locked
+        with api.connect() as db:
+            assert app_main.claim_maintenance(db) is False, (
+                "a contended claim must answer no, not raise and take startup with it")
+
+        def broken(*_args, **_kwargs):
+            raise _sqlite3.OperationalError("no such table: rollup_meta")
+
+        _aggregate.claim_lease = broken
+        with api.connect() as db:
+            with pytest.raises(_sqlite3.OperationalError):
+                app_main.claim_maintenance(db)
+    finally:
+        _aggregate.claim_lease = original
+
+
+def test_a_lease_is_renewed_while_the_pass_it_authorised_is_still_running(api, data_dir):
+    """The pass is bounded by call count, not by the clock, so it can outlive its lease.
+
+    One call may hold an unbounded number of operations. Without renewal a long
+    pass kept working after another worker was entitled to take over, putting
+    two workers on the same rows -- the situation the lease exists to prevent.
+    """
+    from app import aggregate
+
+    renewals = []
+    load_calls = []
+
+    with api.connect() as db:
+        aggregate.ensure_schema(db)
+        for index in range(3):
+            db.execute(
+                "INSERT INTO sessions (id, created_at, updated_at, status, manifest_json) "
+                "VALUES (?, ?, ?, 'ready', '{}')",
+                (f"pending-{index}", 1_700_000_000 + index, 1_700_000_000 + index))
+        db.commit()
+
+        def load(session_id):
+            load_calls.append(session_id)
+            raise RuntimeError("unreadable, so the loop moves on")
+
+        aggregate.backfill(db, load, on_progress=lambda: renewals.append(1))
+        assert len(load_calls) == 3, "guard: every pending call should have been attempted"
+        assert renewals == [], "an unreadable call rebuilds nothing, so it renews nothing"
+
+        # What each row derives into is beside the point here; what matters is
+        # that ownership is refreshed once per call actually rebuilt.
+        original_rebuild = aggregate.rebuild_session
+        try:
+            aggregate.rebuild_session = lambda *_args, **_kwargs: None
+            built = aggregate.backfill(
+                db, lambda session_id: (None, [], []),
+                on_progress=lambda: renewals.append(1))
+        finally:
+            aggregate.rebuild_session = original_rebuild
+
+    assert built == 3 and len(renewals) == 3, (
+        f"{len(renewals)} renewals for {built} rebuilt calls; ownership has to be "
+        "refreshed as the work proceeds or a long pass silently loses it")
+
+
+def test_a_failed_startup_backfill_hands_the_lease_back(api, data_dir, monkeypatch):
+    """A crash used to leave a dead worker's name on the lease.
+
+    The replacement then started, found the lease held, and skipped the backlog
+    until the TTL expired -- a failure quietly becoming a stall for as long as
+    the lease lived.
+    """
+    from app import aggregate
+    from app import main as app_main
+
+    with api.connect() as reset:
+        reset.execute("DELETE FROM rollup_meta WHERE key = ?",
+                      (app_main.MAINTENANCE_LEASE_KEY,))
+        reset.commit()
+
+    def explode(limit=None, renew=None):
+        raise RuntimeError("one unreadable call took the whole pass down")
+
+    monkeypatch.setattr(app_main, "backfill_metrics", explode)
+    monkeypatch.setattr(app_main, "start_maintenance", lambda: None)
+    monkeypatch.setattr(app_main, "initialize", lambda: None)
+    monkeypatch.setattr(app_main.aggregate, "prune_facets", lambda db: None)
+
+    with pytest.raises(RuntimeError):
+        app_main.startup()
+
+    with api.connect() as db:
+        held = db.execute("SELECT value FROM rollup_meta WHERE key = ?",
+                          (app_main.MAINTENANCE_LEASE_KEY,)).fetchone()
+    assert held is None, (
+        f"the lease still names {held['value'] if held else None} after that process "
+        "failed; its replacement would skip the backlog until the TTL ran out"
+    )
+
+    # And a release must never evict whoever holds it now: a pass that overran
+    # its TTL and was replaced has to leave without taking the live owner's
+    # claim with it.
+    with api.connect() as db:
+        aggregate.claim_lease(db, app_main.MAINTENANCE_LEASE_KEY, "someone-else",
+                              60_000, int(time.time() * 1000))
+        assert aggregate.release_lease(db, app_main.MAINTENANCE_LEASE_KEY, "a-dead-worker") is False
+        still = db.execute("SELECT value FROM rollup_meta WHERE key = ?",
+                           (app_main.MAINTENANCE_LEASE_KEY,)).fetchone()
+    assert still is not None and still["value"].endswith("someone-else"), (
+        "a departing worker evicted the live owner")
+
+
+def test_the_backlog_badge_does_not_describe_its_global_counts_as_page_scoped():
+    """The counts are archive-wide; the tooltip described their effect on "this page".
+
+    A backlogged call outside the selected range or agent is neither counted in
+    the page nor missing from it, so either statement is a claim about the wrong
+    population -- and the reassuring one is the one that was being made. The
+    counts stay global on purpose (two extra filtered queries per request buys
+    nothing a clear sentence does not), so the wording has to carry the scope.
+    """
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "static" / "dashboard.js").read_text()
+    start = source.index("if (coverage.pending_metric_builds)")
+    badge = source[start:source.index("if (coverage.incompatible_calls)", start)]
+
+    assert "Across the whole archive" in badge, (
+        "the backlog badge reports archive-wide counts without saying so")
+    for page_scoped in ("on this page", "in the totals, durations and latencies here"):
+        assert page_scoped not in badge, (
+            f"the backlog badge still claims {page_scoped!r} for counts that are not "
+            "filtered by the selected range")

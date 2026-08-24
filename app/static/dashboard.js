@@ -362,7 +362,32 @@
     }
     const coverage = data.coverage || {};
     if (coverage.pending_metric_builds) {
-      out.push(`<span class="badge approx" title="Uploaded calls whose metrics have not been extracted yet. They are missing from every number on this page until they finish.">${count(coverage.pending_metric_builds)} calls still indexing</span>`);
+      // The two halves affect the page in opposite directions, so they are said
+      // separately. A call with no derived row contributes nothing anywhere. A
+      // call built by an earlier contract is counted everywhere -- it is only
+      // outside figures this contract added, and claiming otherwise reassures
+      // the reader about numbers that really are affected.
+      //
+      // Both counts are archive-wide, not filtered, so the wording says so: a
+      // backlogged call outside the selected range or agent is neither counted
+      // in this page nor missing from it, and describing it either way is a
+      // claim about the wrong population.
+      const unbuilt = coverage.unbuilt_calls || 0;
+      const stale = Math.max(coverage.pending_metric_builds - unbuilt, 0);
+      const parts = ['Across the whole archive, not only the selected range:'];
+      if (unbuilt) {
+        parts.push(`${count(unbuilt)} uploaded call(s) have no metrics yet, so wherever they fall they are missing from every number.`);
+      }
+      if (stale) {
+        parts.push(`${count(stale)} call(s) were indexed by an earlier version; where they fall in range they are counted in totals, durations and latencies, but left out of figures this version added, which are labelled with the smaller sample they were measured on.`);
+      }
+      out.push(`<span class="badge approx" title="${esc(parts.join(' '))}">${count(coverage.pending_metric_builds)} calls still indexing</span>`);
+    }
+    if (coverage.incompatible_calls) {
+      // Not backlog: this console cannot rebuild these rows, so waiting will
+      // not clear them. Said separately because the remedy is different --
+      // finish the deployment or roll forward, not wait for indexing.
+      out.push(`<span class="badge approx" title="Across the whole archive, ${count(coverage.incompatible_calls)} call(s) were indexed by a newer version of this console than the one serving this page. They are counted in totals, durations and latencies, but cannot be read for figures scoped to this version, and this version will not rebuild them. Usually a deployment still rolling out, or a rollback.">${count(coverage.incompatible_calls)} calls from a newer version</span>`);
     }
     return out.join('');
   }
@@ -889,8 +914,17 @@
       notices.push(`<div class="notice">${count(coverage.capture_incomplete_calls)} call(s) in range ended before capture finished. Their turns are under-counted in every panel below.</div>`);
     }
     if (coverage.inferred_reply_turns) {
-      const share = coverage.turns ? Math.round((coverage.inferred_reply_turns / coverage.turns) * 100) : null;
-      notices.push(`<div class="notice">${count(coverage.inferred_reply_turns)} turn(s) in range${share === null ? '' : ` (${share}%)`} hold a reply whose turn could not be established from the events -- it was placed by reading the call, and the span says so. Latency, tokens and cost for those turns can belong to an adjacent exchange.</div>`);
+      const scope = coverage.inferred_reply_scope_turns;
+      const base = (scope === undefined || scope === null) ? coverage.turns : scope;
+      const share = base ? Math.round((coverage.inferred_reply_turns / base) * 100) : null;
+      // Where a bounded backfill has not reached every call yet, the share is
+      // stated over the turns it was actually measured on rather than over the
+      // whole range, because rows the current contract never examined are not
+      // evidence of a clean reply.
+      const scoped = (base !== coverage.turns)
+        ? ` of the ${count(base)} turn(s) examined so far`
+        : '';
+      notices.push(`<div class="notice">${count(coverage.inferred_reply_turns)} turn(s) in range${share === null ? '' : ` (${share}%)`}${scoped} hold a reply whose turn could not be established from the events -- it was placed by reading the call, and the span says so. Latency, tokens and cost for those turns can belong to an adjacent exchange.</div>`);
     }
     if (!coverage.calls) {
       root.innerHTML = `<div class="board-grid">${card('No calls in this range', '', emptyState(

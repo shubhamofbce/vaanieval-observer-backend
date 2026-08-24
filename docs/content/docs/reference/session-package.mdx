@@ -262,7 +262,7 @@ specifically, by which frame asked for the reply:
 | --- | --- | --- |
 | The automatic answer to a completed user turn — scheduled at once, `user_initiated` | The turn that just finished | Merged into that turn, no flag |
 | A **preemptive** generation, started from a predicted end of speech — stays unscheduled until LiveKit validates the prediction | The caller now speaking | Its own turn, no flag |
-| A **realtime** model generating server-side while it transcribes — scheduled at once but not `user_initiated`, with no tool result outstanding | The speech being transcribed now, whose final transcript may arrive *after* the reply | Its own turn, joined by that transcript, no flag |
+| A **realtime** model generating server-side while it transcribes (`agent_activity.py:1991-2008`) — reports source `generate_reply` like the automatic answer, but is scheduled without being `user_initiated`, never passes through the public method, and leaves no tool result outstanding | The speech being transcribed now, whose final transcript may arrive *after* the reply | Its own turn, joined by that transcript, no flag |
 | The automatic reply after a tool result — also not `user_initiated`, but the current turn has a `function_tools_executed` result still unanswered | The turn that called the tool | Merged into that turn, `reply_attribution: "inferred"` |
 | That same reply arriving **after LiveKit stopped waiting** for it — its five-second wait (`agent_activity.py:4278`) bounds the wait, not the provider's generation | Either the turn that called the tool or the next caller; the event says neither | Its own turn, `reply_attribution: "inferred"` |
 | `AgentSession.generate_reply()` called by **your own code** — recognised because the call is still on the stack when the event fires, and the frame that made it is outside the `livekit` package | Unknowable | Its own turn, `reply_attribution: "inferred"` |
@@ -274,7 +274,6 @@ specifically, by which frame asked for the reply:
 | The stack could not be read — introspection blocked, the public method's code object unreachable, or `livekit.agents` imports but its modules have moved on this build | Unknowable | Its own turn, `reply_attribution: "inferred"` |
 | A **decorated or traced** `generate_reply` — `functools.wraps` copies the name but not the code object, so the stand-in frame is literally called `wrapper` and the override reaches a different internal path | Unknowable | Its own turn, `reply_attribution: "inferred"` |
 | A session that is **not** LiveKit's — a compatible or test double passed to `attach()` on a machine where `livekit.agents` is not importable at all | Unknowable | Its own turn, `reply_attribution: "inferred"` |
-| A **realtime** model generating server-side (`agent_activity.py:1991-2008`) — reports source `generate_reply` like the automatic answer but is not `user_initiated`, and never passes through the emitting function | The speech being transcribed now | Its own turn, joined by that transcript, no flag |
 
 Two rows stay judgements: the post-tool reply, and your own `generate_reply()`.
 Yours is scheduled and `user_initiated` exactly like the automatic answer —

@@ -14,7 +14,7 @@ import time
 import uuid
 import zlib
 from array import array
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -395,7 +395,33 @@ def startup() -> None:
         # published, exactly as it was published.
         return
     initialize()
-    backfill_metrics(limit=BACKFILL_STARTUP_LIMIT)
+    # Behind the maintenance lease, exactly like every other aggregate write.
+    # Without it each uvicorn worker selected the same stale calls and derived
+    # all of them: three workers measured 1,500 rebuilds for a 500-call archive,
+    # tripling the parse work and the SQLite writer contention at the moment the
+    # workers are trying to become ready. One worker advancing the backlog is
+    # the design the maintenance loop already documents; startup was the one
+    # path that ignored it.
+    #
+    # A worker that does not win the lease starts serving immediately and the
+    # range reports how many calls are still pending, which is the honest
+    # trade: readiness now, with the backlog visible, rather than every worker
+    # blocked on work only one of them needed to do.
+    with connect() as db:
+        owns_startup_backfill = claim_maintenance(db)
+    if owns_startup_backfill:
+        try:
+            backfill_metrics(limit=BACKFILL_STARTUP_LIMIT, renew=renew_maintenance_lease)
+        except Exception:
+            # A pass that dies must not leave its name on the lease. The
+            # replacement would start, find the lease held by a process that no
+            # longer exists, and skip the backlog until the TTL ran out - a
+            # failure quietly becoming a stall. The release re-checks ownership,
+            # so a pass that overran and was already replaced cannot evict the
+            # live owner on its way out.
+            with connect() as db:
+                release_maintenance(db)
+            raise
     # A metrics-version bump can retire facet values (canonicalising providers
     # merged three Deepgram spellings into one). Pruning at startup means the
     # first dashboard load after an upgrade does not offer filters that match
@@ -406,6 +432,7 @@ def startup() -> None:
 
 
 _LAST_FACET_PRUNE = 0.0
+_LAST_LEASE_RENEWAL = 0.0
 
 
 def maintenance_pass(force_prune: bool = False) -> dict[str, int]:
@@ -417,7 +444,8 @@ def maintenance_pass(force_prune: bool = False) -> dict[str, int]:
     own slow cadence rather than inside the rollup pass.
     """
     global _LAST_FACET_PRUNE
-    built = backfill_metrics(limit=MAINTENANCE_BACKFILL_LIMIT)
+    built = backfill_metrics(limit=MAINTENANCE_BACKFILL_LIMIT,
+                              renew=renew_maintenance_lease)
     with connect() as db:
         rebuilt = aggregate.refresh_rollups(db, limit=MAINTENANCE_ROLLUP_LIMIT,
                                             budget_s=MAINTENANCE_ROLLUP_BUDGET_S)
@@ -437,10 +465,36 @@ def claim_maintenance(db: sqlite3.Connection) -> bool:
     Returns whether this process owns maintenance. An owner that stops renewing
     (crashed, killed, or stuck) loses the lease after `MAINTENANCE_LEASE_TTL_S`
     and another process picks it up, so the rollup tier cannot be orphaned.
+
+    A contended claim answers "no", it does not fail. The claim is a write, so a
+    worker asking for it while the incumbent holds the write lock waited out the
+    full busy timeout and then raised - turning "someone else is already doing
+    this" into a thirty-second stall and a failed startup. Only lock contention
+    is read that way; any other database error still surfaces, because a broken
+    database must not look like a busy one.
     """
     # The claim itself is atomic; see `aggregate.claim_lease`.
-    return aggregate.claim_lease(db, MAINTENANCE_LEASE_KEY, MAINTENANCE_IDENTITY,
-                                 MAINTENANCE_LEASE_TTL_S * 1000, int(time.time() * 1000))
+    global _LAST_LEASE_RENEWAL
+    try:
+        owns = aggregate.claim_lease(db, MAINTENANCE_LEASE_KEY, MAINTENANCE_IDENTITY,
+                                     MAINTENANCE_LEASE_TTL_S * 1000, int(time.time() * 1000))
+        if owns:
+            _LAST_LEASE_RENEWAL = time.monotonic()
+        return owns
+    except sqlite3.OperationalError as exc:
+        if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+            return False
+        raise
+
+
+def release_maintenance(db: sqlite3.Connection) -> bool:
+    """Hand the lease back, if this process still holds it."""
+    try:
+        return aggregate.release_lease(db, MAINTENANCE_LEASE_KEY, MAINTENANCE_IDENTITY)
+    except sqlite3.OperationalError:
+        # Losing the release is survivable: the lease expires on its own. Losing
+        # startup because the release could not take the write lock is not.
+        return False
 
 
 def start_maintenance() -> None:
@@ -466,17 +520,43 @@ def start_maintenance() -> None:
     thread.start()
 
 
-def backfill_metrics(limit: int | None = None) -> int:
+def backfill_metrics(limit: int | None = None, renew: Callable[[], None] | None = None) -> int:
     """Derive aggregate facts for calls ingested before this feature existed.
 
     Bounded per pass so a large archive does not hold the first request open;
     whatever is still pending is reported in the dashboard's coverage block, so
     an under-counted total is visible rather than mistaken for a quiet week.
+
+    `renew` is called after each call is rebuilt. The bound is a call count, not
+    a clock, so a pass can outlive the lease that authorised it: renewing as it
+    goes keeps ownership tied to the work actually being done.
     """
     with connect() as db:
         return aggregate.backfill(
-            db, lambda session_id: session_metric_inputs(session_id, db), limit=limit
+            db, lambda session_id: session_metric_inputs(session_id, db), limit=limit,
+            on_progress=renew,
         )
+
+
+def renew_maintenance_lease() -> None:
+    """Keep this process's claim alive during a long pass, on its own connection.
+
+    Throttled, because renewing is a write and the pass is already holding the
+    writer: one renewal per third of the TTL is enough to keep ownership and
+    rare enough not to contend with the work it is protecting. Failures are
+    swallowed - a missed renewal costs the lease, which is recoverable, while
+    raising here would abort a backfill that is otherwise succeeding.
+    """
+    global _LAST_LEASE_RENEWAL
+    now = time.monotonic()
+    if now - _LAST_LEASE_RENEWAL < MAINTENANCE_LEASE_TTL_S / 3:
+        return
+    _LAST_LEASE_RENEWAL = now
+    try:
+        with connect() as db:
+            claim_maintenance(db)
+    except Exception:  # noqa: BLE001 - upkeep must never kill the work it guards
+        pass
 
 
 def asset_version() -> str:
@@ -1425,8 +1505,11 @@ def dashboard_summary(
     # reported below rather than silently missing.
     with connect() as db:
         remaining = aggregate.stale_session_count(db)
+        unbuilt = aggregate.unbuilt_session_count(db)
+        incompatible = aggregate.incompatible_session_count(db)
         stale_buckets = aggregate.dirty_bucket_count(db)
-        result = aggregate.summary(db, filters, compare=compare, pending_calls=remaining)
+        result = aggregate.summary(db, filters, compare=compare, pending_calls=remaining,
+                                   unbuilt_calls=unbuilt, incompatible_calls=incompatible)
     result["coverage"]["pending_rollup_buckets"] = stale_buckets
     result["generated_at"] = now()
     return result

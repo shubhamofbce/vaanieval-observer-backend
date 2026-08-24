@@ -576,6 +576,30 @@ def resolve_split_columns(rows: Sequence[dict[str, Any]]) -> Sequence[dict[str, 
     return rows
 
 
+def inferred_exchange_count(rows: Sequence[dict[str, Any]]) -> int:
+    """How many *exchanges* hold a reply we could not place, not how many rows.
+
+    An exchange published in two halves is one uncertain exchange, and
+    `turn_count` already folds those halves into one. Counting the flagged rows
+    instead put both halves into a numerator whose denominator counted the
+    exchange once, so a call with a split, doubly-flagged exchange reported one
+    turn and two inferred turns -- and the share the fleet view derives from
+    those two numbers came out at 200%.
+
+    The chain is walked with the same primitives the split columns use, so the
+    two can never disagree about which rows are one exchange.
+    """
+    by_id = {str(row["turn_id"]): row for row in rows if row.get("turn_id")}
+    folds = continuation_ids(rows)
+    roots: set[str] = set()
+    for row in rows:
+        if not row.get("inferred_reply"):
+            continue
+        root = _chain_root(row, by_id, folds)
+        roots.add(str(root.get("turn_id") or id(root)))
+    return len(roots)
+
+
 def call_metrics(turns: Sequence[dict[str, Any]]) -> dict[str, Any]:
     """Call-level rollups derived from the turn rows, so the two always agree."""
     # A turn we split because the earlier half was already published is one
@@ -597,7 +621,15 @@ def call_metrics(turns: Sequence[dict[str, Any]]) -> dict[str, Any]:
         # measurements are real. It is reported alongside so a fleet view can
         # say how much of a number rests on a reading rather than on the
         # event, which is the difference between a caveat and a footnote.
-        "inferred_reply_turns": sum(turn["inferred_reply"] for turn in turns),
+        #
+        # Counted per exchange, not per row. `turn_count` folds the halves of a
+        # split exchange into one, so summing the physical rows put two halves
+        # into a numerator whose denominator counted them once -- a call could
+        # report more inferred turns than turns, and the fleet view divided one
+        # by the other and published 200%. The flag stays on whichever half
+        # carries it, because that is where the evidence is and the call page
+        # shows it there; only the count is folded.
+        "inferred_reply_turns": inferred_exchange_count(turns),
         "split_turn_count": continuations,
         "stt_failed": sum(turn["stt_failed"] for turn in turns),
         "llm_failed": sum(turn["llm_failed"] for turn in turns),

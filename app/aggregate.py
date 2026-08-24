@@ -363,6 +363,25 @@ def set_meta(db: sqlite3.Connection, key: str, value: str) -> None:
     db.commit()
 
 
+def release_lease(db: sqlite3.Connection, key: str, identity: str) -> bool:
+    """Give up a lease, but only if it is still ours.
+
+    Ownership is re-checked in the delete predicate rather than trusted from
+    memory: a worker whose pass overran the TTL may have already been replaced,
+    and an unconditional delete would then evict the live owner and put two
+    workers back on the same work — the exact thing the lease exists to stop.
+
+    Called on the failure path. Without it a worker that crashed mid-pass left
+    its name on the lease, and the process that replaced it skipped the work
+    until the TTL expired, so a failure silently became a stall.
+    """
+    cur = db.execute(
+        "DELETE FROM rollup_meta WHERE key = ? AND "
+        "substr(value, instr(value, '@') + 1) = ?", (key, identity))
+    db.commit()
+    return cur.rowcount > 0
+
+
 def claim_lease(db: sqlite3.Connection, key: str, identity: str,
                 ttl_ms: int, now_ms: int) -> bool:
     """Take or renew a single-owner lease, atomically.
@@ -614,6 +633,44 @@ def stale_session_count(db: sqlite3.Connection) -> int:
     ).fetchone()["pending"]
 
 
+def incompatible_session_count(db: sqlite3.Connection) -> int:
+    """Calls derived by a *newer* contract than this process understands.
+
+    Neither stale nor current. A rolling deployment, or a rollback, briefly puts
+    two versions on one database; the newer worker's rows then outlive it. The
+    backlog queries look only for missing or *older* rows, so such a row was
+    invisible: it counted toward total turns and every latency panel, counted
+    zero toward figures scoped to the current contract, and counted zero toward
+    pending — a real caveat turning into a healthy-looking zero with nothing on
+    the page to say so, which is the exact shape this audit exists to remove.
+
+    Deliberately not rebuilt. Older code cannot reproduce newer semantics, and
+    overwriting the row would destroy work the newer worker did correctly. It is
+    reported instead, so the contract-scoped figures are read as partial.
+    """
+    return db.execute(
+        "SELECT COUNT(*) AS ahead FROM call_metrics WHERE metrics_version > ?",
+        (METRICS_VERSION,),
+    ).fetchone()["ahead"]
+
+
+def unbuilt_session_count(db: sqlite3.Connection) -> int:
+    """Calls with no derived row at all — the ones genuinely absent from every number.
+
+    Split out from `stale_session_count` because the two halves of "pending"
+    affect the page in opposite ways and were being reported as one. A call with
+    no `call_metrics` row contributes nothing anywhere. A call whose row was
+    built by an older contract contributes to every count, duration and latency
+    panel on the page; it is only missing from figures the newer contract
+    added. Telling a reader that both are "missing from every number" is false
+    for the second kind, and false in the reassuring direction.
+    """
+    return db.execute(
+        "SELECT COUNT(*) AS pending FROM sessions s LEFT JOIN call_metrics c ON c.session_id = s.id "
+        "WHERE c.session_id IS NULL",
+    ).fetchone()["pending"]
+
+
 def stale_session_ids(db: sqlite3.Connection) -> list[str]:
     """Calls whose derived rows are missing or were built by an older contract."""
     return [
@@ -627,7 +684,7 @@ def stale_session_ids(db: sqlite3.Connection) -> list[str]:
 
 
 def backfill(db: sqlite3.Connection, load: Callable[[str], tuple[Any, Sequence[dict], Sequence[dict]]],
-             limit: int | None = None) -> int:
+             limit: int | None = None, on_progress: Callable[[], None] | None = None) -> int:
     """Rebuild stale calls. Returns how many were rebuilt.
 
     Bounded by `limit` so a cold start against a large archive does not block
@@ -646,6 +703,12 @@ def backfill(db: sqlite3.Connection, load: Callable[[str], tuple[Any, Sequence[d
             continue
         rebuild_session(db, session_row, turns, operations)
         built += 1
+        if on_progress is not None:
+            # A pass is bounded by call count, not by time, and one call can
+            # hold an unbounded number of operations. The caller uses this to
+            # renew a lease it would otherwise let expire while still working,
+            # which would admit a second worker onto the same rows.
+            on_progress()
     return built
 
 
@@ -1635,7 +1698,8 @@ def _failures_rollup(db: sqlite3.Connection, filters: Filters) -> list[dict[str,
 
 
 def summary(db: sqlite3.Connection, filters: Filters, *, compare: bool = True,
-            pending_calls: int = 0) -> dict[str, Any]:
+            pending_calls: int = 0, unbuilt_calls: int = 0,
+            incompatible_calls: int = 0) -> dict[str, Any]:
     """Everything the aggregate dashboard renders, computed server side.
 
     Deliberately one request: six panels fetching their own slice would each
@@ -1674,9 +1738,24 @@ def summary(db: sqlite3.Connection, filters: Filters, *, compare: bool = True,
         # Turns, not calls: one flagged exchange in a hundred is a footnote,
         # and half of them is a different conversation about whether these
         # numbers can be quoted at all.
-        "SUM(c.inferred_reply_turns) AS inferred_reply_turns, "
+        #
+        # Both the count and the turns it was counted over are restricted to
+        # rows built by the current contract. A column added in a version bump
+        # defaults to 0 on every row built before it, and the backfill is
+        # deliberately bounded, so during an upgrade window the archive holds
+        # rows that were never examined for this flag. Summing the flag over
+        # all rows while dividing by all turns reported those unexamined rows
+        # as *clean*: a call whose every reply was inferred published a 50%
+        # share while the raw evidence said 100%. Counting both over the same
+        # rows means the share answers a question the data can support, and the
+        # pending count says how much of the range is still outside it.
+        "SUM(CASE WHEN c.metrics_version = ? THEN c.inferred_reply_turns ELSE 0 END) "
+        "AS inferred_reply_turns, "
+        "SUM(CASE WHEN c.metrics_version = ? THEN c.turn_count ELSE 0 END) "
+        "AS inferred_reply_scope_turns, "
         "SUM(c.turn_count) AS turns, SUM(c.duration_ms) AS total_duration_ms "
-        f"FROM call_metrics c WHERE {where}", params).fetchone()
+        f"FROM call_metrics c WHERE {where}",
+        (METRICS_VERSION, METRICS_VERSION, *params)).fetchone()
     calls = calls_row["calls"] or 0
 
     if refused:
@@ -1771,7 +1850,20 @@ def summary(db: sqlite3.Connection, filters: Filters, *, compare: bool = True,
             # because a reply was placed by reading rather than by evidence,
             # and say nothing.
             "inferred_reply_turns": calls_row["inferred_reply_turns"] or 0,
+            # The turns that count was taken over. During an upgrade window
+            # this is smaller than `turns`, because a bounded backfill leaves
+            # rows the current contract has not examined -- and those rows
+            # cannot be assumed clean just because the column defaults to 0.
+            "inferred_reply_scope_turns": calls_row["inferred_reply_scope_turns"] or 0,
             "pending_metric_builds": pending_calls,
+            # The half of `pending_metric_builds` that is genuinely absent from
+            # every number, as opposed to present but built by an older
+            # contract. Published separately so the badge can say which.
+            "unbuilt_calls": unbuilt_calls,
+            # Rows a newer contract wrote, which this process counts in the
+            # totals but cannot interpret for contract-scoped figures. Neither
+            # stale nor current, so nothing else would have mentioned them.
+            "incompatible_calls": incompatible_calls,
             "newest_call_ms": freshness["newest"], "oldest_call_ms": freshness["oldest"],
             "minimum_sample_p95": metrics.MIN_SAMPLE_P95,
             "minimum_sample_change": MIN_SAMPLE_DELTA,

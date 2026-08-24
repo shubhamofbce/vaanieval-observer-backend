@@ -242,12 +242,16 @@ def initialize() -> None:
         # itself is asked, against the rows actually stored for each call. The
         # drift endpoint already reported this, but nobody runs it before
         # trusting the rail.
-        if db.execute("PRAGMA user_version").fetchone()[0] < 4:
-            _rederive_continuations(db)
-            db.execute("PRAGMA user_version = 4")
+        # Created *before* the migration below, which reads operations by
+        # call: on a database restored from a dump, or upgraded from a schema
+        # old enough to predate this index, running the migration first cost a
+        # full table scan per call.
         db.execute(
             "CREATE INDEX IF NOT EXISTS operations_turns ON operations(session_id, turn_id, started_at_ms)"
         )
+        if db.execute("PRAGMA user_version").fetchone()[0] < 4:
+            _rederive_continuations(db)
+            db.execute("PRAGMA user_version = 4")
         aggregate.ensure_schema(db)
         keys.ensure_schema(db)
         # A local worker cannot survive a process restart. Make that explicit
@@ -994,21 +998,36 @@ def complete_session(session_id: str, completion: CompleteSession, request: Requ
 def _rederive_continuations(db: sqlite3.Connection) -> None:
     """Re-decide `operations.is_continuation` with the rule ingest uses.
 
-    Grouped by call and resolved one call at a time, because a turn only ever
-    folds into another turn of the same package.
+    Resolved one call at a time, because a turn only ever folds into another
+    turn of the same package -- and *fetched* one call at a time too. Reading
+    every operation into a nested dictionary first made an upgrade cost the
+    whole archive's memory instead of the largest call's, on a path that runs
+    at startup before the service is ready. An archive big enough to be worth
+    migrating is exactly the one that would be OOM-killed doing it, and a
+    failed migration leaves the old version in place to fail again on the next
+    restart.
+
+    The call list is read first and materialized deliberately: it is one row
+    per package rather than per turn, and it keeps the updates from writing to
+    a table while a scan of the same rows is still open.
     """
-    by_session: dict[str, dict[str, dict[str, Any]]] = {}
-    for row in db.execute(
-        "SELECT session_id, turn_id, json_extract(operation_json, "
-        "'$.response.continues_turn') AS parent FROM operations "
-        "WHERE turn_id IS NOT NULL"
-    ):
-        turns = by_session.setdefault(row["session_id"], {})
-        turn = turns.setdefault(str(row["turn_id"]),
-                                {"turn_id": str(row["turn_id"]), "continues_turn": None})
-        if row["parent"] is not None and turn["continues_turn"] is None:
-            turn["continues_turn"] = row["parent"]
-    for session_id, turns in by_session.items():
+    session_ids = [row[0] for row in db.execute(
+        "SELECT DISTINCT session_id FROM operations WHERE turn_id IS NOT NULL"
+    )]
+    for session_id in session_ids:
+        turns: dict[str, dict[str, Any]] = {}
+        for row in db.execute(
+            "SELECT turn_id, json_extract(operation_json, "
+            "'$.response.continues_turn') AS parent FROM operations "
+            "WHERE session_id = ? AND turn_id IS NOT NULL",
+            (session_id,),
+        ):
+            turn = turns.setdefault(str(row["turn_id"]),
+                                    {"turn_id": str(row["turn_id"]), "continues_turn": None})
+            if row["parent"] is not None and turn["continues_turn"] is None:
+                turn["continues_turn"] = row["parent"]
+        if not turns:
+            continue
         folds = metrics.continuation_ids(list(turns.values()))
         db.executemany(
             "UPDATE operations SET is_continuation = ? "

@@ -429,7 +429,16 @@ def call_metrics(turns: Sequence[dict[str, Any]]) -> dict[str, Any]:
     # exchange, not two. Counting the physical rows inflated `turn_count` and
     # every per-turn average derived from it -- the UI already labels the split,
     # but a label does not fix a denominator.
-    continuations = sum(1 for turn in turns if turn.get("continues_turn"))
+    #
+    # A row only folds into a row we actually have. Subtracting every
+    # continuation unconditionally meant a package whose first half was missing
+    # reported `turn_count: 0` for a call that plainly had a turn, which also
+    # hid it from the unmeasured-call check -- that keys off `turn_count > 0`.
+    present = {turn.get("turn_id") for turn in turns if turn.get("turn_id")}
+    continuations = sum(
+        1 for turn in turns
+        if turn.get("continues_turn") and turn["continues_turn"] in present
+    )
     return {
         "turn_count": len(turns) - continuations,
         "split_turn_count": continuations,

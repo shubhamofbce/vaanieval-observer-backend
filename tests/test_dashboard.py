@@ -976,3 +976,46 @@ def test_opening_a_call_does_not_change_the_turn_count_the_list_showed(client):
     assert len(turns) - len(continuations) == rail["turn_count"], (
         "the count the call view derives has to match the one the list showed"
     )
+
+
+def test_a_call_whose_first_half_is_missing_still_reports_a_turn():
+    """A continuation only folds into a row we actually have.
+
+    Subtracting every continuation unconditionally assumed the first half is
+    always present. It is not: a package can lose a span, and any future view
+    that shows a slice of a call breaks the same assumption. The survivor is
+    then the only evidence that exchange happened, so discarding it reported
+    `turn_count: 0` for a call that plainly had a turn -- which also hid the
+    call from the unmeasured-call check, because that keys off `turn_count > 0`.
+
+    app.js applies the same present-parent rule, so this pins the two together.
+    """
+    from app import metrics
+
+    orphan = metrics.call_metrics([
+        _blank_turn_row("turn-2", continues_turn="turn-1"),
+    ])
+    assert orphan["turn_count"] == 1, (
+        "a row whose parent is absent is the only record of that exchange"
+    )
+    assert orphan["split_turn_count"] == 0, (
+        "nothing was folded, so nothing should be reported as folded"
+    )
+
+    paired = metrics.call_metrics([
+        _blank_turn_row("turn-1"),
+        _blank_turn_row("turn-2", continues_turn="turn-1"),
+    ])
+    assert paired["turn_count"] == 1, "a real split is still one exchange"
+    assert paired["split_turn_count"] == 1
+
+
+def _blank_turn_row(turn_id, continues_turn=None):
+    """A real turn_metrics row, so this test cannot drift from the producer."""
+    from app import metrics
+
+    return metrics.turn_metrics(
+        {"turn_id": turn_id, "continues_turn": continues_turn,
+         "started_at_ms": 0, "duration_ms": 0, "operations": []},
+        0,
+    )

@@ -1113,8 +1113,14 @@ function captureWarnings(session) {
 // listed, because the inspector needs them, but they are one exchange -- and the
 // session list already counts them that way, so counting rows here made opening
 // a call silently change its turn count from 1 to 2.
+//
+// A row only folds into another row we actually have. If the first half is
+// missing -- an upload that lost a span, or any future view that shows a slice
+// of a call -- the survivor is the only evidence that exchange happened, and
+// discarding it reported a call with turns as having none.
 function exchangeCount(turns) {
-  return turns.filter((turn) => !turn.continues_turn).length;
+  const present = new Set(turns.map((turn) => turn.turn_id).filter(Boolean));
+  return turns.filter((turn) => !turn.continues_turn || !present.has(turn.continues_turn)).length;
 }
 
 function renderCall(session) {
@@ -3232,7 +3238,11 @@ function buildSttQualityCard(session) {
   );
 
   const summary = h('div', { class: 'stt-summary' },
-    metric('Coverage', `${rows.length}/${turns.length || 0}`, 'recorded turns'),
+    // Deliberately a row ratio, not an exchange ratio: STT telemetry attaches
+    // to a row, and both halves of a split carry their own span. Saying "turns"
+    // here would read as contradicting the headline, which counts exchanges.
+    metric('Coverage', `${rows.length}/${turns.length || 0}`,
+      turns.length !== exchangeCount(turns) ? 'turn rows with STT' : 'recorded turns'),
     metric('Transcripts', `${captured}/${rows.length || 0}`, captured === rows.length ? 'available' : 'partial capture'),
     metric('First partial p50', partials.length ? duration(percentile(partials, 0.5)) : '—', partials.length ? 'speech → text' : 'unavailable'),
     metric('Finalization p50', finals.length ? duration(percentile(finals, 0.5)) : '—', finals.length ? 'speech end → final' : 'unavailable', finals.length && percentile(finals, 0.5) > 700 ? 'warn' : null),
@@ -4762,7 +4772,17 @@ function buildAudioCard(session) {
     const turns = state.session?.turns || [];
     const parts = [seconds ? `Call waveform, ${clockShort(seconds)} long` : 'Call waveform'];
     if (view.aligned && turns.length) {
-      parts.push(`${turns.length} turn${turns.length === 1 ? '' : 's'}`);
+      // Count exchanges, like the headline and the list do. A screen-reader
+      // user cannot glance at the rail to reconcile a different number, so
+      // this sentence is the only turn count they get -- and the rail does
+      // draw a band per row, which is why the split is said out loud rather
+      // than hidden by the smaller count.
+      const exchanges = exchangeCount(turns);
+      const folded = turns.length - exchanges;
+      parts.push(`${exchanges} turn${exchanges === 1 ? '' : 's'}`
+        + (folded
+          ? `, drawn as ${turns.length} bands because ${folded} continue${folded === 1 ? 's' : ''} another turn`
+          : ''));
       const worst = gapIndex().slice().sort((a, b) => b.gap.ms - a.gap.ms)[0];
       if (worst) {
         parts.push(`longest silence ${duration(worst.gap.ms)} before turn ${turnName(worst.turn.turn_id)} at ${clockShort(worst.gap.from / 1000)}`

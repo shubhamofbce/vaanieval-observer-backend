@@ -450,6 +450,27 @@ def folds_into_present_parent(continues_turn: Any, present_turn_ids: Container[s
     return bool(continues_turn) and str(continues_turn) in present_turn_ids
 
 
+def _chain_root(row: dict[str, Any],
+                by_id: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Walk back to the row an exchange started on.
+
+    A split can itself be split, so a parent may be someone else's
+    continuation. The walk stops at the first row that folds into nothing we
+    have -- that row is the one `turns` counts, so it is the only honest place
+    to record that the exchange has more halves. `seen` guards against a
+    corrupt package pointing two rows at each other, which would otherwise
+    spin here rather than fail a parse.
+    """
+    seen = {str(row["turn_id"])} if row.get("turn_id") else set()
+    while folds_into_present_parent(row.get("continues_turn"), by_id):
+        parent_id = str(row["continues_turn"])
+        if parent_id in seen:
+            return row
+        seen.add(parent_id)
+        row = by_id[parent_id]
+    return row
+
+
 def resolve_split_columns(rows: Sequence[dict[str, Any]]) -> Sequence[dict[str, Any]]:
     """Fill in the columns that can only be decided by looking at sibling rows.
 
@@ -470,19 +491,30 @@ def resolve_split_columns(rows: Sequence[dict[str, Any]]) -> Sequence[dict[str, 
             continue
         parent = by_id[str(row["continues_turn"])]
         row["is_continuation"] = 1
+        # An exchange can be split more than once -- `A <- B <- C` is one
+        # exchange in three rows -- and the middle row is then both a
+        # continuation and a parent. Recording the split on it would put the
+        # flag on a row that is itself subtracted from `turns`, so a range
+        # holding only that row would report a split exchange and no exchange
+        # to split: exactly the contradiction anchoring was meant to end. The
+        # facts go on the row the exchange started on, which is the only row in
+        # the chain that `turns` still counts.
+        root = _chain_root(parent, by_id)
         # The split is recorded against the half the exchange started on, so
         # that a range holding only the other half cannot report an exchange it
         # is not also counting. Calls already follow this rule when they span an
         # hour; an exchange split across one is the same shape of problem.
-        parent["has_continuation"] = 1
-        # A stage inflates its own denominator only if it ran on both halves.
-        # The first half of a split is usually speech-to-text and nothing else,
-        # but it can carry a filler reply, so which stages doubled is a fact
-        # about these two rows rather than something to assume.
+        root["has_continuation"] = 1
+        # A stage inflates its own denominator only if it ran on more than one
+        # half. The first half of a split is usually speech-to-text and nothing
+        # else, but it can carry a filler reply, so which stages doubled is a
+        # fact about these rows rather than something to assume. The comparison
+        # is against the immediate parent, because that is the pair that was
+        # actually split; the flag is then filed on the root.
         for stage in STAGES:
             if ((row.get(f"{stage}_ops") or 0) > 0
                     and (parent.get(f"{stage}_ops") or 0) > 0):
-                parent[f"{stage}_split"] = 1
+                root[f"{stage}_split"] = 1
     return rows
 
 

@@ -941,6 +941,91 @@ def test_a_split_straddling_an_hour_is_still_one_exchange_measured_twice(client)
     )
 
 
+def twice_split_events() -> bytes:
+    """One exchange in three rows: `turn-1 <- turn-2 <- turn-3`.
+
+    A caller who pauses twice gets split twice -- each unanswered half is
+    published, so each following row continues the one before it. The middle
+    row is then a continuation and a parent at the same time.
+    """
+    events = []
+    for line in call_events(turns=3).decode().splitlines():
+        payload = json.loads(line)
+        if payload["turn_id"] in ("turn-1", "turn-2") and payload["type"] != "stt":
+            continue
+        if payload["type"] == "stt" and payload["turn_id"] in ("turn-2", "turn-3"):
+            parent = "turn-1" if payload["turn_id"] == "turn-2" else "turn-2"
+            payload["response"] = {
+                **payload["response"],
+                "continues_turn": parent,
+                "split_reason": "earlier_words_already_published",
+            }
+        events.append(payload)
+    return jsonl(*events)
+
+
+def test_an_hour_holding_only_the_middle_of_a_twice_split_exchange_claims_nothing(
+        client):
+    """An exchange split twice has a row that is both continuation and parent.
+
+    Recording the split against that row files it on a row `turns` subtracts,
+    so an hour holding only the middle half reports a split exchange and no
+    exchange to have split -- the same self-contradiction that anchoring on the
+    first half was introduced to end, reappearing one link along the chain. The
+    facts belong on the row the exchange started on.
+    """
+    ingest(client, "call-1", twice_split_events())
+    with main.connect() as db:
+        rows = db.execute(
+            "SELECT turn_id, is_continuation, has_continuation, stt_split "
+            "FROM turn_metrics WHERE session_id = 'call-1' "
+            "ORDER BY started_at_epoch_ms").fetchall()
+        assert [r["is_continuation"] for r in rows] == [0, 1, 1], (
+            "guard: this test needs a chain of three, not two independent turns"
+        )
+        assert [r["has_continuation"] for r in rows] == [1, 0, 0], (
+            "the middle half carries the split while being subtracted from the "
+            "turn count, so an hour holding only it contradicts itself"
+        )
+        assert [r["stt_split"] or 0 for r in rows] == [1, 0, 0]
+
+        # Give each half its own hour, which is all that separates a chain
+        # inside one bucket from one spread across three.
+        for offset, turn_id in ((1, "turn-2"), (2, "turn-3")):
+            db.execute(
+                "UPDATE turn_metrics SET started_at_epoch_ms = started_at_epoch_ms + ? "
+                "WHERE session_id = 'call-1' AND turn_id = ?",
+                (aggregate.ROLLUP_BUCKET_MS * offset, turn_id))
+        db.execute("DELETE FROM interval_rollups")
+        db.execute("DELETE FROM rollup_dirty")
+        for row in db.execute(
+                "SELECT DISTINCT started_at_epoch_ms / ? * ? AS bucket_ms "
+                "FROM turn_metrics WHERE session_id = 'call-1'",
+                (aggregate.ROLLUP_BUCKET_MS, aggregate.ROLLUP_BUCKET_MS)):
+            for agent in (aggregate.ALL_AGENTS, ""):
+                db.execute("INSERT OR IGNORE INTO rollup_dirty (bucket_ms, agent_id) "
+                           "VALUES (?, ?)", (row["bucket_ms"], agent))
+        db.commit()
+        aggregate.refresh_rollups(db)
+        per_bucket = db.execute(
+            "SELECT turns, split_turns, stt_split_turns FROM interval_rollups "
+            "WHERE agent_id = ? ORDER BY bucket_ms", (aggregate.ALL_AGENTS,)
+        ).fetchall()
+
+    assert len(per_bucket) == 3, "guard: the halves did not end up in separate hours"
+    assert (per_bucket[0]["turns"], per_bucket[0]["split_turns"],
+            per_bucket[0]["stt_split_turns"]) == (1, 1, 1), (
+        "the hour the exchange started in must hold the whole exchange and the "
+        "fact that it was split"
+    )
+    for index in (1, 2):
+        assert (per_bucket[index]["turns"], per_bucket[index]["split_turns"],
+                per_bucket[index]["stt_split_turns"]) == (0, 0, 0), (
+            "an hour holding only a later half reported no exchanges while also "
+            "reporting that one of them was split"
+        )
+
+
 def test_a_stage_panel_explains_why_it_measured_more_than_there_are_turns(client):
     """Excluding a split half from the STT percentiles would throw away a real
     recogniser latency measured on real audio - and it is systematically the

@@ -1210,7 +1210,11 @@ def attach_presentation_windows(operations: list[dict[str, Any]], events: list[d
             if start is not None and end is not None and end >= start:
                 op["presentation_window"] = {
                     "from_ms": start, "to_ms": end, "track": "caller", "kind": "speech",
-                    "source": "word_timestamps" if window["from_word_timestamps"] else "speech_milestones",
+                    "source": (
+                        "word_timestamps" if window["from_word_timestamps"]
+                        else "final_transcripts" if window.get("end_from_repeated_finals")
+                        else "speech_milestones"
+                    ),
                     "confidence": "observed" if window["from_word_timestamps"] else "inferred",
                     "provider_span": {"from_ms": op.get("started_at_ms"), "to_ms": op.get("ended_at_ms")},
                 }
@@ -1608,6 +1612,12 @@ def group_turns(
                     (stt["presentation_window"]["to_ms"] - stt["presentation_window"]["from_ms"])
                     if stt and stt.get("presentation_window") else (stt.get("duration_ms") if stt else None)
                 ),
+                # A turn with no reply is not automatically a failure. The SDK
+                # records when the agent deliberately declined to answer, and
+                # without that an operator cannot tell an ignored utterance
+                # from a TTS that never sounded -- the two need opposite
+                # responses, and only one of them is an incident.
+                "reply_skipped": (stt or {}).get("response", {}).get("reply_skipped"),
                 "llm_ms": sum(op.get("duration_ms") or 0 for op in llm) or None,
                 "llm_calls": len(llm),
                 # Keep the provider span as the legacy operational metric. The

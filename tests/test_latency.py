@@ -203,3 +203,105 @@ def test_truncated_partial_history_does_not_report_revision_metrics():
     assert result["available"] is False
     assert result["reason"] == "partial_history_truncated"
     assert result["revision_count"] is None
+
+
+# A real captured turn where Deepgram delivered one sentence as three finals and
+# LiveKit merged them into a single committed message. The voice detector's
+# `speech_ended` lands at the first pause, 2 s before the caller stopped.
+MERGED_OPERATION = {
+    "started_at_ms": 51229,
+    "ended_at_ms": 54204,
+    "milestones": {
+        "speech_started": {"occurred_at_ms": 51229, "last_at_ms": 51229, "count": 1},
+        "speech_ended": {"occurred_at_ms": 52179, "last_at_ms": 52179, "count": 1},
+        "final_transcript": {"occurred_at_ms": 52179, "last_at_ms": 54204, "count": 3},
+        "speech_final": {"occurred_at_ms": 52179, "last_at_ms": 54204, "count": 3},
+        "end_of_utterance": {"occurred_at_ms": 54403, "last_at_ms": 54403, "count": 1,
+                             "transcription_delay_ms": 450},
+    },
+    "request": {"endpointing_ms": 300},
+    "response": {"transcript": "Thanks. That is all I needed. Goodbye.", "final_segments": 3},
+}
+
+
+def test_speech_lasts_until_the_final_that_closed_the_message():
+    # The caller kept talking past the first pause, and every later final proves
+    # it. Reading only the first `speech_ended` reported 950 ms of a 2975 ms
+    # utterance: a 68% undercount of the caller on a turn marked healthy.
+    window = speech_window(MERGED_OPERATION)
+    assert window["end_ms"] == 53754, "final at 54204 less the recogniser's own 450 ms delay"
+    assert window["end_ms"] - window["start_ms"] == 2525
+    assert window["end_from_repeated_finals"] is True
+
+
+def test_speech_window_never_outlasts_the_span_that_recorded_it():
+    # Without a reported delay the last final is used as-is, and a final stamped
+    # after the span closed must not credit the caller with speech that the
+    # recording does not cover.
+    operation = {
+        **MERGED_OPERATION,
+        "milestones": {
+            **MERGED_OPERATION["milestones"],
+            "final_transcript": {"occurred_at_ms": 52179, "last_at_ms": 59000, "count": 2},
+            "speech_final": {"occurred_at_ms": 52179, "last_at_ms": 59000, "count": 2},
+            "end_of_utterance": {"occurred_at_ms": 54403, "count": 1},
+        },
+    }
+    assert speech_window(operation)["end_ms"] == 54204
+
+
+def test_a_single_final_is_never_reinterpreted_as_continued_speech():
+    # A final always arrives after the audio it describes. On a turn the provider
+    # finalised once, that gap is transcription latency, not the caller talking,
+    # and the declared end of speech has to stand.
+    operation = {
+        **MERGED_OPERATION,
+        "milestones": {
+            **MERGED_OPERATION["milestones"],
+            "final_transcript": {"occurred_at_ms": 54204, "last_at_ms": 54204, "count": 1},
+            "speech_final": {"occurred_at_ms": 54204, "last_at_ms": 54204, "count": 1},
+        },
+    }
+    window = speech_window(operation)
+    assert window["end_ms"] == 52179
+    assert window["end_from_repeated_finals"] is False
+
+
+def test_finalisation_is_measured_from_the_final_that_closed_the_message():
+    # Pairing the FIRST final with an end of speech the later finals moved
+    # forward reports a negative finalisation delay.
+    timing = production_turn_latency(MERGED_OPERATION, {})
+    assert timing["final_at_ms"] == 54204
+    assert timing["endpoint_delay_ms"] == 450
+
+
+def test_a_repeat_counter_that_contradicts_its_timestamps_is_not_evidence():
+    # Packages are uploaded, so a milestone can arrive self-contradictory: one
+    # recorded occurrence, yet a later instant than the one it occurred at. The
+    # two disagree about whether anything happened after the declared end, and
+    # moving the caller's speech on that basis would invent it.
+    operation = {
+        **MERGED_OPERATION,
+        "milestones": {
+            **MERGED_OPERATION["milestones"],
+            "final_transcript": {"occurred_at_ms": 52179, "last_at_ms": 54204, "count": 1},
+            "speech_final": {"occurred_at_ms": 52179, "last_at_ms": 54204, "count": 1},
+        },
+    }
+    window = speech_window(operation)
+    assert window["end_ms"] == 52179
+    assert window["end_from_repeated_finals"] is False
+
+
+def test_finals_stamped_at_one_instant_prove_nothing_about_later_speech():
+    # Several finals sharing a timestamp are one instant reported repeatedly, not
+    # a caller who kept talking, so the declared end of speech has to stand.
+    operation = {
+        **MERGED_OPERATION,
+        "milestones": {
+            **MERGED_OPERATION["milestones"],
+            "final_transcript": {"occurred_at_ms": 52179, "last_at_ms": 52179, "count": 3},
+            "speech_final": {"occurred_at_ms": 52179, "last_at_ms": 52179, "count": 3},
+        },
+    }
+    assert speech_window(operation)["end_ms"] == 52179

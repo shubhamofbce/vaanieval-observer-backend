@@ -154,6 +154,41 @@ recorder = VaaniLiveKitRecorder(
 milestones, plus partial transcripts as bounded samples. Once the sample limit is
 reached it emits `partial_samples_truncated` rather than growing without bound.
 
+A turn ends where **LiveKit** ends it, which is the commit — not the final
+transcript. A provider is free to end a transcript at every sentence, and
+LiveKit merges those segments into one user message and answers it once; it
+also answers a *provisional* end of turn, creating a reply for each final and
+cancelling the ones the caller talks past. Segments that belong to one
+committed message therefore share a single STT span, which reports how many
+arrived in `response.final_segments`, and the reply that survives is recorded
+against that same turn. Recorded turns match the framework's own conversation
+history one for one, so per-turn latency is never diluted by turns that never
+had a reply to measure.
+
+#### Utterances your agent ignores
+
+An agent can decline to answer by raising `StopResponse` from
+`Agent.on_user_turn_completed` — a content filter, a wake-word gate, a barge-in
+policy. LiveKit ends that turn and clears its transcript, and **no session event
+announces it**. Left alone, the next thing the caller says looks like a
+continuation of the ignored utterance and is recorded prepended to it, so one
+turn ends up carrying two questions.
+
+When you pass `agent=` to `observe_agent_session`, the SDK wraps that method to
+learn about it. The ignored utterance stays its own turn, keeps its transcript,
+and its STT span carries `response.reply_skipped: "stop_response"`. The wrapper
+is transparent: your return value and your exceptions pass through untouched.
+
+Note that a turn you decline can still cost money. LiveKit may have started a
+preemptive LLM call before your filter ran, and that request is billed whether
+or not it is spoken. Those tokens are recorded against the turn whose audio
+caused them, so the dashboard shows an ignored turn with a real model bill and
+no speech out, labelled as declined rather than flagged as a silent failure.
+
+If the agent object cannot be wrapped (a frozen or slotted subclass), the SDK
+warns once and every committed turn is still recorded correctly — only the
+ignored-utterance case becomes unobservable.
+
 </Step>
 
 <Step>

@@ -192,6 +192,32 @@ Per-span fields worth knowing when a number looks surprising:
 | `response.text_source` | `"tts_node"` when the words are what we asked for rather than what was confirmed |
 | `response.segment_count` | Provider metrics summed into this span |
 
+On an STT span:
+
+| Field | Meaning |
+| --- | --- |
+| `response.final_segments` | Finals the provider issued for this one committed message |
+| `response.provider_metered_audio_ms` | The recogniser's **connection** meter, not this turn's speech |
+| `response.reply_skipped` | Present when the agent declined to answer this utterance; `"stop_response"` means it raised `StopResponse` |
+
+`provider_metered_audio_ms` is the number the recogniser will bill. It is
+reported on a fixed timer covering everything streamed to the socket, including
+silence between turns, so a tick lands on whichever turn happens to be open and
+can exceed the span that carries it. For how long the caller actually spoke, use
+`presentation_window` or the turn's `user_speech_ms`.
+
+`reply_skipped` separates a turn the agent chose not to answer from one whose
+reply failed to sound. Both look identical in the numbers — a transcript, no TTS
+span — and they call for opposite responses, so the absence of a reply is never
+by itself reported as a declined turn. It is set only when the agent said so,
+and requires `agent=` on `observe_agent_session`.
+
+A caller's speech window ends at `speech_ended`, which the voice detector stamps
+at the first pause. When one message arrives as several finals, the later ones
+are evidence the caller kept talking, so the window ends at the last final less
+the recogniser's own `transcription_delay_ms`, and `presentation_window.source`
+reads `final_transcripts` to say so.
+
 <Callout type="warn">
   A session with `events_complete: false` or a non-zero drop count is classified
   **unverifiable** in the dashboard, not healthy and not failed. "We do not know

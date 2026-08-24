@@ -43,6 +43,28 @@ def milestone_ms(operation: dict[str, Any], *names: str) -> int | None:
     return None
 
 
+def repeated_milestone_last_ms(operation: dict[str, Any], *names: str) -> int | None:
+    """The latest instant of a milestone that was recorded more than once.
+
+    A repeated name merges in the package format, keeping the first
+    `occurred_at_ms` and the latest `last_at_ms`. Reading only the first is right
+    for a milestone that happens once and is reported once, and wrong for one the
+    recogniser genuinely issued several times. Returns `None` unless a name was
+    seen more than once, so a milestone reported a single time is never
+    reinterpreted here.
+    """
+    milestones = operation.get("milestones") or {}
+    seen: list[int] = []
+    for name in names:
+        item = milestones.get(name)
+        if not isinstance(item, dict) or not isinstance(item.get("count"), int) or item["count"] < 2:
+            continue
+        last, first = item.get("last_at_ms"), item.get("occurred_at_ms")
+        if isinstance(last, (int, float)) and isinstance(first, (int, float)) and last > first:
+            seen.append(round(last))
+    return max(seen) if seen else None
+
+
 def has_milestone(operation: dict[str, Any], *names: str) -> bool:
     milestones = operation.get("milestones") or {}
     return any(
@@ -135,6 +157,25 @@ def speech_window(operation: dict[str, Any]) -> dict[str, Any]:
         listen_start = operation.get("started_at_ms")
     if declared_end is None:
         declared_end = operation.get("ended_at_ms")
+    # `speech_ended` comes from the voice activity detector, which ends the
+    # window at the caller's first pause. When a provider delivers one message as
+    # several finals, LiveKit merges them into a single committed turn and every
+    # final after that pause is evidence the caller was still talking. Measured
+    # on a real call: a three-final turn spanning 2975 ms reported 950 ms of
+    # speech, a 68% undercount of the caller and, since replies are timed from
+    # the end of this window, an equally wrong reply latency. A final arrives
+    # after the audio it describes, so the recogniser's own transcription delay
+    # is removed when it reported one rather than crediting the caller with it.
+    late_final = repeated_milestone_last_ms(operation, "final_transcript", "speech_final")
+    end_from_finals = False
+    if late_final is not None:
+        delay = milestone_detail(operation, "end_of_utterance", "transcription_delay_ms")
+        spoke_until = late_final - delay if isinstance(delay, (int, float)) else late_final
+        span_end = operation.get("ended_at_ms")
+        if isinstance(span_end, (int, float)):
+            spoke_until = min(spoke_until, span_end)
+        if not isinstance(declared_end, (int, float)) or spoke_until > declared_end:
+            declared_end, end_from_finals = round(spoke_until), True
     first_word, last_word = word_bounds(operation)
     # A word cannot begin before the recognizer opened its microphone. When it
     # appears to, the word timestamps are on a different time base than the
@@ -160,6 +201,7 @@ def speech_window(operation: dict[str, Any]) -> dict[str, Any]:
         "declared_end_ms": round(declared_end) if isinstance(declared_end, (int, float)) else None,
         "from_word_timestamps": first_word is not None and last_word is not None,
         "word_clock_mismatch": cross_clock,
+        "end_from_repeated_finals": end_from_finals and last_word is None,
     }
 
 
@@ -169,7 +211,13 @@ def production_turn_latency(operation: dict[str, Any], turn: dict[str, Any]) -> 
     window = speech_window(operation)
     first_partial = milestone_ms(operation, "first_partial")
     first_stable = milestone_ms(operation, "first_stable_partial", "stable_partial")
-    final = milestone_ms(operation, "final_transcript", "speech_final")
+    # The instant that closed the message. When one message arrived as several
+    # finals, that is the last of them: pairing the FIRST final with an end of
+    # speech that the later finals moved forward would report a negative
+    # finalisation delay.
+    final = repeated_milestone_last_ms(operation, "final_transcript", "speech_final")
+    if final is None:
+        final = milestone_ms(operation, "final_transcript", "speech_final")
     request = operation.get("request") or {}
     response = operation.get("response") if isinstance(operation.get("response"), dict) else {}
     samples = ((operation.get("samples") or {}).get("partial") or {})

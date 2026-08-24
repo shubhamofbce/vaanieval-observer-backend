@@ -347,6 +347,22 @@ def validate_session(session: str, findings: Findings) -> dict:
 
         transcript_recorded = isinstance(response.get("transcript"), str)
         speech_end_at = ms(op, "speech_ended", "speech_end", "audio_ended")
+
+        # One message can arrive as several final transcripts, which LiveKit
+        # merges into a single committed turn. Every final after the voice
+        # detector's first pause is evidence the caller was still talking, so
+        # the end of speech moves forward and the final that closed the message
+        # is the last one. Recomputed here from the raw milestone counters
+        # rather than by calling the published implementation.
+        late_final = None
+        for repeated in ("final_transcript", "speech_final"):
+            item = (op.get("milestones") or {}).get(repeated)
+            if not isinstance(item, dict) or not isinstance(item.get("count"), int) or item["count"] < 2:
+                continue
+            last, first = item.get("last_at_ms"), item.get("occurred_at_ms")
+            if isinstance(last, (int, float)) and isinstance(first, (int, float)) and last > first:
+                late_final = round(last) if late_final is None else max(late_final, round(last))
+
         final_transcript_at = ms(op, "final_transcript")
         measurable_endpoint = final_transcript_at is not None and speech_end_at is not None
         first_word, last_word = word_span(op)
@@ -356,6 +372,13 @@ def validate_session(session: str, findings: Findings) -> dict:
         if listen_start is None:
             listen_start = op.get("started_at_ms")
         declared_end = speech_end_at if speech_end_at is not None else op.get("ended_at_ms")
+        if late_final is not None:
+            delay = milestone_field(op, "end_of_utterance", "transcription_delay_ms")
+            spoke_until = late_final - delay if isinstance(delay, (int, float)) else late_final
+            if isinstance(op.get("ended_at_ms"), (int, float)):
+                spoke_until = min(spoke_until, op["ended_at_ms"])
+            if not isinstance(declared_end, (int, float)) or spoke_until > declared_end:
+                declared_end = round(spoke_until)
         # A word cannot start before the recognizer began listening. When it
         # appears to, the word timestamps are on a different clock than the
         # milestones and their difference is not a measurement. Kept identical
@@ -370,7 +393,7 @@ def validate_session(session: str, findings: Findings) -> dict:
 
         first_partial_at = ms(op, "first_partial")
         first_stable_at = ms(op, "first_stable_partial", "stable_partial")
-        final_at = ms(op, "final_transcript", "speech_final")
+        final_at = late_final if late_final is not None else ms(op, "final_transcript", "speech_final")
         configured = request.get("endpointing_ms")
         configured = configured if isinstance(configured, (int, float)) else None
         utterance_end = request.get("utterance_end_ms")

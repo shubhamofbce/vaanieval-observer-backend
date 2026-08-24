@@ -3832,7 +3832,9 @@ function renderTurnTab(panel, turn, tab) {
       ['Turn length', duration(turn.duration_ms) || '—'],
       ['Caller speech', duration(turn.user_speech_ms) || 'no stt span'],
       ['Model time', turn.llm_ms == null ? 'no model call' : `${duration(turn.llm_ms)} over ${turn.llm_calls} call(s)`],
-      ['Audible speech out', duration(turn.audible_tts_ms) || 'not captured'],
+      ['Audible speech out', turn.reply_skipped
+        ? 'none — the agent declined to answer'
+        : (duration(turn.audible_tts_ms) || 'not captured')],
       ['TTS provider work', duration(turn.tts_ms) || 'no tts span'],
       ['Time to first audio', duration(turn.time_to_first_audio_ms) || 'not measurable'],
     ]));
@@ -4850,6 +4852,7 @@ function buildAudioCard(session) {
         `starts ${offset(turn.started_at_ms)}`,
         reply != null ? `first audio back ${duration(reply)}${tone === 'danger' ? ' — audible lag' : tone === 'warn' ? ' — borderline' : ''}` : 'no first-audio mark',
         turn.user_speech_ms != null ? `caller spoke ${duration(turn.user_speech_ms)}` : null,
+        turn.reply_skipped ? 'reply skipped by the agent' : null,
         spoken ? `“${spoken}”` : null,
         'click to seek and inspect',
       ].filter(Boolean));

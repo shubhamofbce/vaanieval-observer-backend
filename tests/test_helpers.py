@@ -294,3 +294,27 @@ def test_attributed_tts_keeps_disjoint_playout_segments(api):
     window = tts["presentation_window"]
     assert window["segments"] == [{"from_ms": 200, "to_ms": 300}, {"from_ms": 600, "to_ms": 800}]
     assert (window["from_ms"], window["to_ms"]) == (200, 800)
+
+
+def test_a_turn_the_agent_declined_to_answer_says_so(api):
+    """A turn with a transcript, a real model bill and no speech out is not
+    self-explanatory. It is either an agent that deliberately ignored the
+    caller or a TTS that never sounded -- one is a product decision, the other
+    is an incident, and an operator cannot act on the number without knowing
+    which. The SDK records the difference, so the timeline must carry it."""
+    heard = operation(event_id="stt-1", type_="stt", started_at_ms=100, turn_id="turn-1",
+                      response={"transcript": "what is the baggage allowance",
+                                "reply_skipped": "stop_response"})
+    billed = _llm("http", 200, 900, response={"total_tokens": 429})
+    turn = api.group_turns([heard, billed])[0]
+    assert turn["reply_skipped"] == "stop_response"
+    assert turn["audible_tts_ms"] is None
+    assert turn["llm_calls"] == 1, "the tokens were really spent, so they are really billed"
+
+
+def test_an_ordinary_unanswered_turn_is_not_labelled_as_declined(api):
+    """The label has to mean something: it must come from the agent saying so,
+    not from the absence of a reply, or it would excuse every silent failure."""
+    heard = operation(event_id="stt-2", type_="stt", started_at_ms=100, turn_id="turn-1",
+                      response={"transcript": "hello"})
+    assert api.group_turns([heard])[0]["reply_skipped"] is None

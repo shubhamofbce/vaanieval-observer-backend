@@ -312,6 +312,48 @@ def test_audit_reports_no_drift_for_freshly_ingested_calls(client):
     assert report["consistent"] is True, report["mismatches"]
 
 
+def test_an_upgrade_rebuilds_split_facts_instead_of_calling_them_tampered(
+        client, api):
+    """A migrated column starts at its default, which for a stored split is wrong.
+
+    The per-stage split columns are recomputed by the audit, so an existing
+    database that gained them at DEFAULT 0 would have every already-stored split
+    call reported as tampered with -- permanently, since nothing rewrites a row
+    the audit merely complains about. The METRICS_VERSION bump is what makes the
+    difference, so this test drives the upgrade rather than trusting it: it puts
+    the row back into the state a migration leaves it in and then re-runs the
+    rebuild the bump forces.
+    """
+    ingest(client, "call-1", split_call_events())
+    with api.connect() as db:
+        stored = db.execute(
+            "SELECT stt_split FROM turn_metrics WHERE session_id = ? "
+            "AND stt_split = 1", ("call-1",)).fetchall()
+        assert stored, "guard: this call must actually carry a split stage"
+        # Exactly what an upgraded database looks like: the column exists,
+        # every row has its default, and the version is behind.
+        db.execute("UPDATE turn_metrics SET stt_split = 0, llm_split = 0, "
+                   "tts_split = 0, tool_split = 0")
+        # 4 literally, not `METRICS_VERSION - 1`: the point is that the
+        # version these columns arrived in is treated as stale. Relative to
+        # whatever the constant happens to say, the test would pass even if the
+        # bump were forgotten -- which is the mistake it exists to catch.
+        db.execute("UPDATE call_metrics SET metrics_version = 4")
+        db.commit()
+
+    assert api.backfill_metrics() == 1, (
+        "a row built by an older definition must be rebuilt, not kept"
+    )
+    report = client.get("/v1/dashboard/audit").json()
+    assert report["consistent"] is True, report["mismatches"]
+    with api.connect() as db:
+        assert db.execute(
+            "SELECT stt_split FROM turn_metrics WHERE session_id = ? "
+            "AND stt_split = 1", ("call-1",)).fetchall(), (
+            "the rebuild must restore the split fact, not just silence the audit"
+        )
+
+
 def test_audit_detects_tampered_metrics(client, api):
     """If the audit cannot catch a wrong stored value, it is decoration."""
     ingest(client, "call-1", call_events(turns=3))

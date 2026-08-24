@@ -28,7 +28,12 @@ from app.latency import milestone_ms, production_turn_latency
 # Metric-extraction schema version. Bumped when a stage definition changes so
 # `initialize()` can detect rows built by an older definition and rebuild them
 # instead of silently mixing two measurement contracts in one percentile.
-METRICS_VERSION = 4
+#
+# 5: per-stage split columns. A migrated database gets them at DEFAULT 0, which
+# is wrong for any call already stored with a split exchange -- and because the
+# drift audit recomputes these columns, it would have reported every one of
+# those calls as tampered with for ever. The bump rebuilds them instead.
+METRICS_VERSION = 5
 
 # An operation that stopped because something cancelled it is not a fault.
 ABORT_NAMES = ("AbortError", "CancelledError", "CancelledException")

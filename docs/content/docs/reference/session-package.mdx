@@ -200,8 +200,10 @@ On an STT span:
 | `response.provider_metered_audio_ms` | The recogniser's **connection** meter, not this turn's speech |
 | `response.input_tokens` / `response.output_tokens` | Recogniser token usage, when the provider reports it (OpenAI does; Deepgram does not) |
 | `response.metered_after_final` | The provider metered this turn *after* its transcript was final. The usage is still attributed to the turn that earned it rather than to whoever spoke next |
-| `response.continues_turn` | Present only when we knowingly recorded two turns where LiveKit committed one message; names the turn this one continues, with `split_reason` saying why they could not be merged |
+| `response.metered_after_final_ms` | How much of the published meter arrived after the caller stopped talking, so you can subtract it. A per-utterance recogniser (OpenAI) puts real speech here; a connection-metering one (Deepgram) puts inter-turn silence here, and nothing in the payload tells them apart |
+| `response.continues_turn` | Present only when we knowingly recorded two turns where LiveKit committed one message; names the turn this one continues, with `split_reason` saying why they could not be merged. The call rollup counts such a pair once and reports `split_turn_count`, so `turn_count` keeps agreeing with LiveKit's own history |
 | `response.reply_includes_filler` | The reply's audio includes a `say()` filler spoken before the generated answer; `filler_audio_ms` gives the filler's share so the answer's own duration stays recoverable |
+| `response.filler_audio_ms_unknown` | The filler ran but its meter had not reported when the answer began. LiveKit emits `speech_created` for a `say()` before scheduling its TTS, so this is an ordinary race — the filler is declared, only its duration is missing |
 | `response.reply_skipped` | Present when no reply is coming: `"stop_response"` (the agent ignored the utterance) or `"callback_error"` (its turn callback raised and LiveKit swallowed it) |
 
 `provider_metered_audio_ms` is the number the recogniser will bill, summed over

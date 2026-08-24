@@ -329,6 +329,10 @@ def turn_metrics(turn: dict[str, Any], call_started_epoch_ms: int | None) -> dic
 
     return {
         "turn_id": str(turn.get("turn_id")),
+        # Carried so the call rollup can tell one exchange we recorded as two
+        # rows from two exchanges. Without it the split is visible on the page
+        # and invisible in every number derived from the page.
+        "continues_turn": turn.get("continues_turn"),
         "started_at_ms": started_at_ms,
         "started_at_epoch_ms": (call_started_epoch_ms + started_at_ms) if call_started_epoch_ms is not None else None,
         "duration_ms": turn.get("duration_ms"),
@@ -420,8 +424,14 @@ def error_fingerprint(op: dict[str, Any]) -> str | None:
 
 def call_metrics(turns: Sequence[dict[str, Any]]) -> dict[str, Any]:
     """Call-level rollups derived from the turn rows, so the two always agree."""
+    # A turn we split because the earlier half was already published is one
+    # exchange, not two. Counting the physical rows inflated `turn_count` and
+    # every per-turn average derived from it -- the UI already labels the split,
+    # but a label does not fix a denominator.
+    continuations = sum(1 for turn in turns if turn.get("continues_turn"))
     return {
-        "turn_count": len(turns),
+        "turn_count": len(turns) - continuations,
+        "split_turn_count": continuations,
         "stt_failed": sum(turn["stt_failed"] for turn in turns),
         "llm_failed": sum(turn["llm_failed"] for turn in turns),
         "tts_failed": sum(turn["tts_failed"] for turn in turns),

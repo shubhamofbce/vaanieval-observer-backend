@@ -376,3 +376,30 @@ def test_a_crashed_turn_callback_is_an_incident_not_a_quiet_turn(api):
                             "reply_skipped": "stop_response"}),
     ])[0]
     assert declined["status"] == "ok"
+
+
+def test_a_split_turn_counts_once_in_the_call_rollup(api):
+    """The UI label does not fix the denominator underneath it.
+
+    When the span carrying a caller's earlier words is already published we
+    keep the rest by opening a second turn, and we say so. But the rollup
+    counted physical rows, so one LiveKit message became two turns -- inflating
+    `turn_count` and, with it, every per-turn average derived from it. An
+    operator comparing turn counts against LiveKit's own history would find
+    them disagreeing with no explanation on this page.
+    """
+    from app import metrics
+
+    turns = api.group_turns([
+        operation(turn_id="turn-1", type="stt", status="ok",
+                  response={"transcript": "What is the fare"}),
+        operation(turn_id="turn-2", type="stt", status="ok", started_at_ms=100,
+                  response={"transcript": "to Boston please",
+                            "continues_turn": "turn-1",
+                            "split_reason": "earlier_words_already_published"}),
+    ])
+    rollup = metrics.call_metrics([metrics.turn_metrics(t, 0) for t in turns])
+    assert rollup["turn_count"] == 1, (
+        "LiveKit committed one message; the rollup must agree"
+    )
+    assert rollup["split_turn_count"] == 1, "and must say why it is not two"

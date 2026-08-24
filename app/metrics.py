@@ -33,7 +33,7 @@ from app.latency import milestone_ms, production_turn_latency
 # is wrong for any call already stored with a split exchange -- and because the
 # drift audit recomputes these columns, it would have reported every one of
 # those calls as tampered with for ever. The bump rebuilds them instead.
-METRICS_VERSION = 6
+METRICS_VERSION = 7
 
 # An operation that stopped because something cancelled it is not a fault.
 ABORT_NAMES = ("AbortError", "CancelledError", "CancelledException")
@@ -334,6 +334,14 @@ def turn_metrics(turn: dict[str, Any], call_started_epoch_ms: int | None) -> dic
 
     return {
         "turn_id": str(turn.get("turn_id")),
+        # The SDK flags a turn whose reply it could not prove belonged here.
+        # Recorded as a column because every number derived from this turn --
+        # latency, tokens, cost -- inherits that doubt, and a caveat only the
+        # raw span carries is a caveat nobody reading a rollup ever sees.
+        "inferred_reply": int(any(
+            (op.get("response") or {}).get("reply_attribution") == "inferred"
+            for op in ops
+        )),
         # Carried so the call rollup can tell one exchange we recorded as two
         # rows from two exchanges. Without it the split is visible on the page
         # and invisible in every number derived from the page.
@@ -585,6 +593,11 @@ def call_metrics(turns: Sequence[dict[str, Any]]) -> dict[str, Any]:
     continuations = len(continuation_ids(turns))
     return {
         "turn_count": len(turns) - continuations,
+        # Not subtracted from `turn_count`: the exchange happened and its
+        # measurements are real. It is reported alongside so a fleet view can
+        # say how much of a number rests on a reading rather than on the
+        # event, which is the difference between a caveat and a footnote.
+        "inferred_reply_turns": sum(turn["inferred_reply"] for turn in turns),
         "split_turn_count": continuations,
         "stt_failed": sum(turn["stt_failed"] for turn in turns),
         "llm_failed": sum(turn["llm_failed"] for turn in turns),

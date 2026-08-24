@@ -1184,6 +1184,47 @@ def test_a_stage_panel_explains_why_it_measured_more_than_there_are_turns(client
 
 
 
+def test_a_reply_the_sdk_could_not_place_is_counted_not_only_recorded(client):
+    """A caveat only the raw span carries is a caveat nobody reads.
+
+    The SDK marks a reply whose turn it could not establish from the events --
+    it was placed by reading the call. Every latency, token and cost figure
+    derived from that turn inherits the doubt, and the fleet view is where
+    those figures are quoted. Until this was counted the flag reached the
+    archive and stopped there: a range's numbers could move because a reply had
+    been attributed by inference, and no panel said so.
+
+    Deliberately not subtracted from `turns`: the exchange happened and its
+    measurements are real. What is in doubt is which turn they belong to.
+    """
+    events = jsonl(*[
+        {**op, "response": {**(op.get("response") or {}),
+                            "reply_attribution": "inferred"}}
+        if op["type"] == "llm" and op["turn_id"] == "turn-2" else op
+        for op in [json.loads(line)
+                   for line in call_events(turns=3).splitlines() if line]
+    ])
+    ingest(client, "call-1", events)
+
+    coverage = summary(client)["coverage"]
+
+    assert coverage["turns"] == 3, (
+        "guard: an inferred reply must not remove the exchange from the count"
+    )
+    assert coverage["inferred_reply_turns"] == 1, (
+        "a turn whose reply was placed by inference was reported as though "
+        "the events had said where it belonged"
+    )
+
+
+def test_a_call_with_no_inferred_reply_reports_none(client):
+    """The counter has to be zero when nothing was inferred, or the notice it
+    drives becomes permanent furniture and stops being read."""
+    ingest(client, "call-1", call_events(turns=2))
+
+    assert summary(client)["coverage"]["inferred_reply_turns"] == 0
+
+
 def test_a_call_with_no_split_does_not_carry_the_utterance_caveat(client):
     """The caveat has to be rare to be read. If every panel carried it, readers
     would learn to skip it well before the day it changes their conclusion."""

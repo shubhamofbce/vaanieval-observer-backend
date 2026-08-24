@@ -267,12 +267,14 @@ specifically, by which frame asked for the reply:
 | That same reply arriving **after LiveKit stopped waiting** for it — its five-second wait (`agent_activity.py:4278`) bounds the wait, not the provider's generation | Either the turn that called the tool or the next caller; the event says neither | Its own turn, `reply_attribution: "inferred"` |
 | `AgentSession.generate_reply()` called by **your own code** — recognised because the call is still on the stack when the event fires, and the frame that made it is outside the `livekit` package | Unknowable | Its own turn, `reply_attribution: "inferred"` |
 | `AgentSession.run(user_input=…)` — LiveKit's own file, but an entry point only your code reaches | The `user_input` you supplied; no caller spoke | Its own turn, `reply_attribution: "inferred"` |
-| `AgentSession.generate_reply()` called by **LiveKit itself** — committing a realtime turn, answering an async tool result, the IVR activity, or a `beta/workflows` prompt | Usually something already under way, but the workflow and IVR helpers prompt *proactively* | Its own turn, joined by the following transcript, `reply_attribution: "inferred"` |
-| LiveKit **reissuing** a reply for a run that already exists — `RunResult._maybe_retry_output()` (`run_result.py:292`) after a structured output fails to validate, or `realtime_fallback_adapter.py:394`/`:445` when a realtime session drops to a text model | Whoever started that run; the event carries no run identity to say who | Its own turn, **not** joined by the following transcript, `reply_attribution: "inferred"` |
+| `AgentSession.generate_reply()` called by **LiveKit itself** — committing a realtime turn, the IVR activity, or a `beta/workflows` prompt | Usually something already under way, but the workflow and IVR helpers prompt *proactively* | Its own turn, joined by the following transcript, `reply_attribution: "inferred"` |
+| That same internal call made **while a tool result on the turn is still owed a reply** — LiveKit's asynchronous tool executor does exactly this (`voice/tool_executor.py:589-603`) | The turn that ran the tool, most likely | Merged into that turn, `reply_attribution: "inferred"` |
+| LiveKit **reissuing** a reply for a run that already exists — `RunResult._maybe_retry_output()` (`run_result.py:292`) after a structured output fails to validate, or `realtime_fallback_adapter.py:394` when a realtime session drops to a text model | Whoever started that run; the event carries no run identity to say who | Its own turn, **not** joined by the following transcript, `reply_attribution: "inferred"` |
 | The public method was **replaced** — a subclass or wrapper stands in for `generate_reply`, so neither it nor `AgentActivity._generate_reply()` is on the stack with LiveKit above it | Unknowable | Its own turn, `reply_attribution: "inferred"` |
 | The stack could not be read — introspection blocked, the public method's code object unreachable, or `livekit.agents` imports but its modules have moved on this build | Unknowable | Its own turn, `reply_attribution: "inferred"` |
 | A **decorated or traced** `generate_reply` — `functools.wraps` copies the name but not the code object, so the stand-in frame is literally called `wrapper` and the override reaches a different internal path | Unknowable | Its own turn, `reply_attribution: "inferred"` |
 | A session that is **not** LiveKit's — a compatible or test double passed to `attach()` on a machine where `livekit.agents` is not importable at all | Unknowable | Its own turn, `reply_attribution: "inferred"` |
+| A **realtime** model generating server-side (`agent_activity.py:1991-2008`) — reports source `generate_reply` like the automatic answer but is not `user_initiated`, and never passes through the emitting function | The speech being transcribed now | Its own turn, joined by that transcript, no flag |
 
 Two rows stay judgements: the post-tool reply, and your own `generate_reply()`.
 Yours is scheduled and `user_initiated` exactly like the automatic answer —
@@ -292,8 +294,18 @@ single time the automatic answer is created. Its *absence* therefore rules the
 automatic answer out, whatever the reply turns out to be — which is what makes a
 decorated override safe: `functools.wraps` copies the name, so a wrapper frame
 is still literally called `wrapper`, and no amount of name matching would find
-it. A frame calling itself `generate_reply` on the recorded session is used as a
-weaker second reading, for builds where that anchor cannot be resolved at all.
+it. A frame calling itself `generate_reply` on one of the recorded sessions is used
+as a weaker second reading, for builds where that anchor cannot be resolved at
+all — and `attach()` may be called more than once, so every session it was
+given counts, not only the most recent one.
+
+Where `livekit.agents` cannot be imported at all, none of this evidence exists
+and there is also no LiveKit to have generated anything — so a reply that
+cannot be traced to the recorded session's own call is reported as unreadable
+rather than assumed to be automatic. The cost is a caveat on a compatible
+framework that generates replies by itself; the alternative was attributing
+those replies to whoever spoke last and saying nothing.
+
 LiveKit's own calls are still
 flagged, because not all of them answer speech already under way: the
 `beta/workflows` and IVR helpers ask the caller a question before the caller has
@@ -303,6 +315,15 @@ where it almost always belongs, but a caller talking over the tool call could
 have prompted it instead. Either way the flag is set on every span of that turn,
 including the LLM span, so an interrupted reply that reported tokens still
 carries the caveat.
+
+The caveat is also **counted**, not only recorded. The dashboard's fleet view
+reports `coverage.inferred_reply_turns` for the range you are looking at, and
+says so on the page when it is non-zero. Without that the flag reached the
+archive and stopped there: a range's latency, token and cost figures could move
+because a reply had been placed by reading the call rather than by the events,
+and nothing on the page would have mentioned it. The turn is *not* subtracted
+from the turn count — the exchange happened and its measurements are real; what
+is in doubt is which turn they belong to.
 
 If you are running a build of `livekit-agents` that does not expose these
 signals, no reply is merged and the flag is set — the recorder never guesses

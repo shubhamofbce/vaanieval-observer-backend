@@ -888,6 +888,10 @@
     if (coverage.capture_incomplete_calls) {
       notices.push(`<div class="notice">${count(coverage.capture_incomplete_calls)} call(s) in range ended before capture finished. Their turns are under-counted in every panel below.</div>`);
     }
+    if (coverage.inferred_reply_turns) {
+      const share = coverage.turns ? Math.round((coverage.inferred_reply_turns / coverage.turns) * 100) : null;
+      notices.push(`<div class="notice">${count(coverage.inferred_reply_turns)} turn(s) in range${share === null ? '' : ` (${share}%)`} hold a reply whose turn could not be established from the events -- it was placed by reading the call, and the span says so. Latency, tokens and cost for those turns can belong to an adjacent exchange.</div>`);
+    }
     if (!coverage.calls) {
       root.innerHTML = `<div class="board-grid">${card('No calls in this range', '', emptyState(
         'Nothing to aggregate yet',

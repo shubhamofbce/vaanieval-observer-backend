@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS call_metrics (
   missing_final_turns INTEGER NOT NULL DEFAULT 0,
   max_response_latency_ms INTEGER,
   capture_incomplete INTEGER NOT NULL DEFAULT 0,
+  inferred_reply_turns INTEGER NOT NULL DEFAULT 0,
   metrics_version INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS call_metrics_time ON call_metrics(started_at_epoch_ms);
@@ -248,7 +249,7 @@ TURN_COLUMNS = (
     "stt_ops", "llm_ops", "tts_ops", "tool_ops",
     "stt_failed", "llm_failed", "tts_failed", "tool_failed", "tts_interrupted",
     "stt_missing_final", "stt_forced_flush", "is_continuation", "has_continuation",
-    "stt_split", "llm_split", "tts_split", "tool_split",
+    "stt_split", "llm_split", "tts_split", "tool_split", "inferred_reply",
     "stt_provider", "stt_model", "llm_provider", "llm_model", "tts_provider", "tts_model",
 )
 
@@ -303,6 +304,12 @@ ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # and the very next rebuild - which the METRICS_VERSION bump forces on
     # every upgrade - dies on "no such column" with the console already live.
     ("turn_metrics", "is_continuation", "INTEGER NOT NULL DEFAULT 0"),
+    # Added when the reply-attribution caveat started being counted. An
+    # existing database keeps its old table definition, and the rebuild the
+    # METRICS_VERSION bump forces on upgrade would die on "no such column"
+    # with the console already live.
+    ("turn_metrics", "inferred_reply", "INTEGER NOT NULL DEFAULT 0"),
+    ("call_metrics", "inferred_reply_turns", "INTEGER NOT NULL DEFAULT 0"),
     ("turn_metrics", "has_continuation", "INTEGER NOT NULL DEFAULT 0"),
     ("interval_rollups", "split_turns", "INTEGER NOT NULL DEFAULT 0"),
     # Added when the split caveat stopped being inferred from range totals. The
@@ -513,8 +520,9 @@ def rebuild_session(
         "INSERT INTO call_metrics (session_id, agent_id, environment, agent_version, sdk_language, sdk_version, "
         "started_at, started_at_epoch_ms, duration_ms, outcome, status, turn_count, failed_op_count, "
         "stt_failed, llm_failed, tts_failed, tool_failed, audible_lag_turns, measured_response_turns, "
-        "missing_final_turns, max_response_latency_ms, capture_incomplete, metrics_version) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "missing_final_turns, max_response_latency_ms, capture_incomplete, inferred_reply_turns, "
+        "metrics_version) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             session_id,
             manifest.get("agent_id"),
@@ -527,7 +535,7 @@ def rebuild_session(
             rollup["stt_failed"], rollup["llm_failed"], rollup["tts_failed"], rollup["tool_failed"],
             rollup["audible_lag_turns"], rollup["measured_response_turns"],
             rollup["missing_final_turns"], rollup["max_response_latency_ms"],
-            capture_incomplete, METRICS_VERSION,
+            capture_incomplete, rollup["inferred_reply_turns"], METRICS_VERSION,
         ),
     )
     _mark_dirty(db, session_id, manifest.get("agent_id"), previous_buckets)
@@ -1663,6 +1671,10 @@ def summary(db: sqlite3.Connection, filters: Filters, *, compare: bool = True,
         "SUM(CASE WHEN c.status != 'ready' THEN 1 ELSE 0 END) AS incomplete, "
         "SUM(CASE WHEN c.failed_op_count > 0 THEN 1 ELSE 0 END) AS failing_calls, "
         "SUM(CASE WHEN c.capture_incomplete = 1 THEN 1 ELSE 0 END) AS capture_incomplete, "
+        # Turns, not calls: one flagged exchange in a hundred is a footnote,
+        # and half of them is a different conversation about whether these
+        # numbers can be quoted at all.
+        "SUM(c.inferred_reply_turns) AS inferred_reply_turns, "
         "SUM(c.turn_count) AS turns, SUM(c.duration_ms) AS total_duration_ms "
         f"FROM call_metrics c WHERE {where}", params).fetchone()
     calls = calls_row["calls"] or 0
@@ -1752,6 +1764,13 @@ def summary(db: sqlite3.Connection, filters: Filters, *, compare: bool = True,
             "turns_in_range": computed["turns"],
             "measured_response_turns": measured,
             "capture_incomplete_calls": calls_row["capture_incomplete"] or 0,
+            # The SDK marks a reply it could not prove belonged to the turn it
+            # was filed under. Every latency, token and cost figure derived
+            # from that turn inherits the doubt, and until this was counted the
+            # caveat lived only on the raw span -- so a fleet view could move
+            # because a reply was placed by reading rather than by evidence,
+            # and say nothing.
+            "inferred_reply_turns": calls_row["inferred_reply_turns"] or 0,
             "pending_metric_builds": pending_calls,
             "newest_call_ms": freshness["newest"], "oldest_call_ms": freshness["oldest"],
             "minimum_sample_p95": metrics.MIN_SAMPLE_P95,

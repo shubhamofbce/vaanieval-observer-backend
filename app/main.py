@@ -233,6 +233,18 @@ def initialize() -> None:
                 "WHERE is_continuation = 1"
             )
             db.execute("PRAGMA user_version = 3")
+        # And that rule was still not the one ingest applies. It asks only
+        # whether the parent is present, which a package claiming `A continues
+        # B` and `B continues A` satisfies in both directions -- so both halves
+        # were subtracted and an upgraded database listed a ready call with no
+        # turns, beside a rollup that had two. There is no SQL shape for "the
+        # parents lead back to a row that starts an exchange", so the rule
+        # itself is asked, against the rows actually stored for each call. The
+        # drift endpoint already reported this, but nobody runs it before
+        # trusting the rail.
+        if db.execute("PRAGMA user_version").fetchone()[0] < 4:
+            _rederive_continuations(db)
+            db.execute("PRAGMA user_version = 4")
         db.execute(
             "CREATE INDEX IF NOT EXISTS operations_turns ON operations(session_id, turn_id, started_at_ms)"
         )
@@ -977,6 +989,32 @@ def complete_session(session_id: str, completion: CompleteSession, request: Requ
         except Exception:  # noqa: BLE001
             pass
     return {"session_id": session_id, "status": status, "operation_count": len(operations), "duration_ms": manifest.get("duration_ms", 0)}
+
+
+def _rederive_continuations(db: sqlite3.Connection) -> None:
+    """Re-decide `operations.is_continuation` with the rule ingest uses.
+
+    Grouped by call and resolved one call at a time, because a turn only ever
+    folds into another turn of the same package.
+    """
+    by_session: dict[str, dict[str, dict[str, Any]]] = {}
+    for row in db.execute(
+        "SELECT session_id, turn_id, json_extract(operation_json, "
+        "'$.response.continues_turn') AS parent FROM operations "
+        "WHERE turn_id IS NOT NULL"
+    ):
+        turns = by_session.setdefault(row["session_id"], {})
+        turn = turns.setdefault(str(row["turn_id"]),
+                                {"turn_id": str(row["turn_id"]), "continues_turn": None})
+        if row["parent"] is not None and turn["continues_turn"] is None:
+            turn["continues_turn"] = row["parent"]
+    for session_id, turns in by_session.items():
+        folds = metrics.continuation_ids(list(turns.values()))
+        db.executemany(
+            "UPDATE operations SET is_continuation = ? "
+            "WHERE session_id = ? AND turn_id = ?",
+            [(int(turn_id in folds), session_id, turn_id) for turn_id in turns],
+        )
 
 
 def session_metric_inputs(session_id: str, db: sqlite3.Connection) -> tuple[sqlite3.Row, list[dict[str, Any]], list[dict[str, Any]]]:

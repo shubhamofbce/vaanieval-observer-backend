@@ -253,10 +253,10 @@ caller whose filler is playing, or the answer to whoever just started speaking
 over it. The `user_input_transcribed(is_final=False)` event is the same either
 way, so the events alone cannot separate them.
 
-The speech handle and the `speech_created` event settle three of the six ways
-LiveKit creates a reply. The other three emit an event identical in every field
-to the automatic answer, so they are settled by what the recorder *observed*
-instead — specifically, by which frame asked for the reply:
+The speech handle and the `speech_created` event settle three of the ways
+LiveKit creates a reply. The rest emit an event identical in every field to the
+automatic answer, so they are settled by what the recorder *observed* instead —
+specifically, by which frame asked for the reply:
 
 | How the reply was created | What it answers | Recorded as |
 | --- | --- | --- |
@@ -264,8 +264,11 @@ instead — specifically, by which frame asked for the reply:
 | A **preemptive** generation, started from a predicted end of speech — stays unscheduled until LiveKit validates the prediction | The caller now speaking | Its own turn, no flag |
 | A **realtime** model generating server-side while it transcribes — scheduled at once but not `user_initiated`, with no tool result outstanding | The speech being transcribed now, whose final transcript may arrive *after* the reply | Its own turn, joined by that transcript, no flag |
 | The automatic reply after a tool result — also not `user_initiated`, but the current turn has a `function_tools_executed` result still unanswered | The turn that called the tool | Merged into that turn, `reply_attribution: "inferred"` |
+| That same reply arriving **after LiveKit stopped waiting** for it — its five-second wait (`agent_activity.py:4278`) bounds the wait, not the provider's generation | Either the turn that called the tool or the next caller; the event says neither | Its own turn, `reply_attribution: "inferred"` |
 | `AgentSession.generate_reply()` called by **your own code** — recognised because the call is still on the stack when the event fires, and the frame that made it is outside the `livekit` package | Unknowable | Its own turn, `reply_attribution: "inferred"` |
-| `AgentSession.generate_reply()` called by **LiveKit itself** — committing a realtime turn, retrying a structured output, answering an async tool result, or the IVR activity; the frame that made the call is inside the `livekit` package | Something already under way | Its own turn, joined by the following transcript, no flag |
+| `AgentSession.run(user_input=…)` — LiveKit's own file, but an entry point only your code reaches | The `user_input` you supplied; no caller spoke | Its own turn, `reply_attribution: "inferred"` |
+| `AgentSession.generate_reply()` called by **LiveKit itself** — committing a realtime turn, retrying a structured output, answering an async tool result, the IVR activity, or a `beta/workflows` prompt | Usually something already under way, but the workflow and IVR helpers prompt *proactively* | Its own turn, joined by the following transcript, `reply_attribution: "inferred"` |
+| The stack could not be read — introspection blocked, or the public method's code object unreachable on this build | Unknowable | Its own turn, `reply_attribution: "inferred"` |
 
 Two rows stay judgements: the post-tool reply, and your own `generate_reply()`.
 Yours is scheduled and `user_initiated` exactly like the automatic answer —
@@ -276,8 +279,12 @@ in a turn of its own.
 The distinction between your call and LiveKit's is read from the call stack
 rather than from a replaced method, which matters in two everyday cases: saving
 the bound method (`reply = session.generate_reply`) before recording starts does
-not hide the call, and LiveKit's own six internal uses of the method are not
-reported as yours. The post-tool reply is placed on the turn that ran the tool, which is
+not hide the call, and LiveKit's own internal uses of the method — more than a
+dozen on 1.7.0 — are not reported as yours. LiveKit's own calls are still
+flagged, because not all of them answer speech already under way: the
+`beta/workflows` and IVR helpers ask the caller a question before the caller has
+said anything, and the transcript that follows is the answer to it rather than
+the question it answered. The events are identical either way. The post-tool reply is placed on the turn that ran the tool, which is
 where it almost always belongs, but a caller talking over the tool call could
 have prompted it instead. Either way the flag is set on every span of that turn,
 including the LLM span, so an interrupted reply that reported tokens still
@@ -285,7 +292,8 @@ carries the caveat.
 
 If you are running a build of `livekit-agents` that does not expose these
 signals, no reply is merged and the flag is set — the recorder never guesses
-silently because a field was missing.
+silently because a field was missing. The same applies to the call stack: a
+failure to read it is not treated as evidence that the reply was automatic.
 
 Treat a turn carrying this flag as unreliable for response latency specifically.
 Everything else on it — audio, durations, token counts — is measured, not

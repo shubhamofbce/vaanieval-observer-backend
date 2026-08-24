@@ -1118,6 +1118,52 @@ def test_a_package_whose_halves_continue_each_other_keeps_its_turns(client):
     )
 
 
+def test_an_upgrade_revisits_a_stored_cyclic_call_the_old_rule_emptied(client):
+    """A shipped database keeps the answer the release that wrote it gave.
+
+    The previous migration asked only whether a continuation's parent is
+    present, which a package claiming `A continues B` and `B continues A`
+    satisfies in both directions -- so both halves were subtracted and the rail
+    listed a ready call with no exchanges at all. Ingest re-decides this now,
+    but rows already stored keep the old bit and the rail reads it directly.
+    The drift endpoint does report it; nobody runs the drift endpoint before
+    believing the rail.
+    """
+    events = []
+    for line in call_events(turns=2).decode().splitlines():
+        payload = json.loads(line)
+        if payload["type"] == "stt":
+            payload["response"] = {
+                **payload["response"],
+                "continues_turn": ("turn-2" if payload["turn_id"] == "turn-1"
+                                   else "turn-1"),
+            }
+        events.append(payload)
+    ingest(client, "call-1", jsonl(*events))
+
+    # Exactly what the previous release leaves on disk: every half marked a
+    # continuation, and a `user_version` saying the backfill already ran.
+    with main.connect() as db:
+        db.execute("UPDATE operations SET is_continuation = 1")
+        db.execute("UPDATE turn_metrics SET is_continuation = 1")
+        db.execute("PRAGMA user_version = 3")
+        db.commit()
+
+    main.initialize()
+
+    rail = next(row for row in client.get("/v1/sessions").json()
+                if row["id"] == "call-1")["turn_count"]
+    assert rail == 2, (
+        "an upgraded database still reports a ready call with no exchanges"
+    )
+    with main.connect() as db:
+        marked = [row["is_continuation"] for row in db.execute(
+            "SELECT is_continuation FROM operations WHERE session_id = 'call-1'")]
+        assert marked and set(marked) == {0}, (
+            "a row in a cycle still claims to fold into another"
+        )
+
+
 def test_a_stage_panel_explains_why_it_measured_more_than_there_are_turns(client):
     """Excluding a split half from the STT percentiles would throw away a real
     recogniser latency measured on real audio - and it is systematically the

@@ -33,7 +33,7 @@ from app.latency import milestone_ms, production_turn_latency
 # is wrong for any call already stored with a split exchange -- and because the
 # drift audit recomputes these columns, it would have reported every one of
 # those calls as tampered with for ever. The bump rebuilds them instead.
-METRICS_VERSION = 5
+METRICS_VERSION = 6
 
 # An operation that stopped because something cancelled it is not a fault.
 ABORT_NAMES = ("AbortError", "CancelledError", "CancelledException")
@@ -464,22 +464,40 @@ def continuation_ids(rows: Sequence[dict[str, Any]]) -> "set[str]":
     the honest reading of a package that cannot say which came first.
     """
     by_id = {str(row["turn_id"]): row for row in rows if row.get("turn_id")}
+    # Whether walking the parents from this row ever reaches one that starts an
+    # exchange. Remembered per row: every row of a chain used to re-walk the
+    # whole chain, so resolving `n` halves cost O(n^2) and a long -- or merely
+    # malformed -- package could occupy an ingest or audit worker for seconds on
+    # a graph that is linear to resolve. Each row is now settled once.
+    reaches_start: "dict[str, bool]" = {}
     folds: "set[str]" = set()
     for row in rows:
         row_id = str(row.get("turn_id") or "")
         if not row_id or not folds_into_present_parent(row.get("continues_turn"), by_id):
             continue
-        seen = {row_id}
-        cursor = by_id[str(row["continues_turn"])]
+        path: "list[str]" = []
+        on_path: "set[str]" = set()
+        cursor_id = row_id
         while True:
-            cursor_id = str(cursor.get("turn_id") or "")
-            if cursor_id in seen:
-                break  # a cycle: this row starts nothing and folds into nothing
-            seen.add(cursor_id)
-            if not folds_into_present_parent(cursor.get("continues_turn"), by_id):
-                folds.add(row_id)
+            if cursor_id in reaches_start:
+                answer = reaches_start[cursor_id]
                 break
-            cursor = by_id[str(cursor["continues_turn"])]
+            if cursor_id in on_path:
+                # A cycle: it has no first half, so nothing on it starts an
+                # exchange and nothing on it -- or behind it -- folds.
+                answer = False
+                break
+            on_path.add(cursor_id)
+            path.append(cursor_id)
+            cursor = by_id[cursor_id]
+            if not folds_into_present_parent(cursor.get("continues_turn"), by_id):
+                answer = True
+                break
+            cursor_id = str(cursor["continues_turn"])
+        for node in path:
+            reaches_start[node] = answer
+        if answer:
+            folds.add(row_id)
     return folds
 
 

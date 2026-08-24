@@ -92,6 +92,16 @@ CREATE TABLE IF NOT EXISTS turn_metrics (
   -- record as two turns. It stays a row, because it carries real measurements
   -- of real audio, but it must not be counted as a second exchange.
   is_continuation INTEGER NOT NULL DEFAULT 0,
+  -- Set per stage when this row AND the half it continues both ran that stage,
+  -- so the stage really is measured twice for one exchange. Only stages that
+  -- ran on both halves inflate their own denominator, and which ones those are
+  -- cannot be recovered from range totals: a range can hold as many stage rows
+  -- as exchanges and still be double counting one of them. Decided here, where
+  -- both halves are in hand.
+  stt_split INTEGER NOT NULL DEFAULT 0,
+  llm_split INTEGER NOT NULL DEFAULT 0,
+  tts_split INTEGER NOT NULL DEFAULT 0,
+  tool_split INTEGER NOT NULL DEFAULT 0,
   stt_provider TEXT, stt_model TEXT,
   llm_provider TEXT, llm_model TEXT,
   tts_provider TEXT, tts_model TEXT,
@@ -151,6 +161,10 @@ CREATE TABLE IF NOT EXISTS interval_rollups (
   tts_interrupted INTEGER NOT NULL DEFAULT 0,
   stt_missing_final INTEGER NOT NULL DEFAULT 0,
   stt_forced_flush INTEGER NOT NULL DEFAULT 0,
+  stt_split_turns INTEGER NOT NULL DEFAULT 0,
+  llm_split_turns INTEGER NOT NULL DEFAULT 0,
+  tts_split_turns INTEGER NOT NULL DEFAULT 0,
+  tool_split_turns INTEGER NOT NULL DEFAULT 0,
   stt_turns INTEGER NOT NULL DEFAULT 0,
   llm_turns INTEGER NOT NULL DEFAULT 0,
   tts_turns INTEGER NOT NULL DEFAULT 0,
@@ -228,6 +242,7 @@ TURN_COLUMNS = (
     "stt_ops", "llm_ops", "tts_ops", "tool_ops",
     "stt_failed", "llm_failed", "tts_failed", "tool_failed", "tts_interrupted",
     "stt_missing_final", "stt_forced_flush", "is_continuation",
+    "stt_split", "llm_split", "tts_split", "tool_split",
     "stt_provider", "stt_model", "llm_provider", "llm_model", "tts_provider", "tts_model",
 )
 
@@ -283,6 +298,13 @@ ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # every upgrade - dies on "no such column" with the console already live.
     ("turn_metrics", "is_continuation", "INTEGER NOT NULL DEFAULT 0"),
     ("interval_rollups", "split_turns", "INTEGER NOT NULL DEFAULT 0"),
+    # Added when the split caveat stopped being inferred from range totals. The
+    # inference was wrong at the boundary where a stage ran on both halves of a
+    # split while an unrelated turn kept the totals level, which hid a real
+    # double count behind a clean "100% covered".
+    *((table, f"{stage}_split{suffix}", "INTEGER NOT NULL DEFAULT 0")
+      for table, suffix in (("turn_metrics", ""), ("interval_rollups", "_turns"))
+      for stage in ("stt", "llm", "tts", "tool")),
 )
 
 
@@ -414,6 +436,11 @@ def rebuild_session(
     started_epoch = metrics.epoch_ms(manifest.get("started_at"))
 
     rows = [metrics.turn_metrics(turn, started_epoch) for turn in turns]
+    # `is_continuation` is what the exact counts, the time series and the
+    # hourly rollup all subtract, so it carries the same present-parent rule
+    # the call rollup and the browser use. Derived once here, not re-derived
+    # per query, so the six counters cannot drift apart again.
+    metrics.resolve_split_columns(rows)
     rollup = metrics.call_metrics(rows)
 
     # Captured BEFORE the delete. A re-upload can correct a call's clock and
@@ -710,7 +737,8 @@ def _rebuild_bucket(db: sqlite3.Connection, bucket_ms: int, agent_id: str) -> No
     rows = db.execute(
         f"SELECT {', '.join(SKETCH_METRICS)}, session_id, stt_ops, llm_ops, tts_ops, tool_ops, "
         "stt_failed, llm_failed, tts_failed, tool_failed, tts_interrupted, "
-        "stt_missing_final, stt_forced_flush, is_continuation "
+        "stt_missing_final, stt_forced_flush, is_continuation, "
+        "stt_split, llm_split, tts_split, tool_split "
         f"FROM turn_metrics WHERE started_at_epoch_ms >= ? AND started_at_epoch_ms < ? AND session_id IN ({scope})",
         [bucket_ms, end_ms] + scope_params,
     ).fetchall()
@@ -722,7 +750,8 @@ def _rebuild_bucket(db: sqlite3.Connection, bucket_ms: int, agent_id: str) -> No
         "turns", "split_turns", "measured_response_turns", "audible_lag_turns", "stt_ops", "llm_ops", "tts_ops",
         "tool_ops", "stt_failed", "llm_failed", "tts_failed", "tool_failed", "tts_interrupted",
         "stt_missing_final", "stt_forced_flush",
-        "stt_turns", "llm_turns", "tts_turns", "tool_turns")}
+        "stt_turns", "llm_turns", "tts_turns", "tool_turns",
+        "stt_split_turns", "llm_split_turns", "tts_split_turns", "tool_split_turns")}
     impacted: dict[str, set[str]] = {stage: set() for stage in metrics.STAGES}
     sessions: set[str] = set()
 
@@ -752,6 +781,7 @@ def _rebuild_bucket(db: sqlite3.Connection, bucket_ms: int, agent_id: str) -> No
         for stage in metrics.STAGES:
             if (row[f"{stage}_ops"] or 0) > 0:
                 counters[f"{stage}_turns"] += 1
+            counters[f"{stage}_split_turns"] += row[f"{stage}_split"] or 0
 
     # Call-level counts are attributed to the bucket the call *started* in, so a
     # call is counted exactly once no matter how many hours it spans. Turn-level
@@ -775,8 +805,9 @@ def _rebuild_bucket(db: sqlite3.Connection, bucket_ms: int, agent_id: str) -> No
         "total_duration_ms, stt_ops, llm_ops, tts_ops, tool_ops, stt_failed, llm_failed, tts_failed, "
         "tool_failed, stt_calls_impacted, llm_calls_impacted, tts_calls_impacted, tool_calls_impacted, "
         "tts_interrupted, stt_missing_final, stt_forced_flush, stt_turns, llm_turns, tts_turns, "
-        "tool_turns) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "tool_turns, stt_split_turns, llm_split_turns, tts_split_turns, tool_split_turns) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+        "?, ?, ?, ?, ?)",
         (bucket_ms, agent_id, call_row["calls"] or 0, counters["turns"], counters["split_turns"],
          counters["measured_response_turns"], counters["audible_lag_turns"],
          call_row["failing"] or 0, call_row["capture_incomplete"] or 0,
@@ -786,7 +817,9 @@ def _rebuild_bucket(db: sqlite3.Connection, bucket_ms: int, agent_id: str) -> No
          len(impacted["stt"]), len(impacted["llm"]), len(impacted["tts"]), len(impacted["tool"]),
          counters["tts_interrupted"], counters["stt_missing_final"], counters["stt_forced_flush"],
          counters["stt_turns"], counters["llm_turns"], counters["tts_turns"],
-         counters["tool_turns"]),
+         counters["tool_turns"],
+         counters["stt_split_turns"], counters["llm_split_turns"],
+         counters["tts_split_turns"], counters["tool_split_turns"]),
     )
     db.executemany(
         "INSERT INTO metric_rollups (bucket_ms, agent_id, metric, sketch) VALUES (?, ?, ?, ?)",
@@ -958,6 +991,7 @@ _EXACT_COLUMNS = (
     "stt_ops", "llm_ops", "tts_ops", "tool_ops",
     "stt_failed", "llm_failed", "tts_failed", "tool_failed",
     "tts_interrupted", "stt_missing_final", "stt_forced_flush", "is_continuation",
+    "stt_split", "llm_split", "tts_split", "tool_split",
 )
 _INDEX = {name: position for position, name in enumerate(_EXACT_COLUMNS)}
 
@@ -1086,7 +1120,7 @@ def _stage_panels(distributions: dict[str, dict[str, Any]],
                   previous: dict[str, dict[str, Any]],
                   counters: dict[str, int],
                   impacted: dict[str, dict[str, Any]],
-                  eligible_turns: int, split_turns: int = 0,
+                  eligible_turns: int,
                   unanswerable_reason: str | None = None) -> dict[str, Any]:
     """Assemble the four stage cards from already-computed distributions.
 
@@ -1103,14 +1137,19 @@ def _stage_panels(distributions: dict[str, dict[str, Any]],
         # covers nearly all of its population.
         stage_turns = counters.get(f"{stage}_turns", 0)
         # A split exchange is one turn carrying two recognised utterances, but
-        # only the stages that ran twice are affected: the first half of a split
-        # is unanswered by construction, so it has speech-to-text and nothing
-        # else. Applying the caveat to every stage told a reader that a language
-        # model panel showing "1 of 1" was somehow counting utterances. The
-        # caveat is therefore attached where -- and only where -- this stage
-        # really did measure more populations than there are turns, which is
-        # exactly when the two numbers on screen need reconciling.
-        stage_is_split = split_turns > 0 and stage_turns > eligible_turns
+        # only the stages that ran on both halves are affected: applying the
+        # caveat to every stage told a reader that a language model panel
+        # showing "1 of 1" was somehow counting utterances.
+        #
+        # Which stages those are was previously inferred by asking whether this
+        # stage measured more populations than the range has turns. That is a
+        # pigeonhole test, so it proves double counting but cannot detect it:
+        # one split speech-to-text exchange plus one unrelated reply-only turn
+        # leaves the totals level, and a stage measured twice for one exchange
+        # was published as "2 turns, 100% covered". The count is now carried
+        # from ingest, where both halves of the split were in hand.
+        stage_split_turns = counters.get(f"{stage}_split_turns", 0)
+        stage_is_split = stage_split_turns > 0
         panel_metrics = []
         for item in spec["metrics"]:
             dist = distributions.get(item["key"]) or distribution([], reason="stage_absent")
@@ -1125,11 +1164,11 @@ def _stage_panels(distributions: dict[str, dict[str, Any]],
                 "coverage": {"measured": dist["count"], "eligible": stage_turns,
                              "ratio": (dist["count"] / stage_turns) if stage_turns else None,
                              "turns_in_range": eligible_turns,
-                             "split_turns": split_turns if stage_is_split else 0,
+                             "split_turns": stage_split_turns if stage_is_split else 0,
                              "population": (
                                  f"turns that used {spec['label'].lower()}" if not stage_is_split
                                  else f"recognised utterances that used {spec['label'].lower()}; "
-                                      f"{split_turns:,} turn(s) in range carry more than one")},
+                                      f"{stage_split_turns:,} turn(s) in range carry more than one")},
                 "change": _delta(dist, previous.get(item["key"])),
             })
         panel = {
@@ -1305,7 +1344,8 @@ def _exact(db: sqlite3.Connection, filters: Filters, bucket_ms: int,
     counters = {name: 0 for name in (
         "stt_ops", "llm_ops", "tts_ops", "tool_ops", "stt_failed", "llm_failed", "tts_failed",
         "tool_failed", "tts_interrupted", "stt_missing_final", "stt_forced_flush",
-        "stt_turns", "llm_turns", "tts_turns", "tool_turns", "split_turns")}
+        "stt_turns", "llm_turns", "tts_turns", "tool_turns", "split_turns",
+        "stt_split_turns", "llm_split_turns", "tts_split_turns", "tool_split_turns")}
     impacted_sessions: dict[str, set[str]] = {stage: set() for stage in metrics.STAGES}
     buckets: dict[int, dict[str, Any]] = {}
     lagging = 0
@@ -1313,7 +1353,8 @@ def _exact(db: sqlite3.Connection, filters: Filters, bucket_ms: int,
     session_index, time_index, response_index = _INDEX["session_id"], _INDEX["started_at_epoch_ms"], _INDEX["response_latency_ms"]
     # The `*_turns` counters count turns, not operations, so they are not summed
     # from a column; they are derived below.
-    turn_counters = {f"{stage}_turns" for stage in metrics.STAGES} | {"split_turns"}
+    turn_counters = ({f"{stage}_turns" for stage in metrics.STAGES} | {"split_turns"}
+                     | {f"{stage}_split_turns" for stage in metrics.STAGES})
     stage_index = {name: _INDEX[name] for name in counters if name not in turn_counters}
     ops_index = {stage: _INDEX[f"{stage}_ops"] for stage in metrics.STAGES}
     for row in rows:
@@ -1322,6 +1363,7 @@ def _exact(db: sqlite3.Connection, filters: Filters, bucket_ms: int,
         for stage, position in ops_index.items():
             if (row[position] or 0) > 0:
                 counters[f"{stage}_turns"] += 1
+            counters[f"{stage}_split_turns"] += row[_INDEX[f"{stage}_split"]] or 0
         # A split exchange is one turn carrying two recognised utterances, so
         # the stage denominators above legitimately exceed the turn count. The
         # difference is published rather than left to read as "2 of 1 turns".
@@ -1403,7 +1445,8 @@ def _refused(bucket_ms: int, filters: Filters, turn_count: int) -> dict[str, Any
         "counters": {name: 0 for name in (
             "stt_ops", "llm_ops", "tts_ops", "tool_ops", "stt_failed", "llm_failed", "tts_failed",
             "tool_failed", "tts_interrupted", "stt_missing_final", "stt_forced_flush",
-            "stt_turns", "llm_turns", "tts_turns", "tool_turns")},
+            "stt_turns", "llm_turns", "tts_turns", "tool_turns",
+            "stt_split_turns", "llm_split_turns", "tts_split_turns", "tool_split_turns")},
         "impacted_sessions": {stage: set() for stage in metrics.STAGES},
         "timeseries": [], "audible_lag_turns": None, "measured_response_turns": None,
     }
@@ -1425,6 +1468,10 @@ def _rollup(db: sqlite3.Connection, filters: Filters, bucket_ms: int, compare: b
                        # and omitting one made that stage's coverage silently
                        # disappear on exactly the wide ranges this path serves.
                        "stt_turns", "llm_turns", "tts_turns", "tool_turns",
+                       # Which stages a split actually doubled. Derived where
+                       # both halves were in hand; a range total cannot recover
+                       # it, which is how a real double count once hid.
+                       "stt_split_turns", "llm_split_turns", "tts_split_turns", "tool_split_turns",
                        "stt_calls_impacted", "llm_calls_impacted", "tts_calls_impacted", "tool_calls_impacted")
     totals = db.execute(
         f"SELECT {', '.join(f'COALESCE(SUM({column}), 0) AS {column}' for column in counter_columns)} "
@@ -1719,7 +1766,6 @@ def summary(db: sqlite3.Connection, filters: Filters, *, compare: bool = True,
         "timeseries": computed["timeseries"],
         "stages": _stage_panels(computed["distributions"], computed["previous"] if compare else {},
                                 computed["counters"], impacted, computed["turns"],
-                                computed["counters"].get("split_turns", 0),
                                 refused["reason"] if refused else None),
         "tools": {"items": tools, "minimum_invocations_to_rank": MIN_TOOL_INVOCATIONS},
         "failures": failures,

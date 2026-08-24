@@ -21,7 +21,7 @@ import re
 
 import math
 from datetime import UTC, datetime
-from typing import Any, Iterable, Sequence
+from typing import Any, Container, Iterable, Sequence
 
 from app.latency import milestone_ms, production_turn_latency
 
@@ -423,6 +423,50 @@ def error_fingerprint(op: dict[str, Any]) -> str | None:
     return f"{op.get('type')}:{name}"[:120]
 
 
+def folds_into_present_parent(continues_turn: Any, present_turn_ids: Container[str]) -> bool:
+    """Whether a row is a half of a split we can actually put back together.
+
+    The SDK marks the second half of a turn it split because the caller's
+    earlier words were already published. Every counter then subtracts those
+    halves so one exchange is counted once. That is only right when the first
+    half is present: a package that lost a span, or any view showing a slice of
+    a call, leaves a continuation whose parent is nowhere. Subtracting it there
+    reported a call with a turn as having no turns -- which also hid the call
+    from the unmeasured-call check, since that keys off `turn_count > 0`.
+
+    One rule in one place, because the browser, the call rollup and the ingest
+    columns every SQL counter reads all have to reach the same answer. They
+    disagreed once already, which is worse than the bug it was fixing.
+    """
+    return bool(continues_turn) and str(continues_turn) in present_turn_ids
+
+
+def resolve_split_columns(rows: Sequence[dict[str, Any]]) -> Sequence[dict[str, Any]]:
+    """Fill in the columns that can only be decided by looking at sibling rows.
+
+    `turn_metrics` sees one turn at a time, but whether a row folds into
+    another -- and which stages that doubles -- are facts about a pair. Deriving
+    them at ingest and nowhere else meant the drift audit, which recomputes row
+    by row, reported every split call as permanently tampered. One function, so
+    the cache and the check that proves the cache still agree by construction.
+    """
+    by_id = {str(row["turn_id"]): row for row in rows if row.get("turn_id")}
+    for row in rows:
+        parent = (by_id.get(str(row["continues_turn"]))
+                  if folds_into_present_parent(row.get("continues_turn"), by_id) else None)
+        row["is_continuation"] = int(parent is not None)
+        # A stage inflates its own denominator only if it ran on both halves.
+        # The first half of a split is usually speech-to-text and nothing else,
+        # but it can carry a filler reply, so which stages doubled is a fact
+        # about these two rows rather than something to assume.
+        for stage in STAGES:
+            row[f"{stage}_split"] = int(
+                parent is not None
+                and (row.get(f"{stage}_ops") or 0) > 0
+                and (parent.get(f"{stage}_ops") or 0) > 0)
+    return rows
+
+
 def call_metrics(turns: Sequence[dict[str, Any]]) -> dict[str, Any]:
     """Call-level rollups derived from the turn rows, so the two always agree."""
     # A turn we split because the earlier half was already published is one
@@ -434,10 +478,10 @@ def call_metrics(turns: Sequence[dict[str, Any]]) -> dict[str, Any]:
     # continuation unconditionally meant a package whose first half was missing
     # reported `turn_count: 0` for a call that plainly had a turn, which also
     # hid it from the unmeasured-call check -- that keys off `turn_count > 0`.
-    present = {turn.get("turn_id") for turn in turns if turn.get("turn_id")}
+    present = {str(turn["turn_id"]) for turn in turns if turn.get("turn_id")}
     continuations = sum(
         1 for turn in turns
-        if turn.get("continues_turn") and turn["continues_turn"] in present
+        if folds_into_present_parent(turn.get("continues_turn"), present)
     )
     return {
         "turn_count": len(turns) - continuations,

@@ -870,6 +870,53 @@ def test_only_the_stage_that_ran_twice_carries_the_utterance_caveat(client):
         )
 
 
+def test_a_greeting_elsewhere_cannot_hide_a_stage_that_was_measured_twice(client):
+    """The caveat used to be inferred by pigeonhole, which cannot detect.
+
+    Asking whether a stage measured more populations than the range has turns
+    proves a double count but never rules one out. One split speech-to-text
+    exchange contributes two speech-to-text rows and one turn; a single
+    reply-only turn anywhere else in the range adds a turn without adding a
+    speech-to-text row, and the totals sit level at two and two. The caveat
+    vanished and the panel published "2 turns that used speech to text, 100%
+    covered" for one exchange that was measured twice -- a green number with
+    the explanation removed, which is the failure this product exists to stop.
+
+    Which stages a split doubled is now carried from ingest, where both halves
+    were in hand, so an unrelated turn cannot cancel it out.
+    """
+    ingest(client, "call-1", unanswered_split_events())
+    ingest(client, "call-2", reply_only_events())
+
+    payload = summary(client)
+    assert payload["accuracy"]["exact"] is True
+    assert payload["coverage"]["turns_in_range"] == 2, (
+        "guard: the boundary needs the split exchange plus one other turn"
+    )
+    stt = payload["stages"]["stt"]["metrics"][0]["coverage"]
+    assert stt["eligible"] == 2, (
+        "guard: speech-to-text must still be measured on both halves here"
+    )
+    assert stt["split_turns"] == 1 and "utterance" in stt["population"], (
+        f"the double count was published without its caveat: {stt}"
+    )
+    for stage in ("llm", "tts", "tool"):
+        coverage = payload["stages"][stage]["metrics"][0]["coverage"]
+        assert coverage["split_turns"] == 0, (
+            f"{stage} ran once per exchange; it has no split to disclose"
+        )
+
+
+def reply_only_events(session_id: str = "call-2") -> bytes:
+    """A turn that replies without a recognised utterance, e.g. a greeting."""
+    return jsonl(*[
+        payload for payload in
+        (json.loads(line) for line in
+         call_events(turns=1, session_id=session_id).decode().splitlines())
+        if payload.get("type") != "stt"
+    ])
+
+
 def test_a_split_turn_does_not_push_a_range_over_the_exact_limit(client, monkeypatch):
     """The size estimate that chooses exact-vs-approximate must measure the same
     turns the answer will report. If it counts a split exchange twice it will
@@ -975,6 +1022,42 @@ def test_opening_a_call_does_not_change_the_turn_count_the_list_showed(client):
     )
     assert len(turns) - len(continuations) == rail["turn_count"], (
         "the count the call view derives has to match the one the list showed"
+    )
+
+
+def test_every_counter_agrees_about_a_call_whose_first_half_is_missing(client):
+    """Four independent counters, one rule -- proven through ingest, not in one function.
+
+    The present-parent rule first landed in `call_metrics` and `app.js` only.
+    The rail, the exact range count, the overview and the hourly rollup each
+    derive their own count from the stored `is_continuation` column, so they
+    kept subtracting the orphan and an adopter could open a call listed as zero
+    turns, read one turn in its headline, and see zero again in range. Four
+    trusted numbers disagreeing is worse than the single wrong one it replaced,
+    so the rule now lives at ingest where every counter inherits it.
+    """
+    events = [
+        payload for payload in
+        (json.loads(line) for line in unanswered_split_events().decode().splitlines())
+        if payload.get("turn_id") == "turn-2"
+    ]
+    assert events, "guard: the fixture must still contain the continuing row"
+    ingest(client, "call-1", jsonl(*events))
+
+    rail = next(row for row in client.get("/v1/sessions").json()
+                if row["id"] == "call-1")
+    detail = client.get("/v1/sessions/call-1").json()["turns"]
+    overview = summary(client)
+
+    counts = {
+        "rail": rail["turn_count"],
+        "call rollup": metrics.call_metrics(
+            [metrics.turn_metrics(turn, 0) for turn in detail])["turn_count"],
+        "overview": overview["overview"]["calls"]["turns"],
+        "exact range": overview["coverage"]["turns_in_range"],
+    }
+    assert set(counts.values()) == {1}, (
+        f"every counter must see the surviving row as one turn: {counts}"
     )
 
 

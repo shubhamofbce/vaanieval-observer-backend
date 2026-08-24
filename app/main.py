@@ -898,6 +898,14 @@ def complete_session(session_id: str, completion: CompleteSession, request: Requ
         if len(payload) != info.byte_size or hashlib.sha256(payload).hexdigest() != info.sha256.lower():
             raise HTTPException(400, f"Checksum verification failed: {name}")
     operations = import_operations(session_id)
+    # Which turns this package actually contains. `is_continuation` is a
+    # derived column, and every SQL counter subtracts rows carrying it, so a
+    # continuation whose first half is missing must not claim to fold into it.
+    # The raw `operation_json` is left exactly as recorded -- the SDK did say
+    # the turn continues something, and that evidence is not ours to rewrite.
+    present_turn_ids = {
+        str(op["turn_id"]) for op in operations if op.get("turn_id") is not None
+    }
     # A call the SDK could prove it did not fully capture is not "ready". The
     # check lives here, not only in the SDK, so an older SDK that learns to
     # report a gap is believed without the dashboard needing to be redeployed
@@ -917,7 +925,10 @@ def complete_session(session_id: str, completion: CompleteSession, request: Requ
                     str(op["turn_id"]) if op.get("turn_id") is not None else None,
                     op.get("scope", "turn"),
                     int(has_failed(op)),
-                    int((op.get("response") or {}).get("continues_turn") is not None),
+                    int(metrics.folds_into_present_parent(
+                        (op.get("response") or {}).get("continues_turn"),
+                        present_turn_ids,
+                    )),
                 )
                 for op in operations
             ],
@@ -1473,9 +1484,13 @@ def dashboard_audit(limit: int = 25) -> dict[str, Any]:
             except HTTPException:
                 continue
             started = metrics.epoch_ms(json.loads(row["manifest_json"]).get("started_at"))
-            for turn in turns:
+            # Same cross-row pass ingest runs. Comparing per-row output against
+            # rows that were stored with sibling context reported every split
+            # call as tampered for ever.
+            fresh_rows = metrics.resolve_split_columns(
+                [metrics.turn_metrics(turn, started) for turn in turns])
+            for fresh in fresh_rows:
                 compared += 1
-                fresh = metrics.turn_metrics(turn, started)
                 found = stored.get(fresh["turn_id"])
                 if found is None:
                     mismatches.append({"session_id": session_id, "turn_id": fresh["turn_id"],

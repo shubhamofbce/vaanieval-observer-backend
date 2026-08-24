@@ -187,6 +187,13 @@ def initialize() -> None:
         # the schema — has been migrated, so the scan runs exactly once.
         if "failed" not in columns:
             db.execute("ALTER TABLE operations ADD COLUMN failed INTEGER NOT NULL DEFAULT 0")
+        # Promoted for the same reason `failed` was: the session rail counts
+        # turns for every call it lists, and a continuation must not count as a
+        # second exchange. Doing that from JSON would mean decoding one blob per
+        # operation on every poll.
+        if "is_continuation" not in columns:
+            db.execute(
+                "ALTER TABLE operations ADD COLUMN is_continuation INTEGER NOT NULL DEFAULT 0")
         if db.execute("PRAGMA user_version").fetchone()[0] < 1:
             db.execute(
                 "UPDATE operations SET failed = CASE WHEN json_extract(operation_json, '$.status') = 'error' "
@@ -195,6 +202,15 @@ def initialize() -> None:
                 tuple(ABORT_NAMES),
             )
             db.execute("PRAGMA user_version = 1")
+        # Same reasoning as above: the column existing is not evidence the rows
+        # were backfilled, so the data migration is versioned separately.
+        if db.execute("PRAGMA user_version").fetchone()[0] < 2:
+            db.execute(
+                "UPDATE operations SET is_continuation = CASE WHEN "
+                "json_extract(operation_json, '$.response.continues_turn') IS NOT NULL "
+                "THEN 1 ELSE 0 END"
+            )
+            db.execute("PRAGMA user_version = 2")
         db.execute(
             "CREATE INDEX IF NOT EXISTS operations_turns ON operations(session_id, turn_id, started_at_ms)"
         )
@@ -886,7 +902,7 @@ def complete_session(session_id: str, completion: CompleteSession, request: Requ
     with connect() as db:
         db.execute("DELETE FROM operations WHERE session_id = ?", (session_id,))
         db.executemany(
-            "INSERT OR REPLACE INTO operations (id, session_id, operation_json, started_at_ms, turn_id, scope, failed) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO operations (id, session_id, operation_json, started_at_ms, turn_id, scope, failed, is_continuation) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     op["event_id"],
@@ -896,6 +912,7 @@ def complete_session(session_id: str, completion: CompleteSession, request: Requ
                     str(op["turn_id"]) if op.get("turn_id") is not None else None,
                     op.get("scope", "turn"),
                     int(has_failed(op)),
+                    int((op.get("response") or {}).get("continues_turn") is not None),
                 )
                 for op in operations
             ],
@@ -952,7 +969,18 @@ def list_sessions() -> list[dict[str, Any]]:
         counts = {
             item["session_id"]: item["turn_count"]
             for item in db.execute(
-                "SELECT session_id, COUNT(DISTINCT turn_id) AS turn_count FROM operations WHERE turn_id IS NOT NULL GROUP BY session_id"
+                # A turn we split because the caller's earlier words were
+                # already published is one exchange. Counting both halves made
+                # this list disagree with the call page's own rollup.
+                # The flag rides on the STT operation that carries the split,
+                # but a turn is excluded as a whole -- its other operations are
+                # part of the same continuation. `operations_turns` covers
+                # (session_id, turn_id), so this stays an indexed lookup.
+                "SELECT session_id, COUNT(DISTINCT turn_id) AS turn_count FROM operations o "
+                "WHERE turn_id IS NOT NULL AND NOT EXISTS ("
+                "  SELECT 1 FROM operations c WHERE c.session_id = o.session_id "
+                "  AND c.turn_id = o.turn_id AND c.is_continuation = 1) "
+                "GROUP BY session_id"
             )
         }
         failures = {

@@ -88,6 +88,10 @@ CREATE TABLE IF NOT EXISTS turn_metrics (
   tts_interrupted INTEGER NOT NULL DEFAULT 0,
   stt_missing_final INTEGER NOT NULL DEFAULT 0,
   stt_forced_flush INTEGER NOT NULL DEFAULT 0,
+  -- Set when this row is the second half of one caller message we had to
+  -- record as two turns. It stays a row, because it carries real measurements
+  -- of real audio, but it must not be counted as a second exchange.
+  is_continuation INTEGER NOT NULL DEFAULT 0,
   stt_provider TEXT, stt_model TEXT,
   llm_provider TEXT, llm_model TEXT,
   tts_provider TEXT, tts_model TEXT,
@@ -130,6 +134,7 @@ CREATE TABLE IF NOT EXISTS interval_rollups (
   agent_id TEXT NOT NULL DEFAULT '',
   calls INTEGER NOT NULL DEFAULT 0,
   turns INTEGER NOT NULL DEFAULT 0,
+  split_turns INTEGER NOT NULL DEFAULT 0,
   measured_response_turns INTEGER NOT NULL DEFAULT 0,
   audible_lag_turns INTEGER NOT NULL DEFAULT 0,
   failing_calls INTEGER NOT NULL DEFAULT 0,
@@ -222,7 +227,7 @@ TURN_COLUMNS = (
     "tts_first_audio_ms", "tts_synthesis_ms", "tool_count", "tool_total_ms",
     "stt_ops", "llm_ops", "tts_ops", "tool_ops",
     "stt_failed", "llm_failed", "tts_failed", "tool_failed", "tts_interrupted",
-    "stt_missing_final", "stt_forced_flush",
+    "stt_missing_final", "stt_forced_flush", "is_continuation",
     "stt_provider", "stt_model", "llm_provider", "llm_model", "tts_provider", "tts_model",
 )
 
@@ -272,6 +277,12 @@ ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("interval_rollups", "llm_turns", "INTEGER NOT NULL DEFAULT 0"),
     ("interval_rollups", "tts_turns", "INTEGER NOT NULL DEFAULT 0"),
     ("interval_rollups", "tool_turns", "INTEGER NOT NULL DEFAULT 0"),
+    # Added when split exchanges started being recorded as two rows. Without
+    # these two entries an existing database keeps the old table definition,
+    # and the very next rebuild - which the METRICS_VERSION bump forces on
+    # every upgrade - dies on "no such column" with the console already live.
+    ("turn_metrics", "is_continuation", "INTEGER NOT NULL DEFAULT 0"),
+    ("interval_rollups", "split_turns", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 
@@ -699,7 +710,7 @@ def _rebuild_bucket(db: sqlite3.Connection, bucket_ms: int, agent_id: str) -> No
     rows = db.execute(
         f"SELECT {', '.join(SKETCH_METRICS)}, session_id, stt_ops, llm_ops, tts_ops, tool_ops, "
         "stt_failed, llm_failed, tts_failed, tool_failed, tts_interrupted, "
-        "stt_missing_final, stt_forced_flush "
+        "stt_missing_final, stt_forced_flush, is_continuation "
         f"FROM turn_metrics WHERE started_at_epoch_ms >= ? AND started_at_epoch_ms < ? AND session_id IN ({scope})",
         [bucket_ms, end_ms] + scope_params,
     ).fetchall()
@@ -708,7 +719,7 @@ def _rebuild_bucket(db: sqlite3.Connection, bucket_ms: int, agent_id: str) -> No
 
     sketches = {metric: sketch_module.Sketch() for metric in SKETCH_METRICS}
     counters = {name: 0 for name in (
-        "turns", "measured_response_turns", "audible_lag_turns", "stt_ops", "llm_ops", "tts_ops",
+        "turns", "split_turns", "measured_response_turns", "audible_lag_turns", "stt_ops", "llm_ops", "tts_ops",
         "tool_ops", "stt_failed", "llm_failed", "tts_failed", "tool_failed", "tts_interrupted",
         "stt_missing_final", "stt_forced_flush",
         "stt_turns", "llm_turns", "tts_turns", "tool_turns")}
@@ -716,7 +727,11 @@ def _rebuild_bucket(db: sqlite3.Connection, bucket_ms: int, agent_id: str) -> No
     sessions: set[str] = set()
 
     for row in rows:
-        counters["turns"] += 1
+        # Counted for its measurements, but not as a second exchange.
+        if row["is_continuation"]:
+            counters["split_turns"] += 1
+        else:
+            counters["turns"] += 1
         sessions.add(row["session_id"])
         for metric in SKETCH_METRICS:
             if row[metric] is not None:
@@ -755,14 +770,14 @@ def _rebuild_bucket(db: sqlite3.Connection, bucket_ms: int, agent_id: str) -> No
     ).fetchone()
 
     db.execute(
-        "INSERT INTO interval_rollups (bucket_ms, agent_id, calls, turns, measured_response_turns, "
+        "INSERT INTO interval_rollups (bucket_ms, agent_id, calls, turns, split_turns, measured_response_turns, "
         "audible_lag_turns, failing_calls, capture_incomplete_calls, completed_calls, incomplete_calls, "
         "total_duration_ms, stt_ops, llm_ops, tts_ops, tool_ops, stt_failed, llm_failed, tts_failed, "
         "tool_failed, stt_calls_impacted, llm_calls_impacted, tts_calls_impacted, tool_calls_impacted, "
         "tts_interrupted, stt_missing_final, stt_forced_flush, stt_turns, llm_turns, tts_turns, "
         "tool_turns) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (bucket_ms, agent_id, call_row["calls"] or 0, counters["turns"],
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (bucket_ms, agent_id, call_row["calls"] or 0, counters["turns"], counters["split_turns"],
          counters["measured_response_turns"], counters["audible_lag_turns"],
          call_row["failing"] or 0, call_row["capture_incomplete"] or 0,
          call_row["completed"] or 0, call_row["incomplete"] or 0, call_row["duration"] or 0,
@@ -942,7 +957,7 @@ _EXACT_COLUMNS = (
     "llm_ttft_ms", "llm_completion_ms", "tts_first_audio_ms", "tts_synthesis_ms", "tool_total_ms",
     "stt_ops", "llm_ops", "tts_ops", "tool_ops",
     "stt_failed", "llm_failed", "tts_failed", "tool_failed",
-    "tts_interrupted", "stt_missing_final", "stt_forced_flush",
+    "tts_interrupted", "stt_missing_final", "stt_forced_flush", "is_continuation",
 )
 _INDEX = {name: position for position, name in enumerate(_EXACT_COLUMNS)}
 
@@ -960,7 +975,13 @@ def _fetch_turns(db: sqlite3.Connection, filters: Filters,
 
 def _count_turns(db: sqlite3.Connection, filters: Filters) -> int:
     where, params = filters.turn_where()
-    return db.execute(f"SELECT COUNT(*) FROM turn_metrics t WHERE {where}", params).fetchone()[0]
+    # Continuations are excluded here and everywhere else a turn is counted, so
+    # the exact count, the rollups and the session list cannot disagree about
+    # how many exchanges a call had.
+    return db.execute(
+        f"SELECT COUNT(*) FROM turn_metrics t WHERE {where} AND t.is_continuation = 0",
+        params,
+    ).fetchone()[0]
 
 
 def _values(rows: Sequence[tuple], name: str) -> list[Any]:
@@ -1065,7 +1086,7 @@ def _stage_panels(distributions: dict[str, dict[str, Any]],
                   previous: dict[str, dict[str, Any]],
                   counters: dict[str, int],
                   impacted: dict[str, dict[str, Any]],
-                  eligible_turns: int,
+                  eligible_turns: int, split_turns: int = 0,
                   unanswerable_reason: str | None = None) -> dict[str, Any]:
     """Assemble the four stage cards from already-computed distributions.
 
@@ -1095,7 +1116,11 @@ def _stage_panels(distributions: dict[str, dict[str, Any]],
                 "coverage": {"measured": dist["count"], "eligible": stage_turns,
                              "ratio": (dist["count"] / stage_turns) if stage_turns else None,
                              "turns_in_range": eligible_turns,
-                             "population": f"turns that used {spec['label'].lower()}"},
+                             "split_turns": split_turns,
+                             "population": (
+                                 f"turns that used {spec['label'].lower()}" if not split_turns
+                                 else f"recognised utterances that used {spec['label'].lower()}; "
+                                      f"{split_turns:,} turn(s) in range carry more than one")},
                 "change": _delta(dist, previous.get(item["key"])),
             })
         panel = {
@@ -1271,7 +1296,7 @@ def _exact(db: sqlite3.Connection, filters: Filters, bucket_ms: int,
     counters = {name: 0 for name in (
         "stt_ops", "llm_ops", "tts_ops", "tool_ops", "stt_failed", "llm_failed", "tts_failed",
         "tool_failed", "tts_interrupted", "stt_missing_final", "stt_forced_flush",
-        "stt_turns", "llm_turns", "tts_turns", "tool_turns")}
+        "stt_turns", "llm_turns", "tts_turns", "tool_turns", "split_turns")}
     impacted_sessions: dict[str, set[str]] = {stage: set() for stage in metrics.STAGES}
     buckets: dict[int, dict[str, Any]] = {}
     lagging = 0
@@ -1279,7 +1304,7 @@ def _exact(db: sqlite3.Connection, filters: Filters, bucket_ms: int,
     session_index, time_index, response_index = _INDEX["session_id"], _INDEX["started_at_epoch_ms"], _INDEX["response_latency_ms"]
     # The `*_turns` counters count turns, not operations, so they are not summed
     # from a column; they are derived below.
-    turn_counters = {f"{stage}_turns" for stage in metrics.STAGES}
+    turn_counters = {f"{stage}_turns" for stage in metrics.STAGES} | {"split_turns"}
     stage_index = {name: _INDEX[name] for name in counters if name not in turn_counters}
     ops_index = {stage: _INDEX[f"{stage}_ops"] for stage in metrics.STAGES}
     for row in rows:
@@ -1288,6 +1313,11 @@ def _exact(db: sqlite3.Connection, filters: Filters, bucket_ms: int,
         for stage, position in ops_index.items():
             if (row[position] or 0) > 0:
                 counters[f"{stage}_turns"] += 1
+        # A split exchange is one turn carrying two recognised utterances, so
+        # the stage denominators above legitimately exceed the turn count. The
+        # difference is published rather than left to read as "2 of 1 turns".
+        if row[_INDEX["is_continuation"]]:
+            counters["split_turns"] += 1
         for stage in metrics.STAGES:
             if row[_INDEX[f"{stage}_failed"]]:
                 impacted_sessions[stage].add(row[session_index])
@@ -1329,7 +1359,8 @@ def _exact(db: sqlite3.Connection, filters: Filters, bucket_ms: int,
         start += bucket_ms
 
     return {
-        "exact": True, "turns": len(rows), "distributions": distributions, "previous": previous,
+        "exact": True,
+        "turns": sum(1 for row in rows if not row[_INDEX["is_continuation"]]), "distributions": distributions, "previous": previous,
         "counters": counters, "impacted_sessions": impacted_sessions,
         "timeseries": series, "audible_lag_turns": lagging,
         "measured_response_turns": distributions["response_latency_ms"]["count"],
@@ -1371,7 +1402,7 @@ def _rollup(db: sqlite3.Connection, filters: Filters, bucket_ms: int, compare: b
     # cost the all-agents row exists to remove.
     agent_clause, agent_params = "AND agent_id = ?", [filters.agent_id or ALL_AGENTS]
 
-    counter_columns = ("turns", "measured_response_turns", "audible_lag_turns", "stt_ops", "llm_ops",
+    counter_columns = ("turns", "split_turns", "measured_response_turns", "audible_lag_turns", "stt_ops", "llm_ops",
                        "tts_ops", "tool_ops", "stt_failed", "llm_failed", "tts_failed", "tool_failed",
                        "tts_interrupted", "stt_missing_final", "stt_forced_flush",
                        # Every stage's turn count, not just STT: these are the
@@ -1673,6 +1704,7 @@ def summary(db: sqlite3.Connection, filters: Filters, *, compare: bool = True,
         "timeseries": computed["timeseries"],
         "stages": _stage_panels(computed["distributions"], computed["previous"] if compare else {},
                                 computed["counters"], impacted, computed["turns"],
+                                computed["counters"].get("split_turns", 0),
                                 refused["reason"] if refused else None),
         "tools": {"items": tools, "minimum_invocations_to_rank": MIN_TOOL_INVOCATIONS},
         "failures": failures,

@@ -255,3 +255,33 @@ def test_defaults_the_objects_map_to_empty(client):
 def test_rejects_a_malformed_objects_payload(client):
     create(client, "call-1")
     assert client.post("/v1/sessions/call-1/complete", json={"objects": "nope"}).status_code == 422
+
+
+def test_a_split_turn_counts_once_in_the_session_list(client):
+    """The list, the call page and the rollups must not disagree with each other.
+
+    We knowingly record two turns where LiveKit committed one message, when the
+    span holding the caller's earlier words is already published. Correcting
+    only the call rollup left the session rail still counting physical rows, so
+    the same call read as 2 turns in the list and 1 on its own page -- and an
+    operator has no way to tell which number to believe.
+    """
+    create(client, "call-1")
+    events = jsonl(
+        operation(event_id="op-1", type_="stt", turn_id="turn-1", started_at_ms=0,
+                  response={"transcript": "What is the fare"}),
+        operation(event_id="op-2", type_="stt", turn_id="turn-2", started_at_ms=100,
+                  response={"transcript": "to Boston please",
+                            "continues_turn": "turn-1",
+                            "split_reason": "earlier_words_already_published"}),
+        operation(event_id="op-3", type_="tts", turn_id="turn-2", started_at_ms=200,
+                  response={"audio_ms": 2000}),
+    )
+    upload(client, "call-1", "events.jsonl", events)
+    complete(client, objects={"events.jsonl": object_info(events)})
+
+    listed = next(row for row in client.get("/v1/sessions").json()
+                  if row["id"] == "call-1")
+    assert listed["turn_count"] == 1, (
+        "the rail counted both halves of one caller message"
+    )

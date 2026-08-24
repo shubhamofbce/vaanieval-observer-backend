@@ -9,9 +9,13 @@ actually fills them was broken.
 
 from __future__ import annotations
 
+import json
+
+import pytest
+
 from conftest import jsonl, manifest, object_info, operation
 
-from app import aggregate, metrics
+from app import aggregate, main, metrics
 
 
 def ingest(client, session_id: str, events: bytes, **overrides):
@@ -709,3 +713,143 @@ def test_a_one_second_probe_call_does_not_outrank_a_slow_real_call(client):
     listed = [item["session_id"] for item in items]
     assert "slow" in listed
     assert "probe" not in listed, "a sub-second probe was promoted into the triage queue"
+
+
+def split_call_events() -> bytes:
+    """A two-turn call whose second turn the SDK marked as a continuation of the
+    first - the shape LiveKit produces when the caller's earlier words were
+    already published before the reply arrived."""
+    marked = []
+    for line in call_events(turns=2).decode().splitlines():
+        payload = json.loads(line)
+        if payload["type"] == "stt" and payload["turn_id"] == "turn-2":
+            payload["response"] = {
+                **payload["response"],
+                "continues_turn": "turn-1",
+                "split_reason": "earlier_words_already_published",
+            }
+        marked.append(payload)
+    return jsonl(*marked)
+
+
+def test_a_split_turn_is_not_counted_twice_anywhere_in_the_summary(client):
+    """One correction is worthless if the other three paths disagree with it.
+
+    A turn we split because the caller's earlier words were already published is
+    one exchange. The call rollup, the exact count, the hourly sketch rollup and
+    the session rail each count turns independently, so correcting one of them
+    produced a console that contradicted itself: the overview said 2 and the
+    call page said 1, with nothing on screen to say which was right.
+    """
+    ingest(client, "call-1", split_call_events())
+
+    payload = summary(client)
+    assert payload["overview"]["calls"]["turns"] == 1, (
+        "LiveKit committed one message; the overview must agree"
+    )
+    assert payload["accuracy"]["exact"] is True
+    # The exact path counts turn rows itself rather than reading the rollup, so
+    # it is a genuinely independent second opinion on the same question.
+    assert payload["coverage"]["turns_in_range"] == 1, (
+        "the exact path reached a different number from the rollup"
+    )
+    listed = next(row for row in client.get("/v1/sessions").json()
+                  if row["id"] == "call-1")
+    assert listed["turn_count"] == 1
+
+    # And the hourly sketch rollup, which serves every range too wide to count
+    # exactly, is the third path that must not disagree.
+    with main.connect() as db:
+        aggregate.refresh_rollups(db)
+        rolled = db.execute(
+            "SELECT SUM(turns) AS turns FROM interval_rollups "
+            "WHERE agent_id = ?", (aggregate.ALL_AGENTS,)).fetchone()["turns"]
+    assert rolled == 1, "the hourly rollup still counted both halves"
+
+
+def test_a_stage_panel_explains_why_it_measured_more_than_there_are_turns(client):
+    """Excluding a split half from the STT percentiles would throw away a real
+    recogniser latency measured on real audio - and it is systematically the
+    slow half, because it is the one that went final late. So both are kept and
+    the panel states the population instead. What it must never do is show
+    "2 measured" beside "1 turn in range" with nothing to reconcile them.
+    """
+    events = []
+    for line in call_events(turns=2).decode().splitlines():
+        payload = json.loads(line)
+        # The first half of a split is unanswered by construction: the SDK only
+        # sets `continues_turn` when the carried turn never got a reply.
+        if payload["turn_id"] == "turn-1" and payload["type"] != "stt":
+            continue
+        if payload["type"] == "stt" and payload["turn_id"] == "turn-2":
+            payload["response"] = {
+                **payload["response"],
+                "continues_turn": "turn-1",
+                "split_reason": "earlier_words_already_published",
+            }
+        events.append(payload)
+    ingest(client, "call-1", jsonl(*events))
+
+    payload = summary(client)
+    stt = payload["stages"]["stt"]["metrics"][0]["coverage"]
+
+    assert stt["measured"] == 2, "a real STT measurement was discarded"
+    assert payload["overview"]["calls"]["turns"] == 1
+    assert stt["split_turns"] == 1, (
+        "the panel measured more utterances than there are turns and said nothing"
+    )
+    assert "utterance" in stt["population"]
+
+
+
+def test_a_call_with_no_split_does_not_carry_the_utterance_caveat(client):
+    """The caveat has to be rare to be read. If every panel carried it, readers
+    would learn to skip it well before the day it changes their conclusion."""
+    ingest(client, "call-1", call_events(turns=2))
+
+    coverage = summary(client)["stages"]["stt"]["metrics"][0]["coverage"]
+
+    assert coverage["split_turns"] == 0
+    assert "utterance" not in coverage["population"]
+
+
+def test_a_split_turn_does_not_push_a_range_over_the_exact_limit(client, monkeypatch):
+    """The size estimate that chooses exact-vs-approximate must measure the same
+    turns the answer will report. If it counts a split exchange twice it will
+    hand a user approximate percentiles - or refuse their filter outright - for
+    a workload that was always small enough to answer exactly."""
+    ingest(client, "call-1", split_call_events())
+    monkeypatch.setattr(aggregate, "EXACT_TURN_LIMIT", 1)
+
+    payload = summary(client, provider="openai")
+
+    assert payload["accuracy"]["refused"] is None, (
+        "a one-turn call was refused as if it were two"
+    )
+    assert payload["coverage"]["turns_in_range"] == 1
+
+
+def test_an_existing_database_gains_the_split_columns_instead_of_crashing(client):
+    """Every column added to the schema string has to be added to the migration
+    list too. `CREATE TABLE IF NOT EXISTS` is a no-op on a database that already
+    has the table, so an upgrade keeps the old definition - and the rebuild that
+    a METRICS_VERSION bump forces on every upgrade then dies on the first write,
+    with the console already serving traffic.
+    """
+    import sqlite3
+
+    with main.connect() as db:
+        for table, column in (("turn_metrics", "is_continuation"),
+                              ("interval_rollups", "split_turns")):
+            db.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+        db.commit()
+        with pytest.raises(sqlite3.OperationalError):
+            db.execute("SELECT is_continuation FROM turn_metrics")
+
+        aggregate.ensure_schema(db)
+        db.execute("SELECT is_continuation FROM turn_metrics").fetchall()
+        db.execute("SELECT split_turns FROM interval_rollups").fetchall()
+
+    # And the upgraded database still answers, rather than merely not throwing.
+    ingest(client, "call-1", split_call_events())
+    assert summary(client)["overview"]["calls"]["turns"] == 1

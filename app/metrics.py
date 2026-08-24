@@ -28,7 +28,7 @@ from app.latency import milestone_ms, production_turn_latency
 # Metric-extraction schema version. Bumped when a stage definition changes so
 # `initialize()` can detect rows built by an older definition and rebuild them
 # instead of silently mixing two measurement contracts in one percentile.
-METRICS_VERSION = 3
+METRICS_VERSION = 4
 
 # An operation that stopped because something cancelled it is not a fault.
 ABORT_NAMES = ("AbortError", "CancelledError", "CancelledException")
@@ -333,6 +333,7 @@ def turn_metrics(turn: dict[str, Any], call_started_epoch_ms: int | None) -> dic
         # rows from two exchanges. Without it the split is visible on the page
         # and invisible in every number derived from the page.
         "continues_turn": turn.get("continues_turn"),
+        "is_continuation": 1 if turn.get("continues_turn") else 0,
         "started_at_ms": started_at_ms,
         "started_at_epoch_ms": (call_started_epoch_ms + started_at_ms) if call_started_epoch_ms is not None else None,
         "duration_ms": turn.get("duration_ms"),

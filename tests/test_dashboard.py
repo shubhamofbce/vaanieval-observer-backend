@@ -829,6 +829,60 @@ def test_a_split_turn_is_not_counted_twice_anywhere_in_the_summary(client):
     assert rolled == 1, "the hourly rollup still counted both halves"
 
 
+def test_a_split_straddling_an_hour_is_still_one_exchange_measured_twice(client):
+    """Turn counts live in the bucket the turn happened in, so the two halves of
+    one exchange can land in different hours.
+
+    The exchange must still be counted once and its doubled stage counted once
+    across a range covering both, rather than the flag being lost with the
+    bucket it was not in or counted again in the bucket it was.
+    """
+    ingest(client, "call-1", unanswered_split_events())
+    with main.connect() as db:
+        rows = db.execute(
+            "SELECT turn_id, is_continuation, stt_split, started_at_epoch_ms "
+            "FROM turn_metrics WHERE session_id = 'call-1' "
+            "ORDER BY started_at_epoch_ms").fetchall()
+        assert [r["is_continuation"] for r in rows] == [0, 1], (
+            "guard: this test needs a first half and a continuation"
+        )
+        assert sum(r["stt_split"] or 0 for r in rows) == 1, (
+            "guard: the split stage must have been recorded before it is moved"
+        )
+        # Push the continuation into the next hour, which is all that separates
+        # a straddling split from an ordinary one.
+        db.execute(
+            "UPDATE turn_metrics SET started_at_epoch_ms = started_at_epoch_ms + ? "
+            "WHERE session_id = 'call-1' AND is_continuation = 1",
+            (aggregate.ROLLUP_BUCKET_MS,))
+        db.execute("DELETE FROM interval_rollups")
+        db.execute("DELETE FROM rollup_dirty")
+        for row in db.execute(
+                "SELECT DISTINCT started_at_epoch_ms / ? * ? AS bucket_ms "
+                "FROM turn_metrics WHERE session_id = 'call-1'",
+                (aggregate.ROLLUP_BUCKET_MS, aggregate.ROLLUP_BUCKET_MS)):
+            for agent in (aggregate.ALL_AGENTS, ""):
+                db.execute("INSERT OR IGNORE INTO rollup_dirty (bucket_ms, agent_id) "
+                           "VALUES (?, ?)", (row["bucket_ms"], agent))
+        db.commit()
+        aggregate.refresh_rollups(db)
+        buckets = db.execute(
+            "SELECT COUNT(*) AS n, SUM(turns) AS turns, SUM(split_turns) AS splits, "
+            "SUM(stt_split_turns) AS stt_splits FROM interval_rollups "
+            "WHERE agent_id = ?", (aggregate.ALL_AGENTS,)).fetchone()
+
+    assert buckets["n"] == 2, "guard: the halves did not end up in separate hours"
+    assert buckets["turns"] == 1, (
+        "one committed message became two exchanges once an hour boundary fell "
+        "between its halves"
+    )
+    assert buckets["splits"] == 1
+    assert buckets["stt_splits"] == 1, (
+        "the doubled stage was either lost with the bucket it was not in or "
+        "counted once per bucket"
+    )
+
+
 def test_a_stage_panel_explains_why_it_measured_more_than_there_are_turns(client):
     """Excluding a split half from the STT percentiles would throw away a real
     recogniser latency measured on real audio - and it is systematically the

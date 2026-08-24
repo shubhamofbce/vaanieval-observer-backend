@@ -318,3 +318,61 @@ def test_an_ordinary_unanswered_turn_is_not_labelled_as_declined(api):
     heard = operation(event_id="stt-2", type_="stt", started_at_ms=100, turn_id="turn-1",
                       response={"transcript": "hello"})
     assert api.group_turns([heard])[0]["reply_skipped"] is None
+
+
+def test_a_crashed_turn_callback_is_not_reported_as_a_decision(api):
+    """An agent that *chose* not to answer and one whose callback raised look
+    identical in the numbers, and LiveKit swallows the exception either way.
+    One is a product decision, the other is an outage, so the reason has to
+    survive to the timeline rather than being flattened to "no reply"."""
+    heard = operation(event_id="stt-3", type_="stt", started_at_ms=100, turn_id="turn-1",
+                      response={"transcript": "is my card blocked",
+                                "reply_skipped": "callback_error"})
+    assert api.group_turns([heard])[0]["reply_skipped"] == "callback_error"
+
+
+def test_a_split_turn_carries_the_link_back_to_the_half_it_continues(api):
+    """Two turns, one message. The reader has to be able to tell.
+
+    The SDK splits a caller's utterance only when merging would drop words, and
+    it says so. If we drop that on the floor here, the dashboard shows two
+    ordinary turns -- one of which looks like a caller talking to an agent that
+    never answered -- and every per-turn average is computed over halves.
+    """
+    turns = api.group_turns([
+        operation(turn_id="turn-1", type="stt",
+                  response={"transcript": "Thanks."}),
+        operation(turn_id="turn-2", type="stt",
+                  response={"transcript": "That is all I needed.",
+                            "continues_turn": "turn-1",
+                            "split_reason": "earlier_words_already_published"}),
+    ])
+    by_id = {t["turn_id"]: t for t in turns}
+    assert by_id["turn-2"]["continues_turn"] == "turn-1"
+    # And an ordinary turn must not be labelled as anyone's continuation.
+    assert by_id["turn-1"].get("continues_turn") is None
+
+
+def test_a_crashed_turn_callback_is_an_incident_not_a_quiet_turn(api):
+    """LiveKit swallows the exception, so nothing else will ever say this failed.
+
+    No operation reports an error -- the agent simply never replied -- so the
+    turn renders green and the call stays `ready`. An agent whose turn callback
+    is throwing on every call is then indistinguishable, on this page, from one
+    having a quiet minute. The recorded reason is the only evidence there is.
+    """
+    crashed = api.group_turns([
+        operation(turn_id="turn-1", type="stt", status="ok",
+                  response={"transcript": "What is the fare?",
+                            "reply_skipped": "callback_error"}),
+    ])[0]
+    assert crashed["status"] == "error"
+
+    # A deliberate decline is the opposite case and must stay green: it needs no
+    # response, and treating it as an incident trains operators to ignore both.
+    declined = api.group_turns([
+        operation(turn_id="turn-2", type="stt", status="ok",
+                  response={"transcript": "Ignore me.",
+                            "reply_skipped": "stop_response"}),
+    ])[0]
+    assert declined["status"] == "ok"

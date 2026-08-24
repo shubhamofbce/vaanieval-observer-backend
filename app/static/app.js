@@ -3825,7 +3825,11 @@ function renderTurnTab(panel, turn, tab) {
 
   if (tab === 'timing' || tab === 'overview') {
     panel.append(definitions([
-      ['Turn', `#${turn.turn_id}`],
+      ['Turn', turn.continues_turn
+        // Reading this half's latency as a whole turn's is the mistake the
+        // label exists to prevent.
+        ? `#${turn.turn_id} — second half of #${turn.continues_turn}, which LiveKit committed as one message`
+        : `#${turn.turn_id}`],
       ['Status', turn.status],
       ['Starts at', offset(turn.started_at_ms)],
       ['Ends at', offset(turn.ended_at_ms)],
@@ -3833,7 +3837,9 @@ function renderTurnTab(panel, turn, tab) {
       ['Caller speech', duration(turn.user_speech_ms) || 'no stt span'],
       ['Model time', turn.llm_ms == null ? 'no model call' : `${duration(turn.llm_ms)} over ${turn.llm_calls} call(s)`],
       ['Audible speech out', turn.reply_skipped
-        ? 'none — the agent declined to answer'
+        ? (turn.reply_skipped === 'callback_error'
+          ? 'none — the agent\'s turn callback raised, so LiveKit never replied'
+          : 'none — the agent declined to answer')
         : (duration(turn.audible_tts_ms) || 'not captured')],
       ['TTS provider work', duration(turn.tts_ms) || 'no tts span'],
       ['Time to first audio', duration(turn.time_to_first_audio_ms) || 'not measurable'],
@@ -4852,7 +4858,11 @@ function buildAudioCard(session) {
         `starts ${offset(turn.started_at_ms)}`,
         reply != null ? `first audio back ${duration(reply)}${tone === 'danger' ? ' — audible lag' : tone === 'warn' ? ' — borderline' : ''}` : 'no first-audio mark',
         turn.user_speech_ms != null ? `caller spoke ${duration(turn.user_speech_ms)}` : null,
-        turn.reply_skipped ? 'reply skipped by the agent' : null,
+        turn.reply_skipped
+          ? (turn.reply_skipped === 'callback_error'
+            ? 'no reply — the agent\'s turn callback failed'
+            : 'reply skipped by the agent')
+          : null,
         spoken ? `“${spoken}”` : null,
         'click to seek and inspect',
       ].filter(Boolean));

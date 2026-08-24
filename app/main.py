@@ -1607,7 +1607,18 @@ def group_turns(
                 "started_at_ms": started,
                 "ended_at_ms": ended,
                 "duration_ms": max(0, ended - started),
-                "status": "error" if any(op.get("status") == "error" for op in ops) else ("cancelled" if any(op.get("status") == "cancelled" for op in ops) else "ok"),
+                # A crash in the agent's turn callback is an incident, not a
+                # quiet turn. LiveKit swallows the exception, so no operation
+                # ever reports an error and the turn would otherwise be green --
+                # the one place the failure is visible is the reason the SDK
+                # recorded, so it has to carry the status too.
+                "status": (
+                    "error" if (any(op.get("status") == "error" for op in ops)
+                                or (stt or {}).get("response", {}).get("reply_skipped")
+                                == "callback_error")
+                    else ("cancelled" if any(op.get("status") == "cancelled" for op in ops)
+                          else "ok")
+                ),
                 "user_speech_ms": (
                     (stt["presentation_window"]["to_ms"] - stt["presentation_window"]["from_ms"])
                     if stt and stt.get("presentation_window") else (stt.get("duration_ms") if stt else None)
@@ -1618,6 +1629,11 @@ def group_turns(
                 # from a TTS that never sounded -- the two need opposite
                 # responses, and only one of them is an incident.
                 "reply_skipped": (stt or {}).get("response", {}).get("reply_skipped"),
+                # The SDK tells us when it knowingly recorded two turns where
+                # LiveKit committed one. Averaging over the halves silently is
+                # what turns a defensible split into a wrong number, so the
+                # link back to the first half is carried through to the UI.
+                "continues_turn": (stt or {}).get("response", {}).get("continues_turn"),
                 "llm_ms": sum(op.get("duration_ms") or 0 for op in llm) or None,
                 "llm_calls": len(llm),
                 # Keep the provider span as the legacy operational metric. The

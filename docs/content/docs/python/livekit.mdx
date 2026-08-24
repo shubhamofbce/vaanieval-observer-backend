@@ -185,9 +185,43 @@ or not it is spoken. Those tokens are recorded against the turn whose audio
 caused them, so the dashboard shows an ignored turn with a real model bill and
 no speech out, labelled as declined rather than flagged as a silent failure.
 
+Any *other* exception from `on_user_turn_completed` is caught by LiveKit, logged
+and swallowed: the message is never committed and no reply is generated. That
+records as `reply_skipped: "callback_error"`, so an agent whose turn callback is
+failing is not mistaken for one that has gone mute — the two need opposite
+responses and the numbers alone cannot tell them apart.
+
 If the agent object cannot be wrapped (a frozen or slotted subclass), the SDK
 warns once and every committed turn is still recorded correctly — only the
 ignored-utterance case becomes unobservable.
+
+If you hand off to another agent mid-call with `AgentSession.update_agent()`,
+the SDK follows the handoff and instruments the replacement. Without that the
+replacement carries neither the audio tap nor the turn watch, and the rest of
+the call records no agent audio at all.
+
+### When one message is recorded as two turns
+
+A recogniser can deliver a single utterance as several finals, and LiveKit
+merges them into one user message. We normally merge them too. There is one
+case where we cannot: if something has already closed and published the span
+holding the earlier words — a filler `say()`, or a preemptive reply that was
+billed against the unfinished message — then merging would write into a
+published span and the caller's words would be lost silently.
+
+We keep the words and open a second turn instead. That turn carries
+`continues_turn` naming the first half, and `split_reason`. The dashboard
+labels it rather than showing two unrelated turns, because the first half
+otherwise reads as a caller talking to an agent that never answered, and
+per-turn averages would be computed over halves.
+
+<Callout type="info">
+A `say()` spoken while the caller's message is still open is treated as a
+filler, not as its answer, and is recorded as its own turn. Once LiveKit has
+ended that message a `say()` is the opposite case — the scripted answer of an
+agent that then raises `StopResponse` — and is recorded against the question it
+answers.
+</Callout>
 
 </Step>
 

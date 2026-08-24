@@ -1102,6 +1102,15 @@ def _stage_panels(distributions: dict[str, dict[str, Any]],
         # reads as 14% and invites a developer to distrust a metric that in fact
         # covers nearly all of its population.
         stage_turns = counters.get(f"{stage}_turns", 0)
+        # A split exchange is one turn carrying two recognised utterances, but
+        # only the stages that ran twice are affected: the first half of a split
+        # is unanswered by construction, so it has speech-to-text and nothing
+        # else. Applying the caveat to every stage told a reader that a language
+        # model panel showing "1 of 1" was somehow counting utterances. The
+        # caveat is therefore attached where -- and only where -- this stage
+        # really did measure more populations than there are turns, which is
+        # exactly when the two numbers on screen need reconciling.
+        stage_is_split = split_turns > 0 and stage_turns > eligible_turns
         panel_metrics = []
         for item in spec["metrics"]:
             dist = distributions.get(item["key"]) or distribution([], reason="stage_absent")
@@ -1116,9 +1125,9 @@ def _stage_panels(distributions: dict[str, dict[str, Any]],
                 "coverage": {"measured": dist["count"], "eligible": stage_turns,
                              "ratio": (dist["count"] / stage_turns) if stage_turns else None,
                              "turns_in_range": eligible_turns,
-                             "split_turns": split_turns,
+                             "split_turns": split_turns if stage_is_split else 0,
                              "population": (
-                                 f"turns that used {spec['label'].lower()}" if not split_turns
+                                 f"turns that used {spec['label'].lower()}" if not stage_is_split
                                  else f"recognised utterances that used {spec['label'].lower()}; "
                                       f"{split_turns:,} turn(s) in range carry more than one")},
                 "change": _delta(dist, previous.get(item["key"])),
@@ -1326,7 +1335,13 @@ def _exact(db: sqlite3.Connection, filters: Filters, bucket_ms: int,
             continue
         key = (at // bucket_ms) * bucket_ms
         bucket = buckets.setdefault(key, {"values": [], "turns": 0, "failures": 0, "lag": 0})
-        bucket["turns"] += 1
+        # The chart's turn count is a count of *exchanges*, the same thing the
+        # KPI above it counts, so a continuation must not add to it -- the two
+        # sit on one screen and disagreeing by one is the console contradicting
+        # itself. Its latency, failures and lag are still real measurements on
+        # real audio and stay in the bucket; only the denominator is logical.
+        if not row[_INDEX["is_continuation"]]:
+            bucket["turns"] += 1
         bucket["failures"] += sum(row[_INDEX[f"{stage}_failed"]] or 0 for stage in metrics.STAGES)
         response = row[response_index]
         if response is not None:

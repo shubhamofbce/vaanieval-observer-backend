@@ -732,6 +732,26 @@ def split_call_events() -> bytes:
     return jsonl(*marked)
 
 
+def unanswered_split_events() -> bytes:
+    """A split whose first half is unanswered, which is the only shape the SDK
+    actually produces: it sets `continues_turn` precisely when the turn it
+    carries never got a reply. So the first half has speech-to-text on it and
+    nothing else, and every later stage ran once, on the answer."""
+    events = []
+    for line in call_events(turns=2).decode().splitlines():
+        payload = json.loads(line)
+        if payload["turn_id"] == "turn-1" and payload["type"] != "stt":
+            continue
+        if payload["type"] == "stt" and payload["turn_id"] == "turn-2":
+            payload["response"] = {
+                **payload["response"],
+                "continues_turn": "turn-1",
+                "split_reason": "earlier_words_already_published",
+            }
+        events.append(payload)
+    return jsonl(*events)
+
+
 def test_a_split_turn_is_not_counted_twice_anywhere_in_the_summary(client):
     """One correction is worthless if the other three paths disagree with it.
 
@@ -774,22 +794,7 @@ def test_a_stage_panel_explains_why_it_measured_more_than_there_are_turns(client
     the panel states the population instead. What it must never do is show
     "2 measured" beside "1 turn in range" with nothing to reconcile them.
     """
-    events = []
-    for line in call_events(turns=2).decode().splitlines():
-        payload = json.loads(line)
-        # The first half of a split is unanswered by construction: the SDK only
-        # sets `continues_turn` when the carried turn never got a reply.
-        if payload["turn_id"] == "turn-1" and payload["type"] != "stt":
-            continue
-        if payload["type"] == "stt" and payload["turn_id"] == "turn-2":
-            payload["response"] = {
-                **payload["response"],
-                "continues_turn": "turn-1",
-                "split_reason": "earlier_words_already_published",
-            }
-        events.append(payload)
-    ingest(client, "call-1", jsonl(*events))
-
+    ingest(client, "call-1", unanswered_split_events())
     payload = summary(client)
     stt = payload["stages"]["stt"]["metrics"][0]["coverage"]
 
@@ -811,6 +816,58 @@ def test_a_call_with_no_split_does_not_carry_the_utterance_caveat(client):
 
     assert coverage["split_turns"] == 0
     assert "utterance" not in coverage["population"]
+
+
+def test_the_volume_chart_counts_the_same_turns_the_kpi_above_it_counts(client):
+    """A KPI and the chart beneath it are read as one statement.
+
+    Both the headline number and the volume bars claim to count turns, and they
+    are computed by different code over the same rows. When only the KPI learned
+    to exclude continuations, one screen said "1 turn" above a bar of height 2 --
+    the console disagreeing with itself, which is worse than either number being
+    wrong on its own, because it gives a reader no way to decide what to trust.
+    """
+    ingest(client, "call-1", unanswered_split_events())
+
+    payload = summary(client)
+    charted = sum(bucket["turns"] for bucket in payload["timeseries"])
+
+    assert payload["overview"]["calls"]["turns"] == 1
+    assert charted == 1, (
+        f"the KPI counts 1 exchange and the chart counts {charted}"
+    )
+    # The measurement itself is untouched: it is real recogniser latency on real
+    # audio, and dropping it to make two numbers agree would be the wrong fix.
+    assert payload["stages"]["stt"]["metrics"][0]["coverage"]["measured"] == 2
+
+
+def test_only_the_stage_that_ran_twice_carries_the_utterance_caveat(client):
+    """The caveat explains a specific contradiction, so it belongs only where
+    that contradiction exists.
+
+    A split's first half is unanswered by construction: it carries speech-to-text
+    and nothing else. The language model, speech synthesis and tools all ran once,
+    on the answer. Stamping the range-wide split count onto every panel produced
+    a language-model card reading "1 of 1" while announcing that it was counting
+    recognised utterances -- a caveat that was not true of that panel, attached to
+    numbers that needed no explaining.
+    """
+    ingest(client, "call-1", unanswered_split_events())
+
+    stages = summary(client)["stages"]
+
+    stt = stages["stt"]["metrics"][0]["coverage"]
+    assert stt["split_turns"] == 1 and "utterance" in stt["population"], (
+        "speech-to-text really did measure two utterances across one turn"
+    )
+    for stage in ("llm", "tts", "tool"):
+        coverage = stages[stage]["metrics"][0]["coverage"]
+        assert coverage["split_turns"] == 0, (
+            f"{stage} ran once; it has no split to disclose"
+        )
+        assert "utterance" not in coverage["population"], (
+            f"{stage} population reads as utterances: {coverage['population']!r}"
+        )
 
 
 def test_a_split_turn_does_not_push_a_range_over_the_exact_limit(client, monkeypatch):

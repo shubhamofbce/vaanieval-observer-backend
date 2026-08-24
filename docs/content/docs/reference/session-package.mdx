@@ -197,22 +197,66 @@ On an STT span:
 | Field | Meaning |
 | --- | --- |
 | `response.final_segments` | Finals the provider issued for this one committed message |
-| `response.provider_metered_audio_ms` | The recogniser's **connection** meter, not this turn's speech |
+| `response.provider_metered_audio_ms` | Exactly what the recogniser reported it will bill for this turn. **What that number measures depends on the provider** — see below |
 | `response.input_tokens` / `response.output_tokens` | Recogniser token usage, when the provider reports it (OpenAI does; Deepgram does not) |
-| `response.metered_after_final` | The provider metered this turn *after* its transcript was final. The usage is still attributed to the turn that earned it rather than to whoever spoke next |
-| `response.metered_after_final_ms` | How much of the published meter arrived after the caller stopped talking, so you can subtract it |
-| `response.metering_scope` | What the meter is a measurement *of*: `utterance` (all of it was reported while the caller was still speaking, so it is comparable to the recorded audio), `connection` (all of it arrived afterwards, so none of it is a measurement of this turn's speech), or `mixed`. Deepgram flushes every five seconds off frames streamed, silence included, so it commonly reports `connection`; OpenAI meters per utterance. The amount itself is never adjusted — it is still what the provider will invoice |
+| `response.metered_after_final` | Some of the meter arrived *after* this turn's transcript was final. The usage is still attributed to the turn that earned it rather than to whoever spoke next |
+| `response.metered_after_final_ms` | How much of the published meter arrived after the caller stopped talking |
+| `response.metered_arrival` | *When* the meter arrived, relative to the final transcript: `before_final`, `after_final` or `straddles_final`. An observation about timing only |
+| `response.metering_scope` | Always `unknown`. See below — the SDK will not guess what the meter measures |
+| `response.metering_scope_note` | The caveat, carried on the payload itself so it travels with the number into whatever reads it |
 | `response.continues_turn` | Present only when we knowingly recorded two turns where LiveKit committed one message; names the turn this one continues, with `split_reason` saying why they could not be merged. The call rollup counts such a pair once and reports `split_turn_count`, so `turn_count` keeps agreeing with LiveKit's own history |
 | `response.reply_includes_filler` | The reply's audio includes a `say()` filler spoken before the generated answer; `filler_audio_ms` gives the filler's share so the answer's own duration stays recoverable |
 | `response.filler_audio_ms_unknown` | The filler ran but its meter had not reported when the answer began. LiveKit emits `speech_created` for a `say()` before scheduling its TTS, so this is an ordinary race — the filler is declared, only its duration is missing |
+| `response.reply_attribution` | Present, and always `"inferred"`, when this reply was kept in a turn of its own on evidence that could not settle the question. See below |
+| `response.reply_attribution_reason` | Plain-English statement of what could not be distinguished, so you can judge the call rather than take our word for it |
 | `response.reply_skipped` | Present when no reply is coming: `"stop_response"` (the agent ignored the utterance) or `"callback_error"` (its turn callback raised and LiveKit swallowed it) |
 
-`provider_metered_audio_ms` is the number the recogniser will bill, summed over
-every increment it reported while this turn was open. It is
-reported on a fixed timer covering everything streamed to the socket, including
-silence between turns, so a tick lands on whichever turn happens to be open and
-can exceed the span that carries it. For how long the caller actually spoke, use
-`presentation_window` or the turn's `user_speech_ms`.
+### What `provider_metered_audio_ms` measures
+It is the number the recogniser will bill, summed over every increment it
+reported while this turn was open. **It is not the caller's speech duration**,
+and how far from it you are depends on which recogniser you run:
+
+- **OpenAI** emits the item's final transcript and then that item's usage,
+  computed from the item's own start and end. That is a per-utterance meter —
+  and it arrives *after* the final.
+- **Deepgram** pushes every frame streamed to the socket into a five-second
+  collector and emits each tick. That is a connection meter, silence included,
+  and a tick routinely lands *before* the final while the caller is still
+  speaking. It also lands on whichever turn happens to be open, so it can
+  exceed the span that carries it.
+
+Those two cases are timed in opposite ways to what you would guess, so an
+earlier version of this SDK — which classified the meter as `utterance` or
+`connection` from its arrival time — was confidently wrong for both. It no
+longer guesses. `metered_arrival` reports the timing, which is observable;
+`metering_scope` reports `unknown`, because the metering rule belongs to the
+provider and is not in the payload.
+
+To interpret cost per turn, apply your provider's own billing definition. For
+how long the caller actually spoke, use `presentation_window` or the turn's
+`user_speech_ms` — those are measured from the audio.
+
+### When `reply_attribution` is `inferred`
+
+If your agent speaks a filler from inside `on_user_turn_completed` — "let me
+check that for you" before a slow lookup — and a partial transcript arrives
+while that filler is playing, there are two readings and LiveKit does not let
+us tell them apart:
+
+1. The partial is an ordinary interim, and the reply that follows is the answer
+   to the caller whose filler is playing.
+2. The partial is a *preflight* transcript from a second speaker, which starts a
+   preemptive generation, and the reply that follows is **their** answer.
+
+Both surface as the same `user_input_transcribed(is_final=False)` event, and
+preemptive generation is on by default, so both really happen. The recorder
+keeps the reply in a turn of its own, because merging two exchanges would make a
+caller's words appear answered before they were spoken. It then sets
+`reply_attribution: "inferred"` on that span.
+
+Treat a turn carrying this flag as unreliable for response latency specifically.
+Everything else on it — audio, durations, token counts — is measured, not
+inferred.
 
 `reply_skipped` separates a turn the agent chose not to answer from one whose
 reply failed to sound. Both look identical in the numbers — a transcript, no TTS

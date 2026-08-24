@@ -197,9 +197,9 @@ On an STT span:
 | Field | Meaning |
 | --- | --- |
 | `response.final_segments` | Finals the provider issued for this one committed message |
-| `response.provider_metered_audio_ms` | Exactly what the recogniser reported it will bill for this turn. **What that number measures depends on the provider** — see below |
+| `response.provider_metered_audio_ms` | The recogniser usage that arrived while this turn was open. **This is placement, not invoice attribution** — for a connection-metering provider it is an arbitrary slice of a session-wide meter. See below |
 | `response.input_tokens` / `response.output_tokens` | Recogniser token usage, when the provider reports it (OpenAI does; Deepgram does not) |
-| `response.metered_after_final` | Some of the meter arrived *after* this turn's transcript was final. The usage is still attributed to the turn that earned it rather than to whoever spoke next |
+| `response.metered_after_final` | Some of the meter arrived *after* this turn's transcript was final. It stays on this turn rather than moving to whoever spoke next, which is a placement rule, not a claim that this turn incurred it |
 | `response.metered_after_final_ms` | How much of the published meter arrived after the caller stopped talking |
 | `response.metered_arrival` | *When* the meter arrived, relative to the final transcript: `before_final`, `after_final` or `straddles_final`. An observation about timing only |
 | `response.metering_scope` | Always `unknown`. See below — the SDK will not guess what the meter measures |
@@ -232,9 +232,17 @@ longer guesses. `metered_arrival` reports the timing, which is observable;
 `metering_scope` reports `unknown`, because the metering rule belongs to the
 provider and is not in the payload.
 
-To interpret cost per turn, apply your provider's own billing definition. For
-how long the caller actually spoke, use `presentation_window` or the turn's
-`user_speech_ms` — those are measured from the audio.
+**Do not derive per-turn cost from this field.** For a connection-metering
+provider such as Deepgram, the increments carry no turn identity at all: the SDK
+can tell you what a *call* was metered, and which turn happened to be open when
+each increment landed, but not which turn incurred it. Summing the field across
+a call is sound; dividing it by turn is false precision. For an
+utterance-metering provider the per-turn reading is meaningful — but the payload
+cannot tell you which kind you have, which is exactly what `metering_scope:
+"unknown"` is saying.
+
+For how long the caller actually spoke, use `presentation_window` or the turn's
+`user_speech_ms` — those are measured from the audio and carry no such caveat.
 
 ### When `reply_attribution` is `inferred`
 
@@ -252,7 +260,14 @@ Both surface as the same `user_input_transcribed(is_final=False)` event, and
 preemptive generation is on by default, so both really happen. The recorder
 keeps the reply in a turn of its own, because merging two exchanges would make a
 caller's words appear answered before they were spoken. It then sets
-`reply_attribution: "inferred"` on that span.
+`reply_attribution: "inferred"` on that turn's spans — including the LLM span,
+so an interrupted reply that reported tokens still carries the caveat.
+
+The *events* cannot separate the two cases, but the speech handle can: a
+preemptive generation stays unscheduled until LiveKit validates its prediction,
+while an ordinary reply is marked scheduled immediately. Reading that requires
+deferring the binding by one event-loop iteration, which is planned work — so
+today this is disclosed rather than resolved.
 
 Treat a turn carrying this flag as unreliable for response latency specifically.
 Everything else on it — audio, durations, token counts — is measured, not

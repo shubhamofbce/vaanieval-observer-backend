@@ -1109,6 +1109,14 @@ function captureWarnings(session) {
   return warnings;
 }
 
+// One LiveKit message can be committed as two turn rows. Both rows are kept and
+// listed, because the inspector needs them, but they are one exchange -- and the
+// session list already counts them that way, so counting rows here made opening
+// a call silently change its turn count from 1 to 2.
+function exchangeCount(turns) {
+  return turns.filter((turn) => !turn.continues_turn).length;
+}
+
 function renderCall(session) {
   const manifest = session.manifest || {};
   const turns = session.turns || [];
@@ -1185,7 +1193,12 @@ function renderCall(session) {
   const p50 = responses.length ? percentile(responses, 0.5) : null;
   const p95 = responses.length ? percentile(responses, 0.95) : null;
   const strip = h('div', { class: 'metric-strip' },
-    metric('Turns', String(turns.length), turns.length ? `${operations.length} operations` : 'no turn spans captured'),
+    metric('Turns', String(exchangeCount(turns)),
+      turns.length
+        ? `${operations.length} operations${turns.length !== exchangeCount(turns)
+            ? ` · ${turns.length} turn rows, ${turns.length - exchangeCount(turns)} continuing another`
+            : ''}`
+        : 'no turn spans captured'),
     metric('Length', duration(manifest.duration_ms) || '—', `${session.recordings?.filter((r) => r.uploaded).length || 0} audio track(s)`),
     metric('Typical wait', p50 != null ? duration(p50) : '—',
       responses.length ? `median (p50) caller stops → first audio, thresholds ${duration(WARN_MS)} / ${duration(SLOW_MS)}` : 'needs turns with a first-audio mark',
@@ -2234,7 +2247,7 @@ function buildLiveTraceCard(session) {
     const replies = turns.map((turn) => turn.time_to_first_audio_ms).filter((value) => value != null);
     const worst = replies.length ? Math.max(...replies) : 0;
     clear(scale).append(
-      h('span', { class: 'num', text: `${turns.length} turn${turns.length === 1 ? '' : 's'}` }),
+      h('span', { class: 'num', text: `${exchangeCount(turns)} turn${exchangeCount(turns) === 1 ? '' : 's'}` }),
       h('span', { class: 'live-scale-mid', dataset: { tone: worst ? latencyTone(worst) : 'none' },
         text: worst ? 'reply time per turn' : 'no first-audio marks' }),
       h('span', { class: 'num', text: worst ? duration(worst) : '—' }),

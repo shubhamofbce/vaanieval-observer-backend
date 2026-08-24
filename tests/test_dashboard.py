@@ -950,3 +950,29 @@ def test_an_existing_database_gains_the_split_columns_instead_of_crashing(client
     # And the upgraded database still answers, rather than merely not throwing.
     ingest(client, "call-1", split_call_events())
     assert summary(client)["overview"]["calls"]["turns"] == 1
+
+
+def test_opening_a_call_does_not_change_the_turn_count_the_list_showed(client):
+    """The two screens must not disagree about the same call.
+
+    One LiveKit message committed as two turn rows is one exchange, and the
+    session list counts it that way. The call view builds its headline from the
+    detail payload, so that payload has to keep saying which rows continue
+    another -- otherwise the only honest count available to the UI is the row
+    count, and opening a one-turn call silently shows two.
+    """
+    ingest(client, "call-1", split_call_events())
+
+    rail = next(row for row in client.get("/v1/sessions").json()
+                if row["id"] == "call-1")
+    turns = client.get("/v1/sessions/call-1").json()["turns"]
+
+    assert len(turns) == 2, "both physical rows stay, because the inspector needs them"
+    continuations = [t for t in turns if t.get("continues_turn")]
+    assert len(continuations) == 1, (
+        "the detail payload must mark the continuing row; app.js counts "
+        "exchanges with exactly this field"
+    )
+    assert len(turns) - len(continuations) == rail["turn_count"], (
+        "the count the call view derives has to match the one the list showed"
+    )

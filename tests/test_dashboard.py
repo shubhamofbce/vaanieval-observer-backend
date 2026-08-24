@@ -312,6 +312,46 @@ def test_audit_reports_no_drift_for_freshly_ingested_calls(client):
     assert report["consistent"] is True, report["mismatches"]
 
 
+def test_an_upgrade_stops_an_orphan_continuation_subtracting_a_turn_it_has(client):
+    """The stored bit was a claim, not a checked fact.
+
+    The previous release backfilled `operations.is_continuation` from whether
+    the SDK said a turn continues another one, without asking whether that other
+    one is here. A call whose first half was lost arrives with a continuation
+    and nothing to fold into, and the bit then subtracted an exchange that was
+    never counted -- so the session rail showed no turns while every aggregate
+    showed one. Ingest re-decides this now, but rows written before that keep
+    the old answer and the rail reads them directly, so the upgrade has to
+    revisit them.
+    """
+    orphan = [event for event in
+              (json.loads(line) for line in
+               unanswered_split_events().decode().splitlines())
+              if event.get("turn_id") == "turn-2"]
+    ingest(client, "call-1", jsonl(*orphan))
+
+    # The state the previous release leaves behind: `user_version` says its
+    # unconditional backfill ran, so nothing would revisit the row.
+    with main.connect() as db:
+        db.execute("UPDATE operations SET is_continuation = 1")
+        db.execute("PRAGMA user_version = 2")
+        db.commit()
+
+    main.initialize()
+
+    rail = next(row for row in client.get("/v1/sessions").json()
+                if row["id"] == "call-1")["turn_count"]
+    assert rail == 1, (
+        "an exchange with no first half in the package is the only exchange "
+        "there is, and the rail must count it"
+    )
+    with main.connect() as db:
+        assert db.execute(
+            "SELECT is_continuation FROM operations").fetchone()[0] == 0, (
+            "the derived bit still claims a parent the call does not contain"
+        )
+
+
 def test_an_upgrade_rebuilds_split_facts_instead_of_calling_them_tampered(
         client, api):
     """A migrated column starts at its default, which for a stored split is wrong.
@@ -880,6 +920,24 @@ def test_a_split_straddling_an_hour_is_still_one_exchange_measured_twice(client)
     assert buckets["stt_splits"] == 1, (
         "the doubled stage was either lost with the bucket it was not in or "
         "counted once per bucket"
+    )
+
+    with main.connect() as db:
+        per_bucket = db.execute(
+            "SELECT turns, split_turns, stt_split_turns FROM interval_rollups "
+            "WHERE agent_id = ? ORDER BY bucket_ms", (aggregate.ALL_AGENTS,)
+        ).fetchall()
+
+    # An exchange belongs to the hour it started in, the same rule a call
+    # spanning an hour already follows. The second hour still charts the
+    # recogniser latency measured in it -- that is when the audio happened --
+    # but it must not claim an exchange it is not counting.
+    assert (per_bucket[0]["turns"], per_bucket[0]["split_turns"],
+            per_bucket[0]["stt_split_turns"]) == (1, 1, 1)
+    assert (per_bucket[1]["turns"], per_bucket[1]["split_turns"],
+            per_bucket[1]["stt_split_turns"]) == (0, 0, 0), (
+        "an hour holding only the second half reported no exchanges while also "
+        "reporting that one of them carried more than one utterance"
     )
 
 

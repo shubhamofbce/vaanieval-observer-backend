@@ -339,6 +339,10 @@ def turn_metrics(turn: dict[str, Any], call_started_epoch_ms: int | None) -> dic
         # and invisible in every number derived from the page.
         "continues_turn": turn.get("continues_turn"),
         "is_continuation": 1 if turn.get("continues_turn") else 0,
+        # Both are re-decided by `resolve_split_columns` once the sibling rows
+        # are in hand; seeded here so the row has every column it is inserted
+        # with even if a caller skips that step.
+        "has_continuation": 0,
         "started_at_ms": started_at_ms,
         "started_at_epoch_ms": (call_started_epoch_ms + started_at_ms) if call_started_epoch_ms is not None else None,
         "duration_ms": turn.get("duration_ms"),
@@ -457,18 +461,28 @@ def resolve_split_columns(rows: Sequence[dict[str, Any]]) -> Sequence[dict[str, 
     """
     by_id = {str(row["turn_id"]): row for row in rows if row.get("turn_id")}
     for row in rows:
-        parent = (by_id.get(str(row["continues_turn"]))
-                  if folds_into_present_parent(row.get("continues_turn"), by_id) else None)
-        row["is_continuation"] = int(parent is not None)
+        row["is_continuation"] = 0
+        row["has_continuation"] = 0
+        for stage in STAGES:
+            row[f"{stage}_split"] = 0
+    for row in rows:
+        if not folds_into_present_parent(row.get("continues_turn"), by_id):
+            continue
+        parent = by_id[str(row["continues_turn"])]
+        row["is_continuation"] = 1
+        # The split is recorded against the half the exchange started on, so
+        # that a range holding only the other half cannot report an exchange it
+        # is not also counting. Calls already follow this rule when they span an
+        # hour; an exchange split across one is the same shape of problem.
+        parent["has_continuation"] = 1
         # A stage inflates its own denominator only if it ran on both halves.
         # The first half of a split is usually speech-to-text and nothing else,
         # but it can carry a filler reply, so which stages doubled is a fact
         # about these two rows rather than something to assume.
         for stage in STAGES:
-            row[f"{stage}_split"] = int(
-                parent is not None
-                and (row.get(f"{stage}_ops") or 0) > 0
-                and (parent.get(f"{stage}_ops") or 0) > 0)
+            if ((row.get(f"{stage}_ops") or 0) > 0
+                    and (parent.get(f"{stage}_ops") or 0) > 0):
+                parent[f"{stage}_split"] = 1
     return rows
 
 

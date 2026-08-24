@@ -92,12 +92,18 @@ CREATE TABLE IF NOT EXISTS turn_metrics (
   -- record as two turns. It stays a row, because it carries real measurements
   -- of real audio, but it must not be counted as a second exchange.
   is_continuation INTEGER NOT NULL DEFAULT 0,
-  -- Set per stage when this row AND the half it continues both ran that stage,
-  -- so the stage really is measured twice for one exchange. Only stages that
-  -- ran on both halves inflate their own denominator, and which ones those are
+  -- Set on the *first* half instead, because "this exchange was split" is a
+  -- fact about the exchange, and an exchange belongs to the bucket it started
+  -- in -- the same rule calls already follow when they span an hour. Kept on
+  -- the continuation, an hour holding only the second half reported zero
+  -- exchanges while also reporting one of them was split.
+  has_continuation INTEGER NOT NULL DEFAULT 0,
+  -- Set per stage on that same first half when both halves ran that stage, so
+  -- the stage really is measured twice for one exchange. Only stages that ran
+  -- on both halves inflate their own denominator, and which ones those are
   -- cannot be recovered from range totals: a range can hold as many stage rows
-  -- as exchanges and still be double counting one of them. Decided here, where
-  -- both halves are in hand.
+  -- as exchanges and still be double counting one of them. Decided at ingest,
+  -- where both halves are in hand.
   stt_split INTEGER NOT NULL DEFAULT 0,
   llm_split INTEGER NOT NULL DEFAULT 0,
   tts_split INTEGER NOT NULL DEFAULT 0,
@@ -241,7 +247,7 @@ TURN_COLUMNS = (
     "tts_first_audio_ms", "tts_synthesis_ms", "tool_count", "tool_total_ms",
     "stt_ops", "llm_ops", "tts_ops", "tool_ops",
     "stt_failed", "llm_failed", "tts_failed", "tool_failed", "tts_interrupted",
-    "stt_missing_final", "stt_forced_flush", "is_continuation",
+    "stt_missing_final", "stt_forced_flush", "is_continuation", "has_continuation",
     "stt_split", "llm_split", "tts_split", "tool_split",
     "stt_provider", "stt_model", "llm_provider", "llm_model", "tts_provider", "tts_model",
 )
@@ -297,6 +303,7 @@ ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # and the very next rebuild - which the METRICS_VERSION bump forces on
     # every upgrade - dies on "no such column" with the console already live.
     ("turn_metrics", "is_continuation", "INTEGER NOT NULL DEFAULT 0"),
+    ("turn_metrics", "has_continuation", "INTEGER NOT NULL DEFAULT 0"),
     ("interval_rollups", "split_turns", "INTEGER NOT NULL DEFAULT 0"),
     # Added when the split caveat stopped being inferred from range totals. The
     # inference was wrong at the boundary where a stage ran on both halves of a
@@ -737,7 +744,7 @@ def _rebuild_bucket(db: sqlite3.Connection, bucket_ms: int, agent_id: str) -> No
     rows = db.execute(
         f"SELECT {', '.join(SKETCH_METRICS)}, session_id, stt_ops, llm_ops, tts_ops, tool_ops, "
         "stt_failed, llm_failed, tts_failed, tool_failed, tts_interrupted, "
-        "stt_missing_final, stt_forced_flush, is_continuation, "
+        "stt_missing_final, stt_forced_flush, is_continuation, has_continuation, "
         "stt_split, llm_split, tts_split, tool_split "
         f"FROM turn_metrics WHERE started_at_epoch_ms >= ? AND started_at_epoch_ms < ? AND session_id IN ({scope})",
         [bucket_ms, end_ms] + scope_params,
@@ -756,11 +763,12 @@ def _rebuild_bucket(db: sqlite3.Connection, bucket_ms: int, agent_id: str) -> No
     sessions: set[str] = set()
 
     for row in rows:
-        # Counted for its measurements, but not as a second exchange.
-        if row["is_continuation"]:
-            counters["split_turns"] += 1
-        else:
+        # A continuation is counted for its measurements, but not as a second
+        # exchange; the exchange itself is counted where it started.
+        if not row["is_continuation"]:
             counters["turns"] += 1
+        if row["has_continuation"]:
+            counters["split_turns"] += 1
         sessions.add(row["session_id"])
         for metric in SKETCH_METRICS:
             if row[metric] is not None:
@@ -991,7 +999,7 @@ _EXACT_COLUMNS = (
     "stt_ops", "llm_ops", "tts_ops", "tool_ops",
     "stt_failed", "llm_failed", "tts_failed", "tool_failed",
     "tts_interrupted", "stt_missing_final", "stt_forced_flush", "is_continuation",
-    "stt_split", "llm_split", "tts_split", "tool_split",
+    "has_continuation", "stt_split", "llm_split", "tts_split", "tool_split",
 )
 _INDEX = {name: position for position, name in enumerate(_EXACT_COLUMNS)}
 
@@ -1367,7 +1375,7 @@ def _exact(db: sqlite3.Connection, filters: Filters, bucket_ms: int,
         # A split exchange is one turn carrying two recognised utterances, so
         # the stage denominators above legitimately exceed the turn count. The
         # difference is published rather than left to read as "2 of 1 turns".
-        if row[_INDEX["is_continuation"]]:
+        if row[_INDEX["has_continuation"]]:
             counters["split_turns"] += 1
         for stage in metrics.STAGES:
             if row[_INDEX[f"{stage}_failed"]]:

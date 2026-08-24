@@ -253,24 +253,28 @@ caller whose filler is playing, or the answer to whoever just started speaking
 over it. The `user_input_transcribed(is_final=False)` event is the same either
 way, so the events alone cannot separate them.
 
-The speech handle and the `speech_created` event can, for three of the four
-ways LiveKit creates a reply:
+The speech handle and the `speech_created` event settle three of the five ways
+LiveKit creates a reply. The other two emit an event identical in every field to
+the automatic answer, so they are settled by what the recorder *observed*
+instead:
 
 | How the reply was created | What it answers | Recorded as |
 | --- | --- | --- |
-| The automatic answer to a completed user turn — scheduled at once, `user_initiated`, audio input details | The turn that just finished | Merged into that turn, no flag |
+| The automatic answer to a completed user turn — scheduled at once, `user_initiated` | The turn that just finished | Merged into that turn, no flag |
 | A **preemptive** generation, started from a predicted end of speech — stays unscheduled until LiveKit validates the prediction | The caller now speaking | Its own turn, no flag |
-| A **realtime** model generating server-side while it transcribes — scheduled at once but not `user_initiated` | The speech being transcribed now, whose final transcript may arrive *after* the reply | Its own turn, joined by that transcript, no flag |
-| `AgentSession.generate_reply()` called by your own code | Unknowable | Its own turn, `reply_attribution: "inferred"` |
+| A **realtime** model generating server-side while it transcribes — scheduled at once but not `user_initiated`, with no tool result outstanding | The speech being transcribed now, whose final transcript may arrive *after* the reply | Its own turn, joined by that transcript, no flag |
+| The automatic reply after a tool result — also not `user_initiated`, but the current turn has a `function_tools_executed` result still unanswered | The turn that called the tool | Merged into that turn, `reply_attribution: "inferred"` |
+| `AgentSession.generate_reply()` called by your own code — recognised because the call is still on the stack when the event fires | Unknowable | Its own turn, `reply_attribution: "inferred"` |
 
-The last row is the only one that stays a guess. It is scheduled and
-`user_initiated` exactly like the automatic answer, and differs only in that its
-input modality defaults to `"text"` — and your application may call it to answer
-the caller or to say something unrelated. The recorder keeps such a reply in a
-turn of its own, because merging two exchanges would make a caller's words
-appear answered before they were spoken, and then says so. The flag is set on
-every span of that turn, including the LLM span, so an interrupted reply that
-reported tokens still carries the caveat.
+The last two rows stay judgements. Your own `generate_reply()` is scheduled and
+`user_initiated` exactly like the automatic answer — passing
+`input_modality="audio"` makes it identical — and your application may call it to
+answer the caller or to say something unrelated, so the reply is kept in a turn
+of its own. The post-tool reply is placed on the turn that ran the tool, which is
+where it almost always belongs, but a caller talking over the tool call could
+have prompted it instead. Either way the flag is set on every span of that turn,
+including the LLM span, so an interrupted reply that reported tokens still
+carries the caveat.
 
 If you are running a build of `livekit-agents` that does not expose these
 signals, no reply is merged and the flag is set — the recorder never guesses

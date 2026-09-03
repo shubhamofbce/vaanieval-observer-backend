@@ -1,4 +1,45 @@
-# vaanieval-observer-backend
+# Vaani Observer Dashboard
+
+> Local-first observability and STT evaluation for production voice agents.
+
+Vaani Observer captures what happened during a live voice call, then gives your
+team a post-call workspace to inspect audio, transcripts, provider spans, turn
+timing, and estimated speech-to-text disagreement. The live media path never
+waits for this service: SDKs write a portable session package locally and upload
+only after the call finishes.
+
+![Vaani Observer call workspace](docs/images/console.png)
+
+## Why Vaani Observer
+
+When a voice conversation feels slow or inaccurate, application logs are rarely
+enough to explain why. Vaani Observer puts the audio timeline, streamed STT,
+LLM, TTS, tool calls, transcript, and call-level latency measures in one review
+surface. It helps answer:
+
+- Where did a production transcript disagree with a challenger model, and is it
+  worth listening to the audio?
+- Did STT detect and finalise caller turns quickly enough for a natural live
+  conversation?
+- Which provider, model, operation, or turn was responsible for a slow or
+  failed response?
+
+![STT evaluation workspace](docs/images/evaluation.png)
+
+## Architecture at a glance
+
+```text
+Voice agent
+  │  Vaani Observer SDK (Node.js or Python)
+  │  writes after capture, never on the live network path
+  ▼
+Portable session package
+  manifest.json · events.jsonl · call.audio
+  │
+  ▼
+This dashboard
+  ingest · SQLite/local objects · review console · STT evaluation
+```
 
 FastAPI ingestion service, browser console and **STT evaluation engine** for the
 Vaani Observer voice-call observability platform.
